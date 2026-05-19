@@ -86,7 +86,7 @@ void BTDrawingAreaWidget::exposeEvent()
 
   if(first_time_) {
     xgcvalues.foreground = BlackPixelOfScreen(XtScreen(me_));
-    gc_ = XCreateGC(XtDisplay(me_), XtWindow(parent_->getWidget()), GCForeground,&xgcvalues);
+    gc_ = XCreateGC(XtDisplay(me_), XtWindow(me_), GCForeground, &xgcvalues);
     first_time_ = False;
   }
 
@@ -108,6 +108,8 @@ void BTDrawingAreaWidget::exposeEvent()
 
   if ( expose_struct_ )
     (*expose_struct_->cb_)(this, expose_struct_->data_);
+
+  XFlush(XtDisplay(me_));
 }
 
 BTDrawingAreaWidget::~BTDrawingAreaWidget()
