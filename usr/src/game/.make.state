@@ -1,0 +1,52 @@
+.MAKE_VERSION:	VERSION-1.0
+../../include/BTDebug.H:
+	/bin/sh ../../bin/install-sh -c -m 0444 BTDebug.H ../../include/BTDebug.H
+BTArsenal.H:
+	sccs  get -s BTArsenal.H -GBTArsenal.H
+BTConstants.H:
+	sccs  get -s BTConstants.H -GBTConstants.H
+BattleTris.H:
+	sccs  get -s BattleTris.H -GBattleTris.H
+../../include/BattleTris.H:
+	/bin/sh ../../bin/install-sh -c -m 0444 BattleTris.H ../../include/BattleTris.H
+BTBoard.H:
+	sccs  get -s BTBoard.H -GBTBoard.H
+BTWeapon.H:
+	sccs  get -s BTWeapon.H -GBTWeapon.H
+BTDebug.H:
+	sccs  get -s BTDebug.H -GBTDebug.H
+clean:
+	rm -rf BattleTris BTCBoard.o BTStack.o BTBox.o BTRingNode.o  BTPiece.o BTPieceManager.o BTArsenal.o BTBoard.o BTScore.o  BTBoardManager.o BTSoundManager.o BTScoreManager.o BTBiff.o  BTStartup.o BTCommManager.o BTWeaponManager.o BTRecon.o BTGame.o  BTChallenge.o BTChallengeDialog.o BTAbout.o BTNetManager.o  BTRoster.o BTBazaar.o BTPimp.o BTComputer.o PPMReader.o BattleTris.o  BTFallbacks.o core Templates.DB
+../../include/BTDirs.H:
+	/bin/sh ../../bin/install-sh -c -m 0444 BTDirs.H ../../include/BTDirs.H
+BTCBoard.o:	BTWeaponManager.H ../../include/BTConfig.H /usr/include/sys/types.h /usr/include/sys/isa_defs.h /usr/include/sys/feature_tests.h /usr/include/sys/machtypes.h /usr/include/sys/int_types.h /usr/include/sys/select.h /usr/include/sys/time.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/std/time.h /usr/include/time.h /usr/include/iso/time_iso.h /usr/include/sys/time_impl.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/std/string.h
+BTCBoard.o:	/usr/include/string.h /usr/include/iso/string_iso.h BTRingNode.H BTProtocol.H BTWeapon.H BTLine.H BTArsenal.H BTConstants.H BTCBoard.H BTPiece.H BTBoardManager.H /usr/include/unistd.h /usr/include/sys/unistd.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/std/stdlib.h /usr/include/stdlib.h /usr/include/iso/stdlib_iso.h BTBoard.H /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/iostream.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/stdcomp.h
+BTCBoard.o:	/net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/compnent.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/istream /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/ios /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/rw/rwstderr.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/rw/stddefs.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/std/stddef.h
+BTCBoard.o:	/usr/include/stddef.h /usr/include/iso/stddef_iso.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/std/stdarg.h /usr/include/stdarg.h /usr/include/iso/stdarg_iso.h /usr/include/sys/va_list.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/rw/rwstderr_macros.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/rw/rwlocale /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/string /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/std/ctype.h
+BTCBoard.o:	/usr/include/ctype.h /usr/include/iso/ctype_iso.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/std/wchar.h /usr/include/wchar.h /usr/include/iso/wchar_iso.h /usr/include/stdio_tag.h /usr/include/wchar_impl.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/std/wctype.h /usr/include/wctype.h /usr/include/iso/wctype_iso.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/rw/string_ref /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/memory
+BTCBoard.o:	/usr/include/limits.h /usr/include/iso/limits_iso.h /usr/include/sys/int_limits.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/new /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/exception /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/rw/iterator /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/utility /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/rw/stdmutex.h
+BTCBoard.o:	/usr/include/synch.h /usr/include/sys/machlock.h /usr/include/sys/synch.h /usr/include/thread.h /usr/include/sys/signal.h /usr/include/sys/iso/signal_iso.h /usr/include/sys/siginfo.h /usr/include/sys/machsig.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/rw/traits /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/std/stdio.h /usr/include/stdio.h /usr/include/iso/stdio_iso.h /usr/include/stdio_impl.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/rw/iotraits
+BTCBoard.o:	/net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/iosfwd /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/stdexcept /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/typeinfo /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/rw/locimpl /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/rw/locvector /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/rw/vendor
+BTCBoard.o:	/net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/rw/ctype /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/rw/numeral /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/rw/iosbase /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/limits /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/rw/math.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/std/math.h
+BTCBoard.o:	/usr/include/math.h /usr/include/iso/math_iso.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/std/float.h /usr/include/float.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/rw/codecvt /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/rw/usefacet /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/ostream /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/Cstd/streambuf
+BTCBoard.o:	BTDebug.H 
+BTRingNode.H:
+	sccs  get -s BTRingNode.H -GBTRingNode.H
+BTLine.H:
+	sccs  get -s BTLine.H -GBTLine.H
+BTCBoard.H:
+	sccs  get -s BTCBoard.H -GBTCBoard.H
+BTCBoard.C:
+	sccs  get -s BTCBoard.C -GBTCBoard.C
+BTDirs.H:
+	sccs  get -s BTDirs.H -GBTDirs.H
+BTBoardManager.H:
+	sccs  get -s BTBoardManager.H -GBTBoardManager.H
+BTWeaponManager.H:
+	sccs  get -s BTWeaponManager.H -GBTWeaponManager.H
+BTPiece.H:
+	sccs  get -s BTPiece.H -GBTPiece.H
+BTProtocol.H:
+	sccs  get -s BTProtocol.H -GBTProtocol.H
+../../include/BTProtocol.H:
+	/bin/sh ../../bin/install-sh -c -m 0444 BTProtocol.H ../../include/BTProtocol.H

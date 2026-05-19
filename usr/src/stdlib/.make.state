@@ -1,0 +1,74 @@
+.MAKE_VERSION:	VERSION-1.0
+../../include/AbsList.H:
+	/bin/sh ../../bin/install-sh -c -m 0444 AbsList.H ../../include/AbsList.H
+List.o:	../../include/BTConfig.H /usr/include/sys/types.h /usr/include/sys/isa_defs.h /usr/include/sys/feature_tests.h /usr/include/sys/machtypes.h /usr/include/sys/int_types.h /usr/include/sys/select.h /usr/include/sys/time.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/std/time.h /usr/include/time.h /usr/include/iso/time_iso.h /usr/include/sys/time_impl.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/std/string.h /usr/include/string.h
+List.o:	/usr/include/iso/string_iso.h List.H /usr/include/assert.h AbsList.H AbsListElement.H ListElement.H ListIter.H AbsListIter.H RWListIter.H 
+	/net/slug-17/export/sparc/opt/SUNWspro/SC6.1/bin/CC -DNDEBUG -g -I. -I../../include -c List.C
+List.H:
+	sccs  get -s List.H -GList.H
+List.C:
+	sccs  get -s List.C -GList.C
+ListIter.o:	../../include/BTConfig.H /usr/include/sys/types.h /usr/include/sys/isa_defs.h /usr/include/sys/feature_tests.h /usr/include/sys/machtypes.h /usr/include/sys/int_types.h /usr/include/sys/select.h /usr/include/sys/time.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/std/time.h /usr/include/time.h /usr/include/iso/time_iso.h /usr/include/sys/time_impl.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/std/string.h /usr/include/string.h
+ListIter.o:	/usr/include/iso/string_iso.h ListIter.H AbsListIter.H AbsList.H AbsListElement.H ListElement.H 
+	/net/slug-17/export/sparc/opt/SUNWspro/SC6.1/bin/CC -DNDEBUG -g -I. -I../../include -c ListIter.C
+ListIter.H:
+	sccs  get -s ListIter.H -GListIter.H
+ListIter.C:
+	sccs  get -s ListIter.C -GListIter.C
+libBTStdLib.a:
+	/net/slug-17/export/sparc/opt/SUNWspro/SC6.1/bin/CC -xar -o libBTStdLib.a AbsList.o AbsListElement.o AbsListIter.o List.o ListElement.o ListIter.o Block.o
+	: libBTStdLib.a
+../../lib/libBTStdLib.a:
+	/bin/sh ../../bin/install-sh -c -m 0444 libBTStdLib.a ../../lib/libBTStdLib.a
+AbsList.o:	../../include/BTConfig.H /usr/include/sys/types.h /usr/include/sys/isa_defs.h /usr/include/sys/feature_tests.h /usr/include/sys/machtypes.h /usr/include/sys/int_types.h /usr/include/sys/select.h /usr/include/sys/time.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/std/time.h /usr/include/time.h /usr/include/iso/time_iso.h /usr/include/sys/time_impl.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/std/string.h /usr/include/string.h
+AbsList.o:	/usr/include/iso/string_iso.h AbsList.H AbsListElement.H 
+	/net/slug-17/export/sparc/opt/SUNWspro/SC6.1/bin/CC -DNDEBUG -g -I. -I../../include -c AbsList.C
+AbsList.H:
+	sccs  get -s AbsList.H -GAbsList.H
+AbsList.C:
+	sccs  get -s AbsList.C -GAbsList.C
+.BUILT_LAST_MAKE_RUN:
+clean:
+	rm -rf libBTStdLib.a AbsList.o AbsListElement.o AbsListIter.o  List.o ListElement.o ListIter.o Block.o core
+Block.o:	../../include/BTConfig.H /usr/include/sys/types.h /usr/include/sys/isa_defs.h /usr/include/sys/feature_tests.h /usr/include/sys/machtypes.h /usr/include/sys/int_types.h /usr/include/sys/select.h /usr/include/sys/time.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/std/time.h /usr/include/time.h /usr/include/iso/time_iso.h /usr/include/sys/time_impl.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/std/string.h /usr/include/string.h
+Block.o:	/usr/include/iso/string_iso.h Block.H /usr/include/assert.h 
+	/net/slug-17/export/sparc/opt/SUNWspro/SC6.1/bin/CC -DNDEBUG -g -I. -I../../include -c Block.C
+../../include/List.H:
+	/bin/sh ../../bin/install-sh -c -m 0444 List.H ../../include/List.H
+Block.H:
+	sccs  get -s Block.H -GBlock.H
+Block.C:
+	sccs  get -s Block.C -GBlock.C
+ListElement.o:	../../include/BTConfig.H /usr/include/sys/types.h /usr/include/sys/isa_defs.h /usr/include/sys/feature_tests.h /usr/include/sys/machtypes.h /usr/include/sys/int_types.h /usr/include/sys/select.h /usr/include/sys/time.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/std/time.h /usr/include/time.h /usr/include/iso/time_iso.h /usr/include/sys/time_impl.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/std/string.h /usr/include/string.h
+ListElement.o:	/usr/include/iso/string_iso.h ListElement.H AbsListElement.H 
+	/net/slug-17/export/sparc/opt/SUNWspro/SC6.1/bin/CC -DNDEBUG -g -I. -I../../include -c ListElement.C
+AbsListElement.o:	../../include/BTConfig.H /usr/include/sys/types.h /usr/include/sys/isa_defs.h /usr/include/sys/feature_tests.h /usr/include/sys/machtypes.h /usr/include/sys/int_types.h /usr/include/sys/select.h /usr/include/sys/time.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/std/time.h /usr/include/time.h /usr/include/iso/time_iso.h /usr/include/sys/time_impl.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/std/string.h /usr/include/string.h
+AbsListElement.o:	/usr/include/iso/string_iso.h AbsListElement.H 
+	/net/slug-17/export/sparc/opt/SUNWspro/SC6.1/bin/CC -DNDEBUG -g -I. -I../../include -c AbsListElement.C
+ListElement.H:
+	sccs  get -s ListElement.H -GListElement.H
+AbsListElement.H:
+	sccs  get -s AbsListElement.H -GAbsListElement.H
+../../include/ListElement.H:
+	/bin/sh ../../bin/install-sh -c -m 0444 ListElement.H ../../include/ListElement.H
+../../include/AbsListElement.H:
+	/bin/sh ../../bin/install-sh -c -m 0444 AbsListElement.H ../../include/AbsListElement.H
+ListElement.C:
+	sccs  get -s ListElement.C -GListElement.C
+AbsListElement.C:
+	sccs  get -s AbsListElement.C -GAbsListElement.C
+AbsListIter.o:	../../include/BTConfig.H /usr/include/sys/types.h /usr/include/sys/isa_defs.h /usr/include/sys/feature_tests.h /usr/include/sys/machtypes.h /usr/include/sys/int_types.h /usr/include/sys/select.h /usr/include/sys/time.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/std/time.h /usr/include/time.h /usr/include/iso/time_iso.h /usr/include/sys/time_impl.h /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/WS6U1/include/CC/std/string.h /usr/include/string.h
+AbsListIter.o:	/usr/include/iso/string_iso.h AbsListIter.H AbsList.H AbsListElement.H 
+	/net/slug-17/export/sparc/opt/SUNWspro/SC6.1/bin/CC -DNDEBUG -g -I. -I../../include -c AbsListIter.C
+RWListIter.H:
+	sccs  get -s RWListIter.H -GRWListIter.H
+AbsListIter.H:
+	sccs  get -s AbsListIter.H -GAbsListIter.H
+../../include/ListIter.H:
+	/bin/sh ../../bin/install-sh -c -m 0444 ListIter.H ../../include/ListIter.H
+../../include/RWListIter.H:
+	/bin/sh ../../bin/install-sh -c -m 0444 RWListIter.H ../../include/RWListIter.H
+../../include/AbsListIter.H:
+	/bin/sh ../../bin/install-sh -c -m 0444 AbsListIter.H ../../include/AbsListIter.H
+AbsListIter.C:
+	sccs  get -s AbsListIter.C -GAbsListIter.C

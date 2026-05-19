@@ -1,0 +1,198 @@
+h52034
+s 00000/00000/00000
+d R 1.2 01/10/20 13:35:41 Codemgr 2 1
+c SunPro Code Manager data about conflicts, renames, etc...
+c Name history : 2 1 usr/src/man/BattleTris.1
+c Name history : 1 0 src/man/BattleTris.1
+e
+s 00180/00000/00000
+d D 1.1 01/10/20 13:35:40 bmc 1 0
+c date and time created 01/10/20 13:35:40 by bmc
+e
+u
+U
+f e 0
+t
+T
+I 1
+'\"macro stdmacro
+.nr X
+.TH BattleTris 1 "11 Dec 1994"
+.SH NAME
+BattleTris \- Two-player networked tetris with a twist
+.SH SYNOPSIS
+.B BattleTris
+[
+.B \-h
+|
+.B \-?
+]
+[
+.B \-H
+]
+[
+.B \-V
+]
+[
+.B \-s
+]
+[
+.B \-p
+]
+[
+.B \-S host
+]
+[
+.B \-P port
+]
+.SH DESCRIPTION
+.IX "BattleTris" "" "\fLBattleTris\fP \(em BattleTris"
+.IX "BattleTris" "tetris" \(em \fLBattleTris\fP"
+.BR BattleTris (1)
+is a two-player networked game based on
+.I Tetris\^.
+Players collect money to purchase weapons, which in turn make the other
+player's game more difficult.
+Examples of weapons include flipping
+the opponent's screen upside down, swapping boards with your opponent,
+"spying" on your opponent, giving your opponent disjointed pieces,
+etc.
+Each player's record is maintained in a database, and players
+are ranked based on their performance.
+This database is maintained by separate
+.I BattleTris Server\^
+software.
+If a player wants to hone his or her skills, he or she may also play
+the computer (though not for ranking).
+.PD
+.SH RULES OF THE GAME
+After connection is established, each player begins by playing tetris
+normally.
+The difference is that in addition to the standard pieces,
+there exists a die piece.
+This is a one block piece that has a value from 1 to 6 pips.
+Whenever a player gets a line, his or her "funds" go up by the number
+of pips in the line (it's important to note that a "double" earns
+twice the number of pips in the double, a triple earns triple, and a
+tetris earns quadruple).
+It is also important to note that there is a small probability that
+the piece will be a one by one happy face.
+Should the player get a line with the happy face on that turn, their
+funds will increase by 150.
+If they miss, however, the happy face will turn into a frown.
+.PP
+The opportunity to spend funds comes whenever the two players between
+them get 20 lines.
+At this time, both players go to a weapons bazaar, where they each
+purchase weapons to make the other's game more difficult.
+Examples of weapons are flipping the opponent's screen upside-down, 
+giving them disjointed pieces, depriving them of long pieces, depleting
+opponent's funds, etc.
+.PP
+Once both players have left the bazaar, play continues.
+Players may launch weapons by pressing the number key which
+corresponds to the number of the weapon in the arsenal
+(which is displayed on-screen).
+The weapon will last for a specific duration, measured in lines.
+Typical durations range from 3 to 30 lines.
+.PP
+The first player to die loses.
+.PD
+.SH OPTIONS
+.TP 10
+.B \-h
+Display usage information.
+BattleTris will print out a short synopsis of available command-line options.
+.TP 10
+.B \-H
+Display licensing information.
+BattleTris will print out a short synopsis of copyright and license agreement
+information.
+.TP 10
+.B \-V
+Display version number and compilation information.
+BattleTris will print out a synopsis of version information and a list of the
+flags used to compile this version of the game.
+.TP 10
+.B \-s
+Start BattleTris in sleep-mode.
+This option is equivalent to starting BattleTris and then selecting the
+sleep button after startup.
+.TP 10
+.B \-p
+Enable headphones.
+This flag specifies that BattleTris should play sounds through the
+headphone jack in the speakerbox.
+.TP 10
+.B \-S host
+Specify the BattleTris Server hostname.
+Use this option to connect to an alternate BattleTris Server.  To view the
+default BattleTris Server host for your version of BattleTris, use the \-V
+command-line argument.
+.TP 10
+.B \-P port
+Specify the BattleTris Server port number.
+Use this option to connect to an alternate TCP port on the specified BattleTris
+Server host.  To view the default BattleTris Server port for your version of
+BattleTris, use the \-V command-line argument.
+.PD
+.SH STATISTICS
+Statistics for each player are recorded by the local
+.I BattleTris Server\^
+software.  Statistics are only recorded for games in which a player
+competes against another player at the same local server site.
+Statistics are never recorded for games played against the same user
+account on a different host, or for games played against the
+computer player.  BattleTris will receive periodic updates of the
+most recent statistics from the server.  For this reason, the results
+of games will not appear in the roster immediately following each game.
+.PP
+The statistics recorded for each player are: a player rank value based
+upon the number of wins and losses, and the rank of the opponent; the
+total number of wins; the total number of losses; the highest final
+score in a single game; the highest final line count in a single game;
+the highest funds total at any point in a single game; the current
+streak of wins or losses for this player; the fastest kill by this
+player in seconds; the quickest death by this player in seconds; and
+the longest game played by this player in seconds.
+.PP
+The specific record of wins and losses by each player against each of
+the opponents they have faced is also recorded in the database.  This
+allows the
+.I BattleTris Roster\^
+to display the head\-to\-head record of any two players.  To display the
+head-to-head record of any two players, click the mouse button on the
+upper player information box, and then select the first player from the
+scrolling list at the left.  Next click the mouse button on the lower
+player information box, and then select the second player from the
+scrolling list at the left.  If the players have faced each other before,
+their head\-to\-head record is now displayed in the center of the screen.
+.PD
+.SH FILES
+.PD 0
+.TP 5
+.B $HOME/.btplan
+Your own personalized BattleTris plan file.  The first line specifies
+your nickname, and the other lines specify your plan, as shown in
+the roster screen.  Make sure to
+.BR chmod (1)
+your BattleTris plan file to be have read permissions for "other".
+
+.TP
+.B /cs/bin/BattleTris
+BattleTris application software.
+.TP
+.B /cs/app-defaults/BattleTris
+BattleTris X-Window default resources.
+.TP
+.B /cs/man/man1/BattleTris.1
+BattleTris documentation.
+.TP
+.B /cs/man/man1/btref.1
+BattleTris referee documentation.
+.PD
+.SH AUTHORS
+Bryan Cantrill, Charles Hoecker, and Michael Shapiro
+.TP
+Brown University Department of Computer Science
+E 1

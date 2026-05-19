@@ -1,0 +1,4 @@
+.MAKE_VERSION:	VERSION-1.0
+.BUILT_LAST_MAKE_RUN:
+clean:
+	rm -rf libBTDbase.a BTDB.o BTDBLock.o BTDBRecord.o BTDBErr.o BTNetworkEntry.o  BTPlayer.o BTPlayerRecord.o BTGameStats.o BTConfigFile.o ParsedFile.o core

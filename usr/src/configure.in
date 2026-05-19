@@ -1,0 +1,433 @@
+dnl BattleTris configure.in by mws
+dnl Process this file with autoconf to generate configure script
+
+AC_REVISION($Id$)
+AC_INIT(Makeinclude.in)
+AC_PREREQ(2.1)
+
+AC_LANG_CPLUSPLUS
+
+AC_CONFIG_AUX_DIR(../bin)
+AC_CONFIG_HEADER(BTConfig.H)
+
+AC_PROG_CXX
+AC_PROG_INSTALL
+AC_PROG_RANLIB
+AC_PROG_MAKE_SET
+
+AC_PATH_PROG(RM, rm, false)
+AC_PATH_PROG(AR, ar, false)
+AC_PATH_XTRA
+
+AC_SYS_LONG_FILE_NAMES
+if test "x$ac_cv_sys_long_file_names" = "xno"
+then
+   dnl Probably this won't affect anyone because of all our other system
+   dnl requirements, but a long-term goal might be to support this --mws
+
+   AC_MSG_ERROR([Cannot build BattleTris with 14-character filename limit])
+fi
+
+AC_CHECK_LIB(gen, regcmp, [ bt_libgen=yes ], [ bt_libgen=no ])
+AC_CHECK_LIB(socket, socket, [ bt_libsocket=yes ], [ bt_libsocket=no ])
+AC_CHECK_LIB(nsl, gethostbyname, [ bt_libnsl=yes ], [ bt_libnsl=no ])
+
+bt_net_libs=
+test "x$bt_libsocket" = "xyes" && bt_net_libs="$bt_net_libs -lsocket"
+test "x$bt_libnsl" = "xyes" && bt_net_libs="$bt_net_libs -lnsl"
+
+N_LIBS="$bt_net_libs"
+AC_SUBST(N_LIBS)
+
+AC_HEADER_STDC
+AC_HEADER_DIRENT
+AC_HEADER_STAT
+AC_HEADER_TIME
+AC_HEADER_SYS_WAIT
+
+AC_CHECK_HEADERS(stropts.h unistd.h sys/types.h sys/time.h sys/select.h)
+AC_CHECK_HEADERS(X11/extensions/shape.h)
+
+AC_TYPE_MODE_T
+AC_TYPE_SIZE_T
+AC_TYPE_OFF_T
+AC_TYPE_PID_T
+AC_TYPE_UID_T
+
+AC_TYPE_SIGNAL
+
+if test "$ac_cv_type_signal" != void
+then
+  dnl We just want to compile -- the return value is unused
+  AC_DEFINE(RETSIGVAL, ((RETSIGTYPE) 0))
+fi
+
+AC_CHECK_SIZEOF(int)
+
+dnl select-checking routine 2Sep95 mws
+dnl Should probably AC_DEFUN this as an official macro at some point later.
+
+AC_CHECK_FUNCS(select)
+
+if test "$ac_cv_func_select" != yes
+then
+   dnl Probably want to handle poll() if possible at some point in the future
+   AC_MSG_ERROR([Cannot build BattleTris without select function])
+else
+   dnl Try to determine whether select uses fd_set *'s or int *'s
+  
+   AC_MSG_CHECKING([type of select set arguments]) 
+
+   for bt_select_argtype in fd_set int
+   do
+     AC_TRY_COMPILE(
+        [ 
+`test "$ac_cv_header_sys_types_h" = yes && echo '#include <sys/types.h>'`
+`test "$ac_cv_header_sys_time_h" = yes && echo '#include <sys/time.h>'`
+`test "$ac_cv_header_time_h" = yes && echo '#include <time.h>'`
+`test "$ac_cv_header_sys_select_h" = yes && echo '#include <sys/select.h>'`
+`test "$ac_cv_header_unistd_h" = yes && echo '#include <unistd.h>'`
+        ], [
+select(0, ($bt_select_argtype *) 0, ($bt_select_argtype *) 0,
+       ($bt_select_argtype *) 0, (struct timeval *) 0);
+        ],
+      bt_select_works=yes && break, bt_select_works=no)
+   done
+
+   if test "$bt_select_works" != yes
+   then
+      AC_MSG_ERROR([Failed to compile test program which uses select])
+   else
+      AC_MSG_RESULT($bt_select_argtype)
+      AC_DEFINE_UNQUOTED(SELECTARGTYPE, $bt_select_argtype)
+   fi
+fi
+
+
+AC_CHECK_FUNCS(strchr memcpy sigaction sigprocmask uname setsid)
+
+dnl Allow user to specify location of Motif includes by executing
+dnl ./configure --with-motif-includes=DIR
+
+AC_ARG_WITH(
+   motif-includes,
+   [  --with-motif-includes=DIR  Motif include files are in DIR/Xm],
+   [ if test "x$withval" = "xyes"
+     then
+        bt_motif_incdir=""
+     else
+        bt_motif_incdir="$withval"
+     fi ],
+   [ bt_motif_incdir="" ]
+)
+
+dnl Allow user to specify location of Motif libraries by executing
+dnl ./configure --with-motif-libs=DIR
+
+AC_ARG_WITH(
+   motif-libs,
+   [  --with-motif-libs=DIR      Motif library files are in DIR],
+   [ if test "x$withval" = "xyes"
+     then
+        bt_motif_libdir=""
+     else
+        bt_motif_libdir="$withval"
+     fi ],
+   [ bt_motif_libdir="" ]
+)
+
+dnl Motif-checking routine 12Apr95 mws
+dnl Should probably AC_DEFUN this as an official macro at some point later.
+
+AC_MSG_CHECKING(for Motif)
+
+dnl Save existing compilation flags so we can restore them after Motif is found
+
+bt_save_cxxflags="$CXXFLAGS"
+bt_save_libs="$LIBS"
+
+dnl Determine libraries we need to link with for Motif
+
+bt_x11_libs="-lXt -lX11 -lXext $X_LIBS $X_EXTRA_LIBS"
+bt_motif_libs="-lXm"
+test "x$bt_libgen" = "xyes" && bt_motif_libs="$bt_motif_libs -lgen"
+
+dnl Generate a list of likely places to look for Motif by listing a few common
+dnl spots, and then converting every directory in $PATH from bin to include.
+dnl Note that pathnames are generated so we can use eval on them later.
+
+for bt_direxpr in \
+   '/usr/include'			\
+   '/usr/${bt_dirvar}/include'		\
+   '/usr/include/${bt_dirvar}'		\
+   '/usr/local/include'			\
+   '/usr/local/${bt_dirvar}/include'	\
+   '/usr/local/include/${bt_dirvar}'	\
+   `echo "$PATH" | \
+      sed -e 's/\/bin/\/include/g' -e 's/\.//g' -e 's/:/ /g'` \
+   `echo "$PATH" | \
+      sed -e 's/\/bin/\/include/g' -e 's/\.//g' -e 's/:/\/${bt_dirvar} /g'`
+do
+   dnl If user gave us the location of Motif, skip all the checking
+   test -n "$bt_motif_incdir" && break
+
+   dnl If eval doesn't change the expression, it doesn't contain an unevaluated
+   dnl variable, so test for $bt_direxpr/Xm/Xm.h and skip to the next iteration
+
+   bt_dirvar=foo
+   eval bt_chkdir=$bt_direxpr
+   if test "x$bt_chkdir" = "x$bt_direxpr"
+   then
+      if test -r ${bt_direxpr}/Xm/Xm.h
+      then
+         bt_motif_incdir=$bt_direxpr
+         break
+      fi
+      continue
+   fi
+
+   dnl Try substituting "Motif" and "motif" into the pathname expression
+
+   for bt_dirvar in Motif motif
+   do
+      eval bt_incdir=$bt_direxpr
+      if test -r ${bt_incdir}/Xm/Xm.h
+      then
+         bt_motif_incdir=$bt_incdir
+         break
+      fi
+   done
+
+   dnl Need to check again since sh may not support break 2
+   test -n "$bt_motif_incdir" && break
+
+   dnl Try substituting Motif-<version> and motif-<version> into the pathname
+   dnl expression.  At some point I should check with OSF to get a real list
+   dnl of valid version numbers.
+
+   for bt_version in 2.0 1.9 1.8 1.7 1.6 1.5 1.4 1.3 1.2 1.1 1.0
+   do
+      for bt_dirvar in Motif-$bt_version Motif$bt_version \
+         motif-$bt_version motif$bt_version
+      do
+         eval bt_incdir=$bt_direxpr
+         if test -r ${bt_incdir}/Xm/Xm.h
+         then
+            bt_motif_incdir=$bt_incdir
+            break
+         fi
+      done
+
+      test -n "$bt_motif_incdir" && break
+   done
+
+   dnl Need to check again since sh may not support break 2
+   test -n "$bt_motif_incdir" && break
+done
+
+dnl If we haven't found Motif, die and suggest that the user provide us with
+dnl the explicit pathname of where to find the header files.  If we've got
+dnl header files, reset CXXFLAGS for upcoming AC_TRY_LINK calls.
+
+if test -z "$bt_motif_incdir"
+then
+   AC_MSG_RESULT(no)
+   AC_MSG_ERROR([Failed to locate Motif includes: Use --with-motif-includes.])
+else
+   CXXFLAGS="$CXXFLAGS $X_CFLAGS -I$bt_motif_incdir"
+fi
+
+dnl If the user gave us the explicit pathname of the location of Motif libs,
+dnl go ahead and try to link the simple (and totally bogus) test program.
+dnl Otherwise, as an optimization, try just converting the include path to a
+dnl lib path and linking with that.  If all else fails, try the Motif-finding
+dnl algorithm again for lib directories (this will be incredibly slow).
+
+if test -z "$bt_motif_libdir"
+then
+   bt_libdir=`echo "$bt_motif_incdir" | sed -e 's/include/lib/'`
+   if test -d $bt_libdir
+   then
+      LIBS="$LIBS $X_PRE_LIBS -L$bt_libdir $bt_motif_libs $bt_x11_libs"
+      AC_TRY_LINK(
+         [ #include <Xm/Xm.h> ],
+         [ XtAppContext app;
+           XmString hello = XmStringCreateSimple("Hello World");
+           XtAppMainLoop(app); ],
+         [ bt_motif_libdir=$bt_libdir ]
+      )
+   fi
+else
+   dnl Try to link, else exit with error since user gave us the libs directory
+   dnl on the command-line using --with-motif-libs=DIR argument
+
+   LIBS="$LIBS $X_PRE_LIBS -L$bt_motif_libdir $bt_motif_libs $bt_x11_libs"
+   AC_TRY_LINK(
+      [ #include <Xm/Xm.h> ],
+      [ XtAppContext app;
+        XmString hello = XmStringCreateSimple("Hello World");
+        XtAppMainLoop(app); ],
+      [ AC_MSG_RESULT(headers)
+        AC_MSG_ERROR([Failed to link with Motif: Use --with-motif-libs.]) ]
+   )
+fi
+
+dnl Generate a list of likely places to look for Motif by listing a few common
+dnl spots, and then converting every directory in $PATH from bin to lib.
+dnl Note that pathnames are generated so we can use eval on them later.
+
+for bt_direxpr in \
+   '/usr/lib'				\
+   '/usr/${bt_dirvar}/lib'		\
+   '/usr/lib/${bt_dirvar}'		\
+   '/usr/local/lib'			\
+   '/usr/local/${bt_dirvar}/lib'	\
+   '/usr/local/lib/${bt_dirvar}'	\
+   `echo "$PATH" | \
+      sed -e 's/\/bin/\/lib/g' -e 's/\.//g' -e 's/:/ /g'` \
+   `echo "$PATH" | \
+      sed -e 's/\/bin/\/lib/g' -e 's/\.//g' -e 's/:/\/${bt_dirvar} /g'`
+do
+   dnl If the user gave us the path or if the optimization worked, skip ahead
+   test -n "$bt_motif_libdir" && break
+
+   dnl If eval doesn't change the expression, it doesn't contain an unevaluated
+   dnl variable, so try to link the test program and skip to the next iteration
+
+   bt_dirvar=foo
+   eval bt_chkdir=$bt_direxpr
+   if test "x$bt_chkdir" = "x$bt_direxpr"
+   then
+      test -d $bt_direxpr || continue
+
+      LIBS="$LIBS $X_PRE_LIBS -L$bt_direxpr $bt_motif_libs $bt_x11_libs"
+      AC_TRY_LINK(
+         [ #include <Xm/Xm.h> ],
+         [ XtAppContext app;
+           XmString hello = XmStringCreateSimple("Hello World");
+           XtAppMainLoop(app); ],
+         [ bt_motif_libdir=$bt_direxpr
+           break ]
+      )
+
+      continue
+   fi
+
+   dnl Try substituting "Motif" and "motif" into the pathname expression. If
+   dnl the directory exists, try to link using it as an argument to ld.
+
+   for bt_dirvar in Motif motif
+   do
+      eval bt_libdir=$bt_direxpr
+      test -d $bt_libdir || continue
+
+      LIBS="$LIBS $X_PRE_LIBS -L$bt_libdir $bt_motif_libs $bt_x11_libs"
+      AC_TRY_LINK(
+         [ #include <Xm/Xm.h> ],
+         [ XtAppContext app;
+           XmString hello = XmStringCreateSimple("Hello World");
+           XtAppMainLoop(app); ],
+         [ bt_motif_libdir=$bt_libdir
+           break ]
+      )
+   done
+
+   dnl Need to check again since sh may not support break 2
+   test -n "$bt_motif_libdir" && break
+
+   dnl Try substituting Motif-<version> and motif-<version> into the pathname
+   dnl expression.  At some point I should check with OSF to get a real list
+   dnl of valid version numbers.
+
+   for bt_version in 2.0 1.9 1.8 1.7 1.6 1.5 1.4 1.3 1.2 1.1 1.0
+   do
+      for bt_dirvar in Motif-$bt_version Motif$bt_version \
+         motif-$bt_version motif$bt_version
+      do
+         eval bt_libdir=$bt_direxpr
+         test -d $bt_libdir || continue
+
+         LIBS="$LIBS $X_PRE_LIBS -L$bt_libdir $bt_motif_libs $bt_x11_libs"
+         AC_TRY_LINK(
+            [ #include <Xm/Xm.h> ],
+            [ XtAppContext app;
+              XmString hello = XmStringCreateSimple("Hello World");
+              XtAppMainLoop(app); ],
+            [ bt_motif_libdir=$bt_libdir
+              break ]
+         )
+      done
+
+      dnl Need to check again since sh may not support break 2
+      test -n "$bt_motif_libdir" && break
+   done
+
+   dnl Need to check again since sh may not support break 2
+   test -n "$bt_motif_libdir" && break
+done
+
+if test -n "$bt_motif_libdir"
+then
+   dnl Report the miracle to the user
+   AC_MSG_RESULT([libraries , headers])
+
+   dnl Define flags for compiling with Motif based on our results, and add
+   dnl -R to the ld flags if we're running on Solaris
+
+   M_CFLAGS="-I$bt_motif_incdir"
+   M_LIBS="-L$bt_motif_libdir $bt_motif_libs"
+   if test "x`(uname) 2>/dev/null`" = "xSunOS" && \
+      uname -r | grep '^5' >/dev/null
+   then
+      M_LIBS="$M_LIBS -R$bt_motif_libdir"
+   fi
+
+   dnl Define output variables
+   AC_SUBST(M_CFLAGS)
+   AC_SUBST(M_LIBS)
+
+   dnl Restore flags for compiling test programs
+   CXXFLAGS="$bt_save_cxxflags"
+   LIBS="$bt_save_libs"
+else
+   dnl If we failed, then die since BattleTris needs Motif to run
+   AC_MSG_RESULT(headers)
+   AC_MSG_ERROR([Failed to link with Motif: Use --with-motif-libs.])
+fi
+
+AC_ARG_WITH(
+   sun-audio,
+   [  --with-sun-audio=/usr/demo/SOUND    Support sound via Sun audio library],
+   [ if test "x$withval" = "xyes"
+     then
+        A_CFLAGS="-I/usr/demo/SOUND/include"
+        A_LIBS="-L/usr/demo/SOUND/lib -laudio"
+        AC_SUBST(A_CFLAGS)
+	AC_SUBST(A_LIBS)
+        AC_DEFINE(HAVE_SUNAUDIO)
+     else
+        A_CFLAGS="-I${withval}/include"
+        A_LIBS="-L${withval}/lib -laudio"
+        AC_SUBST(A_CFLAGS)
+	AC_SUBST(A_LIBS)
+        AC_DEFINE(HAVE_SUNAUDIO)
+     fi ],
+   [ AC_MSG_CHECKING(for Sun audio library)
+     if test -r /usr/demo/SOUND/lib/libaudio.a
+     then
+        A_CFLAGS="-I/usr/demo/SOUND/include"
+        A_LIBS="-L/usr/demo/SOUND/lib -laudio"
+        AC_SUBST(A_CFLAGS)
+	AC_SUBST(A_LIBS)
+        AC_DEFINE(HAVE_SUNAUDIO)
+        AC_MSG_RESULT(yes)
+     else
+        A_CFLAGS=""
+        A_LIBS=""
+        AC_SUBST(A_CFLAGS)
+        AC_SUBST(A_LIBS)
+        AC_MSG_RESULT(no)
+     fi ]
+)
+
+AC_OUTPUT(Makeinclude)

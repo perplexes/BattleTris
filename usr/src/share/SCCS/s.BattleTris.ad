@@ -1,0 +1,164 @@
+h04033
+s 00000/00000/00000
+d R 1.2 01/10/20 13:35:40 Codemgr 2 1
+c SunPro Code Manager data about conflicts, renames, etc...
+c Name history : 2 1 usr/src/share/BattleTris.ad
+c Name history : 1 0 src/share/BattleTris.ad
+e
+s 00146/00000/00000
+d D 1.1 01/10/20 13:35:39 bmc 1 0
+c date and time created 01/10/20 13:35:39 by bmc
+e
+u
+U
+f e 0
+t
+T
+I 1
+!
+!     FILE: BTDefaults
+!    DESCR: BattleTris resource defaults
+! MODIFIED: 1/7/95
+!
+
+BTBiff.biff.geometry:				100x100+100+100
+
+BattleTris*borderWidth:				0
+BattleTris*fontList:				-*-avantgarde-demi-*-*-*-15-*-*-*-*-*-*-*
+
+BattleTris*BTBazaar*background:			gray75
+BattleTris*BTBazaar*borderWidth:		0 
+BattleTris*BTBazaar*drawing_area*background:	black
+BattleTris*BTBazaar*XmPushButton*foreground:	blue
+BattleTris*BTBazaar*XmPushButton*background:	gray66
+BattleTris*BTBazaar*weap_desc*foreground:	red3
+BattleTris*BTBazaar*form*weap_desc*foreground:	aliceblue 
+BattleTris*BTBazaar*weap_desc*background:	gray66
+BattleTris*BTBazaar*weap_list*background:	gray66
+BattleTris*BTBazaar*weap_list*foreground:	red3
+BattleTris*BTBazaar*form*weap_list*foreground:	seagreen
+BattleTris*BTBazaar*XmList*fontList:		-*-helvetica-bold-r-*-*-18-*-iso8859-1
+BattleTris*BTBazaar*funds_label*fontList:	-*-avantgarde-demi-*-*-*-36-*-*-*-*-*-*-*
+BattleTris*BTBazaar*funds*fontList:		-*-lucidatypewriter-bold-*-*-*-50-*-*-*-*-*-*-*
+BattleTris*BTBazaar*funds*foreground:		red3
+BattleTris*BTBazaar*funds_label*foreground:	blue
+BattleTris*BTBazaar*XmLabel*borderWidth:	1
+BattleTris*BTBazaar*XmLabel*background:		gray66
+BattleTris*BTBazaar*XmPushButton*fontList:	-*-avantgarde-demi-*-*-*-15-*-*-*-*-*-*-*
+BattleTris*BTBazaar*done_button*fontList:	-*-avantgarde-demi-*-*-*-30-*-*-*-*-*-*-*
+BattleTris*BTBazaar*XmText.fontList:		-*-lucidatypewriter-bold-r-normal-*-18-*-iso8859-1
+BattleTris*BTBazaar*XmTextField.fontList:	-*-lucidatypewriter-medium-r-normal-*-14-*-iso8859-1
+BattleTris*BTBazaar*message*fontList:		-*-helvetica-bold-r-*-*-18-*-iso8859-1
+BattleTris*BTBazaar*message*background:		gray75
+BattleTris*BTBazaar*message*borderWidth:	0
+BattleTris*BTBazaar*message*foreground:		darkolivegreen
+BattleTris*BTBazaar*baz_message*fontList:		-*-helvetica-bold-r-*-*-18-*-iso8859-1
+BattleTris*BTBazaar*baz_message*background:		gray75
+BattleTris*BTBazaar*baz_message*borderWidth:	0
+BattleTris*BTBazaar*baz_message*foreground:		darkolivegreen
+BattleTris*BTBazaar*title*background:		gray75
+BattleTris*BTBazaar*title*fontList:		-*-avantgarde-demi-*-*-*-127-*-*-*-*-*-*-*
+
+BattleTris*BTChallenge*background:		gray75
+BattleTris*BTChallenge*highlightColor:		blue
+BattleTris*BTChallenge*XmList*background:	red
+BattleTris*BTChallenge*XmLabel*foreground:	blue
+BattleTris*BTChallenge*borderWidth:		0
+BattleTris*BTChallenge*drawing_area*background:	black
+BattleTris*BTChallenge*XmPushButton*foreground:	blue
+BattleTris*BTChallenge*XmPushButton*background:	gray
+BattleTris*BTChallenge*user_info*foreground:	red3
+BattleTris*BTChallenge*user_info*background:	gray66
+BattleTris*BTChallenge*user_list*background:	gray66
+BattleTris*BTChallenge*user_list*foreground:	red3
+BattleTris*BTChallenge*XmPushButton*fontList:	-*-avantgarde-demi-*-*-*-15-*-*-*-*-*-*-*
+BattleTris*BTChallenge*XmList.fontList:		-*-lucidatypewriter-medium-r-normal-*-12-*-iso8859-1
+BattleTris*BTChallenge*XmText.fontList:		-*-lucidatypewriter-medium-r-normal-*-12-*-iso8859-1
+BattleTris*BTChallenge*XmTextField.fontList:	-*-lucidatypewriter-medium-r-normal-*-12-*-iso8859-1
+
+BattleTris*BTStartup*highlightColor:		blue
+BattleTris*BTStartup*XmList*background:		red
+BattleTris*BTStartup*borderWidth:		0 
+BattleTris*BTStartup*drawing_area*background:	black
+BattleTris*BTStartup*XmPushButton*foreground:	blue
+BattleTris*BTStartup*XmPushButton*background:	gray
+BattleTris*BTStartup*background:		black
+BattleTris*BTStartup*XmPushButton*fontList:	-*-avantgarde-demi-*-*-*-15-*-*-*-*-*-*-*
+BattleTris*BTStartup*sleep_button*fontlist:	-*-avantgarde-demi-*-*-*-30-*-*-*-*-*-*-*
+BattleTris*BTStartup*challenge_button*fontlist:	-*-avantgarde-demi-*-*-*-30-*-*-*-*-*-*-*
+BattleTris*BTStartup*XmList.fontList:		-*-lucidatypewriter-bold-*-*-*-14-*-iso8859-1
+BattleTris*BTStartup*XmText.fontList:		-*-lucidatypewriter-medium-r-normal-*-14-*-iso8859-1
+BattleTris*BTStartup*XmTextField.fontList:	-*-lucidatypewriter-medium-r-normal-*-14-*-iso8859-1
+
+BattleTris*challenge_popup*background:		gray75
+BattleTris*challenge_popup*foreground:		red3
+BattleTris*challenge_popup*challenger*fontList:	-*-helvetica-bold-r-normal-*-24-*-*-*-*-*-*-*
+BattleTris*challenge_popup*chal_smack*fontList:	-*-helvetica-bold-o-normal-*-24-*-*-*-*-*-*-*
+BattleTris*challenge_popup*headline*fontList:	-*-helvetica-bold-r-normal-*-34-*-*-*-*-*-*-*
+BattleTris*challenge_popup*byline*fontList:	-*-helvetica-bold-o-normal-*-30-*-*-*-*-*-*-*
+!BattleTris*challenge_popup*geometry:		100x100+100+100
+BattleTris*challenge_popup*XmPushButton*foreground:	blue
+BattleTris*challenge_popup*XmPushButton*background:	gray
+BattleTris*challenge_popup*yes_button*fontlist:	-*-avantgarde-demi-*-*-*-30-*-*-*-*-*-*-*
+BattleTris*challenge_popup*chal_info*fontList:		-*-lucidatypewriter-medium-r-normal-*-12-*-iso8859-1
+
+BattleTris*BTGame*background:			gray75
+BattleTris*BTGame*score_box*background:		gray66
+BattleTris*BTGame*score_box*fontList:		-*-lucidatypewriter-bold-r-normal-*-18-*-iso8859-1
+BattleTris*BTGame*score_box*foreground:		blue
+BattleTris*BTGame*arsenal_box*foreground:	blue
+BattleTris*BTGame*arsenal_box*background:	gray66
+BattleTris*BTGame*arsenal_box*fontList:		-*-lucidatypewriter-*-*-*-*-26-*-*-*-*-*-*-*
+BattleTris*BTGame*message*fontList:		-*-avantgarde-demi-*-*-*-15-*-*-*-*-*-*-*
+BattleTris*BTGame*message*foreground:		black
+BattleTris*BTGame*XmPushButton*fontList:	-*-avantgarde-demi-*-*-*-15-*-*-*-*-*-*-*
+BattleTris*BTGame*XmPushButton*background:	gray66
+BattleTris*BTGame*XmPushButton*foreground:	blue
+
+BattleTris*BTRoster*background:			gray75
+BattleTris*BTRoster*borderWidth:		0 
+BattleTris*BTRoster*drawing_area*background:	black
+BattleTris*BTRoster*XmPushButton*foreground:	blue
+BattleTris*BTRoster*XmPushButton*background:	gray66
+BattleTris*BTRoster*XmText*background:		gray66
+BattleTris*BTRoster*user_list*background:	gray66
+BattleTris*BTRoster*user_list*foreground:	red3
+BattleTris*BTRoster*XmList*fontList:		-*-helvetica-bold-r-*-*-18-*-iso8859-1
+BattleTris*BTRoster*XmLabel*foreground:		blue
+BattleTris*BTRoster*XmLabel*shadowThickness:	2
+BattleTris*BTRoster*XmLabel*background:		gray66
+BattleTris*BTRoster*XmLabel*bottomShadowColor:	black
+BattleTris*BTRoster*XmLabel*topShadowColor:	white
+BattleTris*BTRoster*title*background: gray75
+BattleTris*BTRoster*XmLabel*fontList:		-*-avantgarde-demi-*-*-*-15-*-*-*-*-*-*-*
+BattleTris*BTRoster*XmPushButton*fontList:	-*-avantgarde-demi-*-*-*-14-*-*-*-*-*-*-*
+BattleTris*BTRoster*title*fontList:		-*-avantgarde-demi-*-*-*-48-*-*-*-*-*-*-*
+BattleTris*BTRoster*XmText.fontList:		-*-lucidatypewriter-medium-r-normal-*-14-*-iso8859-1
+BattleTris*BTRoster*XmTextField.fontList:	-*-lucidatypewriter-medium-r-normal-*-14-*-iso8859-1
+
+BattleTris*BTMessageDlog*background:		gray75
+BattleTris*BTMessageDlog*foreground:		red3
+BattleTris*BTMessageDlog*geometry:		100x100+100+100
+BattleTris*BTMessageDlog*XmPushButton*foreground:	blue
+BattleTris*BTMessageDlog*XmPushButton*background:	gray
+BattleTris*BTMessageDlog*XmString*fontList:	-*-lucida sans-bold-r-*-*-14-*-*-*-*-*-*-*
+
+BattleTris*BTAbout*background:			gray75
+BattleTris*BTAbout*foreground:			red3
+BattleTris*BTAbout*title*fontList:		-*-avantgarde-demi-r-*-*-100-*-*-*-*-*-*-*
+BattleTris*BTAbout*title*foreground:		yellow2
+BattleTris*BTAbout*version*fontList:		-*-avantgarde-demi-*-*-*-15-*-*-*-*-*-*-*
+BattleTris*BTAbout*version*foreground:		yellow2
+BattleTris*BTAbout*bryan*fontList:		-*-avantgarde-demi-*-*-*-30-*-*-*-*-*-*-*
+BattleTris*BTAbout*bryan*foreground:		blue
+BattleTris*BTAbout*charlie*fontList:		-*-avantgarde-demi-*-*-*-30-*-*-*-*-*-*-*
+BattleTris*BTAbout*charlie*foreground:		blue
+BattleTris*BTAbout*mike*fontList:		-*-avantgarde-demi-*-*-*-30-*-*-*-*-*-*-*
+BattleTris*BTAbout*mike*foreground:		blue
+BattleTris*BTAbout*mail*fontList:		-*-avantgarde-demi-*-*-*-20-*-*-*-*-*-*-*
+BattleTris*BTAbout*mail*foreground:		blue
+BattleTris*BTAbout*thanks_title*fontList:	-*-avantgarde-demi-*-*-*-17-*-*-*-*-*-*-*
+BattleTris*BTAbout*thanks*fontList:		-*-avantgarde-demi-r-*-*-15-*-*-*-*-*-*-*
+BattleTris*BTAbout*thanks_of_course*fontList:	-*-avantgarde-demi-*-*-*-15-*-*-*-*-*-*-*
+BattleTris*BTAbout*ok_button*foreground:	red3
+E 1

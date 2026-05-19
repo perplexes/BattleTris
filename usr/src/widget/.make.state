@@ -1,0 +1,4 @@
+.MAKE_VERSION:	VERSION-1.0
+.BUILT_LAST_MAKE_RUN:
+clean:
+	rm -rf libBTWidget.a BTWidget.o  BTDrawingAreaWidget.o  BTFormWidget.o  BTLabelWidget.o  BTMessageDlog.o  BTPushButtonWidget.o  BTRowColumnWidget.o  BTSliderWidget.o  BTScrolledListWidget.o  BTScrolledTextWidget.o  BTTextWidget.o  BTPixmap.o  BTFrameWidget.o  BTDisplay.o  BTXDisplay.o  BTXPalette.o  BTXmUtils.o core

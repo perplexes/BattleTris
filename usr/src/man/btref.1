@@ -1,0 +1,181 @@
+'\"macro stdmacro
+.nr X
+.TH btref 1 "29 Dec 1994"
+.SH NAME
+btref \- BattleTris Referee management software
+.SH SYNOPSIS
+.B btref
+[
+.B \-h
+|
+.B \-?
+]
+.SH DESCRIPTION
+.IX "btref" "" "\fLbtref\fP \(em btref"
+.IX "btref" "BattleTris" \(em \fLbtref\fP"
+.BR BattleTris (1)
+is a two-player networked game based on
+.I Tetris\^.
+Player and network information is stored in shared database files.
+This database is maintained by separate
+.I BattleTris Server\^
+software.
+The
+.BR btref (1)
+.I BattleTris Referee Software\^
+allows one or more administrators to manage these database files
+and browse their contents.
+.PD
+.SH USING THE REFEREE
+In order to use the referee, the administrator must be logged on to
+a BattleTris Server host.  This is simply a host on which the database
+files are stored locally.  The database files must be stored on a local
+disk on the BattleTris Server in order for proper functioning of the
+BattleTris server daemons.  Refer to
+.BR btserverd (1)
+for more information on database file configuration.
+.PP
+When the referee software is launched, it will attempt to open both
+the network and player database files.  If you plan to have more than
+one individual who acts as a BattleTris administrator, you should
+create a UNIX group for these users, and
+.BR chmod (1)
+the database files to be readable and writable by members of this group.
+If the referee software fails to open any of the needed database files,
+it will report an error and exit.
+.PP
+Once the referee software is initialized, you may enter commands at the
+prompt.  A list of commands is presented later in this documentation, and
+is available within the referee by giving the
+.I help\^
+command.  Commands may be abbreviated to the shortest unique command name.
+For example, entering
+.I nl\^
+will result in executing the command
+.I nlist\^
+.  Also, some of the referee commands support pattern arguments.  Patterns
+are given using standard shell ``globbing'' syntax.  Refer to the section on
+.I Filename Generation\^
+in
+.BR sh (1)
+if you are unfamiliar with this syntax.
+.PP
+.I IMPORTANT:\^
+You should not execute commands which flush or compress the database files
+while the BattleTris server daemons are running.  All commands which
+modify the database files will ask you to confirm them before proceeding.
+If standard input to the referee is not a terminal (but instead a file or
+shell ``here-document'') no prompts will be printed and the referee will
+not attempt to confirm any commands.  Finally, make regular backups of
+all database files, and always make a backup before executing the compression
+commands, as these are volatile operations.
+.PD
+.SH OPTIONS
+.TP 10
+.B \-h
+Display usage information.
+btref will print out a short synopsis of available command-line options.
+.PD
+.SH COMMANDS
+.PD 0
+.TP 5
+.B nlist
+Print a short listing of the users currently using BattleTris, the host
+they are playing from, and their current status.
+.TP
+.B ndata
+Print a verbose listing of all the data for entries in the network database.
+This includes a database key for each entry.  This key is needed to delete
+entries from the network database if an entry is not removed properly by
+the server software.
+.TP
+.B ndelete <key>
+Delete the network database entry with the specified key.
+.TP
+.B nflush
+Delete all entries in the network database and truncate the network database
+files.
+.TP
+.B ncruft <threshold>
+List the network entries which are older than the specified threshold (in
+hours).  The administrator may use this information to determine suspect
+cruft entries.  Beware: some users may be able to play BattleTris for large
+numbers of hours without mental collapse.  This command does not actually
+verify a connection to any BattleTris clients, so use caution before
+removing anyone from the network database.
+.TP
+.B nclean <threshold>
+Remove the network entries which are older than the specified threshold (in
+hours).  See the warnings regarding ``ncruft'' above.
+.TP
+.B ncompress
+Compress the network database.  Because of the algorithm used for the
+database files in BattleTris, the database files may grow quite large on
+disk, even though the number of entries remains constant.  This is more
+of a problem with the player database, because the entries are constantly
+changing size, and so the freelist of records inside the database file
+grows quite large, wasting space inside the file.  This command removes
+all the unused free space from the network database files.
+.TP
+.B plist <pattern>
+Print a listing of the login names of all users currently in the player
+database.
+.TP
+.B pdata <pattern>
+Print a listing of player information for each player whose login name
+matches the specified pattern.  The information displayed includes all
+of their statistics, and is equivalent to the information displayed for
+each player in the BattleTris Challenge or BattleTris Roster screens.
+.TP
+.B pdelete <pattern>
+Delete the player entries for each player whose login name matches the
+specified pattern.  This is useful at Brown because Computer Science
+students are given transitory accounts for a course which are removed
+at the end of the semester.  Since someone else may be reassigned this
+account number in the future, we want to get rid of all course accounts
+at the end of each semester.
+.TP
+.B pflush
+Delete all entries in the player database and truncate the player database
+files.
+.TP
+.B pcompress
+Compress the player database.  Refer to the description of ``ncompress''
+above for information about database compression.
+.TP
+.B stats
+Compute the number of players currently stored in the player database and
+an approximate number of games played.
+.TP
+.B help [command1 command2 ...]
+Print a summary of all the referee commands and their usage.
+.TP
+.B quit
+Quit the referee.
+.PD
+.SH FILES
+.PD 0
+.TP 5
+.B $HOME/.btplan
+Your own personalized BattleTris plan file.  The first line specifies
+your nickname, and the other lines specify your plan, as shown in
+the roster screen.  Make sure to
+.BR chmod (1)
+your BattleTris plan file to be have read permissions for "other".
+.TP
+.B /cs/src/BattleTris/bin/btref
+BattleTris Referee application software.
+.TP
+.B /cs/app-defaults/BattleTris
+BattleTris X-Window default resources.
+.TP
+.B /cs/man/man1/BattleTris.1
+BattleTris documentation.
+.TP
+.B /cs/man/man1/btref.1
+BattleTris referee documentation.
+.PD
+.SH AUTHORS
+Bryan Cantrill, Charles Hoecker, and Michael Shapiro
+.TP
+Brown University Department of Computer Science

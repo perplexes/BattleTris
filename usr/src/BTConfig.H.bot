@@ -1,0 +1,65 @@
+
+/* Make sure we have all the types we need */
+
+#if HAVE_SYS_TYPES_H
+# include <sys/types.h>
+#endif
+
+#if TIME_WITH_SYS_TIME
+# include <sys/time.h>
+# include <time.h>
+#else
+# if HAVE_SYS_TIME_H
+#  include <sys/time.h>
+# else
+#  include <time.h>
+# endif
+#endif
+
+#if HAVE_SYS_SELECT_H
+# include <sys/select.h>
+#endif
+
+/*
+ * Make sure we have FD_SET macros for calling select.  We assume that
+ * configure has already defined SELECTARGTYPE to be the proper argument type
+ * for using select, and that AC_CHECK_SIZEOF(int) has been called.
+ */
+
+#ifdef FD_SET
+# define SELECTSETSIZE FD_SETSIZE
+#else
+# define SELECT_SET_SIZE SIZEOF_INT
+# define FD_SET(n, p) (*(p) |= (1 << (n)))
+# define FD_CLR(n, p) (*(p) &= ~(1 << (n)))
+# define FD_ISSET(n, p) (*(p) & (1 << (n)))
+# define FD_ZERO(p) (*(p) = 0)
+#endif
+
+/* Make sure we have access to string and memory functions */
+
+#if defined(STDC_HEADERS) || defined(HAVE_STRING_H)
+# include <string.h>
+# if !defined(STDC_HEADERS) && HAVE_MEMORY_H
+#  include <memory.h>
+# endif
+# ifndef index
+#  define index strchr
+# endif
+# ifndef rindex
+#  define rindex strrchr
+# endif
+# ifndef bcopy
+#  define bcopy(s, d, n) memcpy ((d), (s), (n))
+# endif
+# ifndef bcmp
+#  define bcmp(s1, s2, n) memcmp ((s1), (s2), (n))
+# endif
+# ifndef bzero
+#  define bzero(s, n) memset ((s), 0, (n))
+# endif
+#else
+# include <strings.h>
+#endif
+
+#endif

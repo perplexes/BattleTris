@@ -1,0 +1,45 @@
+# Define special targets for Sun make development
+
+.KEEP_STATE:
+.SUFFIXES:
+.SUFFIXES: .H .C .o
+
+SHELL		= /bin/sh
+
+# Define locations of package libraries and include files
+
+MOTIF_CFLAGS	= -I/usr/local/include
+MOTIF_LIBS	= -L/usr/local/lib -lXm -R/usr/dt/lib
+
+X11_CFLAGS	=  -I/usr/X11R6/include
+X11_LIBS	=  -lXt -lX11 -lXext  -L/usr/X11R6/lib -R/usr/X11R6/lib 
+
+NET_LIBS	=  #-lsocket -lnsl
+
+# Define destination directories for targets relative to source directories
+
+DSTINCDIR	= ../../include
+DSTLIBDIR	= ../../lib
+DSTBINDIR	= ../../bin
+
+RELMANDIR	= /home/mws/man/man1
+RELBINDIR	= /home/mws/bin
+RELSHRDIR	= /home/mws/share/BattleTris
+RELDEFDIR	= /home/mws/app-defaults
+
+# Define base flags to be used in Makefiles
+
+BT_CXXFLAGS	= -DNDEBUG -g
+BT_IFLAGS	= -I. -I$(DSTINCDIR) 
+BT_LDFLAGS	= -L. -L$(DSTLIBDIR) -xildoff
+
+# Define pathnames of needed utilities
+
+CXX		= c++
+AR		= ar -ru
+RANLIB		= :
+INSTALL		= /bin/sh ../../bin/install-sh -c
+RM		= rm -rf
+
+$(DSTINCDIR)/%.H: %.H
+	$(INSTALL) -m 0444 $< $@

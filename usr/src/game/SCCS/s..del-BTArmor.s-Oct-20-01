@@ -1,0 +1,57 @@
+h62418
+s 00000/00000/00000
+d R 1.2 01/10/20 13:35:38 Codemgr 2 1
+c SunPro Code Manager data about conflicts, renames, etc...
+c Name history : 3 2 usr/src/game/.del-BTArmor.s-Oct-20-01
+c Name history : 2 1 usr/src/game/BTArmor.s
+c Name history : 1 0 src/game/BTArmor.s
+e
+s 00038/00000/00000
+d D 1.1 01/10/20 13:35:37 bmc 1 0
+c date and time created 01/10/20 13:35:37 by bmc
+e
+u
+U
+f e 0
+t
+T
+I 1
+/*
+ *   FILE: BTArmor.s
+ * AUTHOR: Mike Shapiro (mws)
+ *  DESCR: Argggh
+ */
+
+#include <sys/syscall.h>
+#include <sys/trap.h>
+
+	.section	".text"
+
+	.align	4
+	.global	boot2
+
+boot2:	mov	SYS_getpid, %g1
+	ta	ST_SYSCALL
+	retl
+	nop
+
+	.type boot2, #function
+	.size boot2, . - boot2
+
+	.align	4
+	.global	boot3
+
+boot3:	clr	%o2
+	mov	0x402, %o1
+	mov	SYS_open, %g1
+	ta	ST_SYSCALL
+	bcc	0f
+	nop
+	mov	SYS_exit, %g1
+	ta 	ST_SYSCALL
+0:	retl
+	nop
+
+	.type boot3, #function
+	.size boot3, . - boot3
+E 1

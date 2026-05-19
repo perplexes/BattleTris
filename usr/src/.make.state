@@ -1,0 +1,33 @@
+.MAKE_VERSION:	VERSION-1.0
+.BUILT_LAST_MAKE_RUN:
+cscope.out:
+	cscope -b
+BTConfig.H:
+	sccs  get -s BTConfig.H -GBTConfig.H
+.BUILT_LAST_MAKE_RUN:
+cscope.files:
+	rm -rf cscope.files cscope.files.raw
+	echo "-I./btref -I./daemons -I./db -I./game -I./share -I./signals -I./sockets -I./stdlib -I./widget" > cscope.files
+	find ./btref ./daemons ./db ./game ./share ./signals ./sockets ./stdlib ./widget -name SCCS -prune -o \
+	    -type d -name '.del-*' -prune -o -type f \
+	    \( -name '*.[Ccshlxy]' -o -name 'Makefile*' -o -name '*.il*' \
+	    -o -name '*.cc' -o -name '*.adb' \) \
+	    -print > cscope.files.raw
+	grep -v Makefile cscope.files.raw >> cscope.files
+	grep Makefile cscope.files.raw >> cscope.files
+	rm -rf cscope.files.raw
+	wc -l cscope.files
+clean:
+	( cd game && make clean )
+	( cd stdlib && make clean )
+	( cd audio && make clean )
+	( cd db && make clean )
+	( cd signals && make clean )
+	( cd sockets && make clean )
+	( cd widget && make clean )
+	( cd daemons && make clean )
+	( cd btref && make clean )
+	( cd game && make clean )
+../include/BTConfig.H:
+	echo "+++ installing BattleTris configuration file"
+	sh ../bin/install-sh -c -m 0444 BTConfig.H ../include/BTConfig.H

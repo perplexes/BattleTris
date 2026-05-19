@@ -1,0 +1,7 @@
+
+/*
+ * BattleTris site configuration header file
+ */
+
+#ifndef BTCONFIG_H
+#define BTCONFIG_H

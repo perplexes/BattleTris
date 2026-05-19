@@ -1,0 +1,40 @@
+h51806
+s 00000/00000/00000
+d R 1.2 01/10/20 13:35:42 Codemgr 2 1
+c SunPro Code Manager data about conflicts, renames, etc...
+c Name history : 2 1 usr/src/config.log
+c Name history : 1 0 src/config.log
+e
+s 00021/00000/00000
+d D 1.1 01/10/20 13:35:41 bmc 1 0
+c CodeManager Uniquification: src/config.log
+c date and time created 01/10/20 13:35:41 by bmc
+e
+u
+U
+f e 0
+t
+T
+I 1
+This file contains any messages produced by compilers while
+running configure, to aid debugging if configure makes a mistake.
+
+"configure", line 986: Error: The function IceConnectionNumber must have a prototype.
+1 Error(s) detected.
+"configure", line 1029: Error: The function dnet_ntoa must have a prototype.
+1 Error(s) detected.
+"configure", line 1063: Error: The function dnet_ntoa must have a prototype.
+1 Error(s) detected.
+"configure", line 1102: Error: The function t_accept must have a prototype.
+1 Error(s) detected.
+"configure", line 1140: Error: The function socket must have a prototype.
+1 Error(s) detected.
+"configure", line 1219: Error: The function regcmp must have a prototype.
+1 Error(s) detected.
+"configure", line 1496: Error: The function opendir must have a prototype.
+1 Error(s) detected.
+"configure", line 1926: Error: Only one of a set of overloaded functions can be "C" or "Pascal".
+1 Error(s) detected.
+"configure", line 2286: Warning: The variable app has not yet been assigned a value.
+1 Warning(s) detected.
+E 1

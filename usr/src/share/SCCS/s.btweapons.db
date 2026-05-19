@@ -1,0 +1,120 @@
+h08001
+s 00000/00000/00000
+d R 1.2 01/10/20 13:35:40 Codemgr 2 1
+c SunPro Code Manager data about conflicts, renames, etc...
+c Name history : 2 1 usr/src/share/btweapons.db
+c Name history : 1 0 src/share/btweapons.db
+e
+s 00102/00000/00000
+d D 1.1 01/10/20 13:35:39 bmc 1 0
+c date and time created 01/10/20 13:35:39 by bmc
+e
+u
+U
+f e 0
+t
+T
+I 1
+#
+The Feared Weird
+Gives your opponent bizarre, disjointed pieces. None of the pieces are easily placed; particularly deadly when used in conjunction with either the Mad Hatter or No Dice.
+#
+Four-by-Four
+Evil incarnate. Replaces your opponent's box piece with one that is a four block by four block hollow box.  
+#
+The Mad Hatter
+Your opponent's pieces never stop spinning (unless pinned up against the wall). Quickly frustrates opponent. Very good combination weapon.
+#
+Upbyside-down
+Flips your opponent's screen upside-down. Their direction keys are reversed, and pieces rotate the opposite way.  
+#
+Fallout
+The middle six columns of your board "fall out." The gap that they leave represents a black hole. Any pieces dropped into this black hole will just disappear. The player must instead build a "bridge" of pieces over the hole in order to get lines. 
+#
+Swap meet
+Swaps your screen with your opponent's. Screw up your own board, and then swap it out. Of course, the other opponent may launch another Swap, but such is life.
+#
+Lawyer's delite
+Outright stolen from the original 2-player arcade version of tetris. Every line you get, your opponent's screen "rises" up by one line.
+#
+Rise up
+Raises the opponent's screen one level (the bottom level will be solid with one, random, block missing).
+#
+Flip out
+Flips your opponents screen on a vertical axis.  Can be extremely annoying if done often enough.
+#
+Speedy Gonzales
+Doubles the speed of the opponent's game. Several of these launched at once get make things pretty interesting for your opponent.
+#
+Missing Pieces
+Randomly removes one of your opponent's blocks.
+#
+Piece It Together
+Randomly adds a piece to your opponent's board. More than one great player has fallen on a lucky Piece It Together.
+#
+The Blind Cleric
+Bombs a region of your opponent's screen. Can be particularly annoying when an elaborate setup develops a large hole in its center.
+#
+Mondale '96
+Taxes your opponent with a hefty 30 percent rate. Whenever they get funds, you swipe a certain percentage. 
+#
+Keating Five
+Your opponent's funds are all taken away...and given to you.
+#
+Carter Years
+Relives the inflationary years of Jimmy Carter -- the prices double at your opponent's bazaar.
+#
+Reagan Era
+Relives that era of debt -- your opponent's funds are multiplied by -1. 
+#
+William Ames
+Displays your opponent's screen and your opponent's funds next to your own.  Remember that cheap spies are easily bought and sold...
+#
+Ace of Spies  
+Send Reilly over the border.  A more expensive spy, but such is the price of greater accuracy.  Reilly's still human though...you never know when he's going to flake out on the Russian border.
+#
+The Condor
+Launch the world's most advanced spy satellite.  Guaranteed accuracy, but you probably had to sell arms to the Contras in order to afford it.
+#
+Have a Nice Day
+Gives your opponent a smiley face. Why give your opponent the opportunity to make an extra 150 beans? Hit them with a Reagan Era shortly after. God Bless America.
+#
+So Long
+Deprives your opponent of long pieces.
+#
+No Dice
+Deprives your opponent of dice.
+#
+Bug Report
+Like Piece It Together, except the block is invisible (which leads your opponent to file a bug report).  
+#
+Bottle neck
+Your opponent's board suddenly develops a 4-block wide bottle neck.
+# 
+Slide Denied
+Take the famous BattleTris slide out of your opponent's diet.
+#
+Lazy Susan
+Turns the tables on you opponent by swapping your arsenal with theirs.
+#
+Meadow
+This weapon lineup simulates Meadow running on your opponent's machine:  the drop speed of their pieces is halved.
+#
+Mirror Mirror
+An oft requested defensive weapon:  when launched, your opponent's weapons will be reflected back on to them.  Note that some weapons (Swap Meet, Keating Five, Have a Nice Day, etc.) are simply nullified.
+#
+The Twilight Zone
+All of the bricks in your opponents screen becomes invisible.
+#
+Slick Willy
+Your opponent's pieces move endlessly from left to right and back.
+#
+Broken Record
+Gives your opponent the same piece the same piece the same piece ... 
+#
+The Force
+When your opponent gets a line, his board won't drop to fill the empty space.
+#
+The Gimp
+Distracts your opponent from the game.
+E 1

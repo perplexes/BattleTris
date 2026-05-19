@@ -1,0 +1,102 @@
+h15708
+s 00000/00003/00042
+d D 1.5 01/10/21 01:52:43 bmc 6 5
+c 1000007 audio relies on broken, unshipped header files, libraries
+e
+s 00002/00002/00043
+d D 1.4 01/10/20 15:46:30 bmc 5 4
+c 1000005 make install work properly
+e
+s 00001/00001/00044
+d D 1.3 01/10/20 15:24:08 bmc 4 3
+c 1000002 add -xildoff to linker flags
+e
+s 00002/00002/00043
+d D 1.2 01/10/20 13:57:28 bmc 3 1
+c 1000001 BT needs 4.2 compilers
+e
+s 00000/00000/00000
+d R 1.2 01/10/20 13:35:43 Codemgr 2 1
+c SunPro Code Manager data about conflicts, renames, etc...
+c Name history : 2 1 usr/src/Makeinclude
+c Name history : 1 0 src/Makeinclude
+e
+s 00045/00000/00000
+d D 1.1 01/10/20 13:35:42 bmc 1 0
+c date and time created 01/10/20 13:35:42 by bmc
+e
+u
+U
+f e 0
+t
+T
+I 1
+# Define special targets for Sun make development
+
+.KEEP_STATE:
+.SUFFIXES:
+.SUFFIXES: .H .C .o
+
+SHELL		= /bin/sh
+
+# Define locations of package libraries and include files
+
+MOTIF_CFLAGS	= -I/usr/dt/include
+MOTIF_LIBS	= -L/usr/dt/lib -lXm -R/usr/dt/lib
+
+D 6
+AUDIO_CFLAGS	= -I/usr/demo/SOUND/include
+AUDIO_LIBS	= -L/usr/demo/SOUND/lib -laudio
+
+E 6
+X11_CFLAGS	=  -I/usr/openwin/include
+X11_LIBS	=  -lXt -lX11 -lXext  -L/usr/openwin/lib -R/usr/openwin/lib 
+
+NET_LIBS	=  -lsocket -lnsl
+
+# Define destination directories for targets relative to source directories
+
+DSTINCDIR	= ../../include
+DSTLIBDIR	= ../../lib
+DSTBINDIR	= ../../bin
+
+RELMANDIR	= /home/mws/man/man1
+RELBINDIR	= /home/mws/bin
+RELSHRDIR	= /home/mws/share/BattleTris
+RELDEFDIR	= /home/mws/app-defaults
+
+# Define base flags to be used in Makefiles
+
+BT_CXXFLAGS	= -DNDEBUG -g
+BT_IFLAGS	= -I. -I$(DSTINCDIR) 
+D 4
+BT_LDFLAGS	= -L. -L$(DSTLIBDIR) 
+E 4
+I 4
+BT_LDFLAGS	= -L. -L$(DSTLIBDIR) -xildoff
+E 4
+
+# Define pathnames of needed utilities
+
+D 3
+CXX		= CC
+AR		= CC -xar -o
+E 3
+I 3
+D 5
+CXX		= /net/slug-17/export/sparc/opt/SUNWspro/SC4.2/bin/CC
+E 5
+I 5
+CXX		= /net/slug-17/export/sparc/opt/SUNWspro/SC6.1/bin/CC
+E 5
+AR		= $(CXX) -xar -o
+E 3
+RANLIB		= :
+I 5
+INSTALL		= /bin/sh ../../bin/install-sh -c
+E 5
+RM		= rm -rf
+D 5
+INSTALL		= ../../bin/install-sh -c
+E 5
+E 1
