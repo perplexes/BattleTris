@@ -1,7 +1,7 @@
 #ifndef BTDIRS_H
 #define BTDIRS_H
 
-#define BT_SRC_DIR	"/Users/ahl/src/BattleTris/usr/src"
+#define BT_SRC_DIR	"@BT_SRC_DIR@"
 #define BT_SOUND_DIR	BT_SRC_DIR "/share/sounds/"
 #define BT_ART_DIR	BT_SRC_DIR "/art/"
 #define BTDB_WEAPONS	BT_SRC_DIR "/share/btweapons.db"

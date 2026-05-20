@@ -97,7 +97,7 @@ void BTStack<T>::operator=(BTStack<T> &other)
     mem_end_ = mem_ + mem_no_ * sizeof(T);
   }
   memcpy(mem_,other.mem_,other.mem_tail_-other.mem_);
-  mem_tail_ = mem_ + other.mem_tail_ - other.mem_;
+  mem_tail_ = mem_ + (other.mem_tail_ - other.mem_);
   mem_ptr_ = mem_;
   count_ = ( mem_tail_ - mem_ ) / sizeof(T);
 }

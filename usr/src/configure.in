@@ -430,4 +430,9 @@ AC_ARG_WITH(
      fi ]
 )
 
-AC_OUTPUT(Makeinclude)
+dnl Absolute path to the source tree, so BTDirs.H can locate share/, art/,
+dnl and the weapons databases when running uninstalled from the build tree.
+BT_SRC_DIR=`cd "$srcdir" && pwd`
+AC_SUBST(BT_SRC_DIR)
+
+AC_OUTPUT(Makeinclude game/BTDirs.H)

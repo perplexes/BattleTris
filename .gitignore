@@ -15,3 +15,8 @@ usr/src/config.log
 usr/src/config.status
 usr/src/Makeinclude
 usr/src/BTConfig.H
+usr/src/game/BTDirs.H
+
+# Autoconf working files
+usr/src/autom4te.cache/
+usr/src/configure~

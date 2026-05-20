@@ -12,7 +12,7 @@
 #include <sys/systeminfo.h>
 #include <alloca.h>
 #else
-#include <nameser.h>
+#include <arpa/nameser.h>
 #endif
 #include <arpa/inet.h>
 #include <netinet/in.h>

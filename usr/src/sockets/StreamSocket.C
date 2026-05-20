@@ -38,10 +38,6 @@ using namespace std;
 
 #include "StreamSocket.H"
 
-#ifndef HAVE_SOCKLEN_T
-typedef int socklen_t;
-#endif
-
 StreamSocket::StreamSocket(InetAddress& addr)
 : Socket(socket(AF_INET, SOCK_STREAM, 0)), in_peer_(0), un_peer_(0),
   in_addr_(addr)
@@ -508,28 +504,16 @@ short StreamSocket::sendfd(int fd)
   struct cmsghdr *cmptr = (struct cmsghdr *) cmbuf;
 
   if(fd < 0) {
-
-#  ifdef _XPG4_2
     msg.msg_control = NULL;
     msg.msg_controllen = 0;
-#  else
-    msg.msg_accrights = NULL;
-    msg.msg_accrightslen = 0;
-#  endif
-
   } else {
     cmptr->cmsg_level = SOL_SOCKET;
     cmptr->cmsg_type = SCM_RIGHTS;
     cmptr->cmsg_len = sizeof(struct cmsghdr) + sizeof(int);
 
-#  ifdef _XPG4_2
     msg.msg_control = (caddr_t) cmptr;
     msg.msg_controllen = sizeof(struct cmsghdr) + sizeof(int);
     *((int *) CMSG_DATA(cmptr)) = fd;
-#  else
-    msg.msg_accrights = (caddr_t) &fd;
-    msg.msg_accrightslen = sizeof(int);
-#  endif
   }
 
   if(sendmsg(sock(), &msg, 0) != 2)
@@ -660,13 +644,8 @@ short StreamSocket::recvfd(int& filedes)
     msg.msg_name = NULL;
     msg.msg_namelen = 0;
 
-#  ifdef _XPG4_2
     msg.msg_control = (caddr_t) cmptr;
     msg.msg_controllen = sizeof(struct cmsghdr) + sizeof(int);
-#  else
-    msg.msg_accrights = (caddr_t) &newfd;
-    msg.msg_accrightslen = sizeof(int);
-#  endif
 
     if((nread = recvmsg(sock(), &msg, 0)) < 0)
       return ERRSTREAMRECV;
@@ -680,19 +659,11 @@ short StreamSocket::recvfd(int& filedes)
 
 	status = *ptr & 255;
 
-#  ifdef _XPG4_2
 	if(status == 0) {
 	  if(msg.msg_controllen != sizeof(struct cmsghdr) + sizeof(int))
 	    return ERRSTREAMRECV;
 	  newfd = *(int *) CMSG_DATA(cmptr);
 	}
-#  else
-        if(status == 0) {
-          if(msg.msg_accrightslen != sizeof(int))
-            return ERRSTREAMRECV;
-          newfd = *((int *) msg.msg_accrights);
-        }
-#  endif
 
 	nread -= 2;	// Our protocol header is 2 bytes
       }

@@ -721,7 +721,7 @@ const char *itoa(int num, int base, int uns)
   static char buf[16];
  
   int i = 16, neg = (!uns && (num < 0));
-  uint_t num1;
+  unsigned int num1;
         
   buf[--i] = 0;
   num1 = neg ? -num : num;
