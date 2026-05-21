@@ -1,5 +1,7 @@
 #include "BTConfig.H"
 
+#include <string.h>
+
 #include "btcmds.H"
 #include "btref.H"
 

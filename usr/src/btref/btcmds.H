@@ -3,6 +3,8 @@
 
 #include "BTConfig.H"
 
+#include <sys/types.h>
+
 #define BTCMDS_DELIM	"-------------------------\n"
 #define BTCMDS_TMPDB	"btref.tmpdb"
 

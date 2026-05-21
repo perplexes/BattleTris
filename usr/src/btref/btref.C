@@ -7,10 +7,7 @@ using namespace std;
 #include <iomanip>
 using namespace std;
 #include <stdio.h>
-
-#if HAVE_UNAME
-# include <sys/utsname.h>
-#endif
+#include <string.h>
 
 #if HAVE_UNISTD_H
 # include <unistd.h>
@@ -57,9 +54,7 @@ int main(int argc, char *argv[])
 {
   parse_args(argc, argv);
 
-  char srvrhost[BT_HOSTNAMELEN + 1];
   char pathbuf[1024];
-  char *ptr;
 
   if((g_conf = new BTConfigFile(BTREF_CONFIGFILE)) == 0) {
     cerr << "btref: Insufficient memory to load" << endl;
@@ -68,25 +63,6 @@ int main(int argc, char *argv[])
 
   if(!(*g_conf)) {
     delete g_conf;
-    return BTREF_ERROR;
-  }
-
-#if HAVE_UNAME
-  struct utsname hostinfo;
-  uname(&hostinfo);
-  char *thishost = hostinfo.nodename;
-#else
-  char thishost[257];
-  gethostname(thishost, 257);
-#endif
-
-  strncpy(srvrhost, BT_SERVER_HOST, BT_HOSTNAMELEN);
-  if((ptr = strchr(srvrhost, '.')) != NULL)
-    *ptr = '\0';
-
-  if(strcmp(thishost, srvrhost) != 0) {
-    cerr << "btref: You must run btref from a BattleTris Server" << endl;
-    cerr << "btref: This referee is compiled for " << BT_SERVER_HOST << endl;
     return BTREF_ERROR;
   }
 
