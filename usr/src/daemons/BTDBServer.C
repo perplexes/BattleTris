@@ -234,4 +234,6 @@ short BTDBServer::update()
   }
 
   plycnt_ = (plycnt_ + 1) % BTDB_PLAYERS_CYCLE;
+
+  return ERRBTDBNOERR;
 }
