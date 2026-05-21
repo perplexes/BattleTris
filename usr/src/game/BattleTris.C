@@ -460,8 +460,9 @@ static int x11_nonfatal(Display *display, XErrorEvent *event)
 
   cerr << "BattleTris: X11 ERROR: " << errbuf << endl;
   cerr << "BattleTris: X11 ERROR: Serial no " << event->serial
-       << ", Op code " << event->request_code << '.' << event->minor_code
-       << ", Err code " << event->error_code << endl;
+       << ", Op code " << (int) event->request_code
+       << '.' << (int) event->minor_code
+       << ", Err code " << (int) event->error_code << endl;
   cerr << "BattleTris: X11 ERROR: Resource id " << event->resourceid
        << ", Display " << DisplayString(display) << endl;
 
@@ -556,18 +557,14 @@ static int toolkit_init(int *argcptr, char *argv[])
 
   g_screen = DefaultScreen(g_display);
   g_visual = DefaultVisual(g_display, g_screen);
-  Visual *vis = (Visual *) 0;
-  int depth = 24;
+  g_rootWindow = RootWindow(g_display, g_screen);
+  g_depth = DefaultDepth(g_display, g_screen);
+
+  Visual *vis = g_visual;
+  int depth = g_depth;
 
   g_colormap = XDefaultColormap( g_display, g_screen );
   g_GC = XDefaultGC( g_display, g_screen );
- 
-/*
-  if(vis = find_24_bit_true_color(g_display, g_screen))
-    cout << "BattleTris: Using 24-bit TrueColor visual" << endl;
-  else
-  */
-    vis = find_deepest_pseudo(g_display, g_screen, &depth);
 
   if(vis == (Visual *) 0) {
     cerr << "BattleTris: Failed to find PseudoColor visual" << endl;

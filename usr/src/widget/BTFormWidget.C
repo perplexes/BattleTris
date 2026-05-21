@@ -19,6 +19,8 @@ BTFormWidget::BTFormWidget(BTWidget *parent, const char *name,
 	    XmNheight, height, XmNwidth, width,
 	    XmNfractionBase, fraction_base,
 	    XmNdepth, g_depth,
+	    XmNvisual, g_visual,
+	    XmNcolormap, g_colormap,
 	    NULL);
 }
 
