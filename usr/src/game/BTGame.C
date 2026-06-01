@@ -731,18 +731,22 @@ void BTGame::keyPressed (char c) {
 		     << "BattleTris owns you." << endl;
 }
 
+void BTGame::startSlide() {
+	removeTimeOut(BT_SLICK_TIMEOUT);
+	removeTimeOut(BT_DROP_TIMEOUT);
+	sliding_ = 1;
+
+	*slide_time_ = BT_SLIDE_TIME *
+	    (1 - weapon_manager_->BTActive[BT_NO_SLIDE]);
+	addTimeOut(BT_SLIDE_TIMEOUT);
+}
+
 void BTGame::drop() {
 	if (!current_piece_)
 		return;
 
-	if (!current_piece_->moveTo(x_, y_+delta_y_)) { 
-		removeTimeOut(BT_SLICK_TIMEOUT);
-		removeTimeOut(BT_DROP_TIMEOUT);
-		sliding_ = 1;
-    
-		*slide_time_ = BT_SLIDE_TIME *
-		    (1 - weapon_manager_->BTActive[BT_NO_SLIDE]);
-		addTimeOut(BT_SLIDE_TIMEOUT);
+	if (!current_piece_->moveTo(x_, y_+delta_y_)) {
+		startSlide();
 	} else {
 		y_ += delta_y_;
 	}
@@ -750,11 +754,11 @@ void BTGame::drop() {
 	DISPLAY->flush();
 }
 
-void BTGame::place() {
+void BTGame::place(int force) {
 	if (!current_piece_)
 		return;
 
-	if (!current_piece_->moveTo(x_, y_ + delta_y_)) { 
+	if (!current_piece_->moveTo(x_, y_ + delta_y_) || force) {
 		if (drop_ && sliding_ <= 1 &&
 		    !current_piece_->canMoveTo(x_, y_ - delta_y_)) {
 			/* we are go for airslide */

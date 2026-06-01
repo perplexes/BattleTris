@@ -141,7 +141,8 @@ public:
 	void unpause();
 	void keyPressed (char c);
 	void drop();
-	void place();
+	void startSlide();
+	void place(int force = 0);
 	void beginDrop();
 	void moveLeft();
 	void moveRight();
