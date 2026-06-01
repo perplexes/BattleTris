@@ -30,10 +30,11 @@ Solaris on SPARC, using [X11](https://en.wikipedia.org/wiki/X_Window_System) and
 [Motif](https://en.wikipedia.org/wiki/Motif_(software)).
 This version works on both 
 MacOS (via [XQuartz](https://www.xquartz.org/) and OpenMotif)
-and on Linux.  
+and on Linux.  To compile BattleTris, you should be able to 
+(more or less) run `configure`.
 
 Note that BattleTris dates from a time that the highest resolution
-monitors were 1600 by 900; those on modern (higher resolution) displays
+monitors were 1600 by 1280; those on modern (higher resolution) displays
 may find that the resolution of output needs to be manually lowered to
 make the game playable.
 
@@ -80,9 +81,9 @@ The first player to die loses.
 ### Graphics
 
 The intent is to keep game play more or less as it was in ~1994,
-including the use of Motif.
-It would be entirely reasonable to rewrite BattleTris for modernity,
-of course, but this version will remain true to the 1990s intent.
+including the use of Motif.  It would be entirely reasonable to rewrite
+BattleTris for modernity, of course, but this version will remain true
+to its mid-1990s roots.
 
 ### Networking
 
@@ -93,6 +94,10 @@ the game, but should be otherwise straightforward.
 
 ### Sounds 
 
-The sounds -- a major component of the original BattleTris that 
+The BattleTris sounds -- a major component of the original game that 
 players of the era will remember -- have not yet been recovered.
+We are not totally out of ideas of where they may linger, but if you
+happen to be in possession of BattleTris audio files (or the backup
+tapes which might contain them?), you would be a hero down at the 
+GenX retirement village.
 
