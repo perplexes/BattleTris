@@ -381,7 +381,10 @@ void BTBoardManager::receive (BTRingPacket *packet) {
     case BT_GIMP: {
       for (int i = 0; i < height_; i++)
 	for (int j = 0; j < width_; j++) {
-	  if (map_[j][i]) {
+	  // Do not gimpify non-removeable boxes (e.g. the bottleneck);
+	  // disposing and recreating them corrupts the board and can
+	  // crash on a BT_BOTTLE/BT_GIMP/BT_BLIND combo.
+	  if (map_[j][i] && map_[j][i]->isRemoveable()) {
 	    int value = map_[j][i]->value();
 	    box_manager_->dispose(map_[j][i]);
 	    map_[j][i] = box_manager_->createGimp(j,i,value);
