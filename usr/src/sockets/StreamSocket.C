@@ -35,6 +35,7 @@ using namespace std;
 #include <stdio.h>
 #include <netdb.h>
 #include <errno.h>
+#include <cstring>
 
 #include "StreamSocket.H"
 

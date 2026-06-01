@@ -8,6 +8,8 @@
 #include "BTConfig.H"
 #include "StreamSocketErr.H"
 
+#include <cstring>
+
 static char errmsg[255];
 
 char *StreamSocketErrMsg(short errcode)

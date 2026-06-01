@@ -10,6 +10,8 @@
 
 #include "BTConfig.H"
 
+#include <sys/time.h>
+
 #include "SocketCB.H"
 
 class Address;

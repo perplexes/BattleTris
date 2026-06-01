@@ -37,6 +37,7 @@ using namespace std;
 #include <stdio.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <cstring>
 
 #if STDC_HEADERS
 # include <stdlib.h>
