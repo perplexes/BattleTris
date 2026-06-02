@@ -424,4 +424,166 @@ impl Board {
             }
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Weapon effects on the board — `BTBoardManager::receive` (BT_WPN_ON /
+    // BT_WPN_OFF). The active-flag bookkeeping is done by [`Board::set_active`];
+    // these apply the one-shot board mutation.
+    // -----------------------------------------------------------------------
+
+    /// Set/clear an active-weapon flag the board logic consults.
+    pub fn set_active(&mut self, token: WeaponToken, on: bool) {
+        if on {
+            self.active.activate(token);
+        } else {
+            self.active.deactivate(token);
+        }
+    }
+
+    fn swap(&mut self, x1: i32, y1: i32, x2: i32, y2: i32) {
+        let a = self.get(x1, y1);
+        let b = self.get(x2, y2);
+        self.set(x1, y1, b);
+        self.set(x2, y2, a);
+    }
+
+    /// `BTBoardManager::flipOnHoriz` — mirror top↔bottom (Upbyside).
+    fn flip_horiz(&mut self) {
+        for i in 0..self.height / 2 {
+            for j in 0..self.width {
+                self.swap(j, i, j, self.height - 1 - i);
+            }
+        }
+    }
+
+    /// `BTBoardManager::flipOnVert` — mirror left↔right (Flip Out).
+    fn flip_vert(&mut self) {
+        for i in 0..self.width / 2 {
+            for j in 0..self.height {
+                self.swap(self.width - 1 - i, j, i, j);
+            }
+        }
+    }
+
+    /// The one-shot board mutation for a weapon turning on (`BT_WPN_ON`).
+    /// (Set the active flag via [`Board::set_active`] first.)
+    pub fn apply_weapon(&mut self, token: WeaponToken, rng: &mut Rng) {
+        let h = BT_BOARD_HGT;
+        match token {
+            WeaponToken::Upbyside => {
+                if !self.upside && !self.computer {
+                    self.flip_horiz();
+                }
+                self.upside = true;
+            }
+            WeaponToken::PieceIt | WeaponToken::Bug => {
+                // A box at a random empty spot in the middle two quarters.
+                let (mut i, mut j);
+                loop {
+                    i = rng.rand_below(self.width);
+                    j = rng.rand_below(self.height / 2) + self.height / 4;
+                    if !self.occupied(i, j) {
+                        break;
+                    }
+                }
+                let cell = if token == WeaponToken::Bug {
+                    Cell::color(BT_INVISIBLE)
+                } else {
+                    Cell::color(rng.rand_below(BT_NEUTRAL - 1) + 1)
+                };
+                self.set(i, j, Some(cell));
+            }
+            WeaponToken::Missing => {
+                // Remove the first removable box scanning from a random origin.
+                let sx = rng.rand_below(self.width);
+                let sy = rng.rand_below(self.height);
+                'outer: for dy in 0..self.height {
+                    let y = (sy + dy) % self.height;
+                    for dx in 0..self.width {
+                        let x = (sx + dx) % self.width;
+                        if let Some(c) = self.get(x, y) {
+                            if c.is_removable() {
+                                self.set(x, y, None);
+                                break 'outer;
+                            }
+                        }
+                    }
+                }
+            }
+            WeaponToken::Blind => {
+                for y in 0..self.height {
+                    for x in 0..self.width {
+                        if let Some(c) = self.get(x, y) {
+                            if c.is_removable() && rng.rand_below(2) == 0 {
+                                self.set(x, y, None);
+                            }
+                        }
+                    }
+                }
+            }
+            WeaponToken::Gimp => {
+                for y in 0..self.height {
+                    for x in 0..self.width {
+                        if let Some(c) = self.get(x, y) {
+                            if c.is_removable() {
+                                self.set(x, y, Some(Cell::gimp(c.value())));
+                            }
+                        }
+                    }
+                }
+            }
+            WeaponToken::Twilight => {
+                for y in 0..self.height {
+                    for x in 0..self.width {
+                        if let Some(mut c) = self.get(x, y) {
+                            c.hide();
+                            self.set(x, y, Some(c));
+                        }
+                    }
+                }
+            }
+            WeaponToken::FlipOut => self.flip_vert(),
+            WeaponToken::FallOut => {
+                // The middle columns "fall out": repeatedly drop the bottom
+                // (or top, if upside-down) line over the non-ledge columns.
+                for _ in 0..self.height {
+                    let line = if !self.upside { self.height - 1 } else { 0 };
+                    self.remove_line(line, BT_FALL_OUT_LEDGE, self.width - BT_FALL_OUT_LEDGE);
+                }
+            }
+            WeaponToken::Bottle => {
+                for x in 0..BT_BOTTLE_X {
+                    for y in (h / 2 - BT_BOTTLE_Y)..(h / 2 + BT_BOTTLE_Y) {
+                        self.set(x, y, Some(Cell::structure()));
+                        self.set(self.width - x - 1, y, Some(Cell::structure()));
+                    }
+                }
+                self.check_lines();
+            }
+            WeaponToken::RiseUp => self.insert_line(rng),
+            _ => {}
+        }
+    }
+
+    /// The board mutation for a weapon turning off (`BT_WPN_OFF`).
+    pub fn revert_weapon(&mut self, token: WeaponToken) {
+        let h = BT_BOARD_HGT;
+        match token {
+            WeaponToken::Upbyside => {
+                self.upside = false;
+                if !self.computer {
+                    self.flip_horiz();
+                }
+            }
+            WeaponToken::Bottle => {
+                for x in 0..BT_BOTTLE_X {
+                    for y in (h / 2 - BT_BOTTLE_Y)..(h / 2 + BT_BOTTLE_Y) {
+                        self.set(x, y, None);
+                        self.set(self.width - x - 1, y, None);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }

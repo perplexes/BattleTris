@@ -11,11 +11,13 @@
 //! bazaar, and the two-player relay layer on top of this via the score/funds
 //! economy already modeled here (see the `op_*` score fields and [`GameEvent`]).
 
+use crate::arsenal::Arsenal;
 use crate::board::Board;
 use crate::constants::*;
 use crate::piece::Piece;
 use crate::piece_manager::PieceManager;
 use crate::rng::Rng;
+use crate::weapons::{weapon_table, ActiveFlags, WeaponToken, BT_MAX_WEAPONS};
 
 /// `BTScore` — the per-player scoreboard (`usr/src/game/BTScore.H`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -49,6 +51,15 @@ pub enum GameEvent {
     Locked { lines: i32, value: i32, funds: i32 },
     /// An "airslide" was performed (`BT_AIRSLIDE`).
     Airslide,
+    /// This player launched a weapon — the relay must deliver it to the
+    /// opponent (where it becomes `BT_WPN_ON`). Mirrors `BT_WPN_LAUNCH`.
+    WeaponLaunched(WeaponToken),
+    /// This player's score changed — the relay sends it to the opponent as
+    /// `BT_OP_SCORE` (drives Lawyers' Delite, taxes, the bazaar trigger).
+    Scored { score: i64, lines: i64, funds: i64 },
+    /// Combined lines crossed a multiple of 20 — open the weapons bazaar
+    /// (`BT_START_BAZ`).
+    EnterBazaar,
     /// The player topped out (`BT_GAME_OVER`).
     GameOver,
 }
@@ -86,6 +97,25 @@ pub struct Game {
     slide_accum: i32,
     paused: bool,
 
+    // --- weapons (BTWeaponManager) ---
+    /// Active-weapon flags affecting this player (`BTActive[]`).
+    weapons: ActiveFlags,
+    /// Remaining duration in lines per weapon (`remaining_[]`).
+    remaining: [i32; BT_MAX_WEAPONS],
+    /// This player's arsenal.
+    arsenal: Arsenal,
+    /// Weapons received from the opponent, applied at the next piece lock
+    /// (`BTCommManager::weapq_` flushed in `place`).
+    pending: Vec<WeaponToken>,
+    /// Auto-rotate (Mad Hatter) / auto-slide (Slick Willy) sub-timers.
+    hatter_accum: i32,
+    slick_accum: i32,
+    slick_dir: i32,
+    /// In the weapons bazaar (game frozen).
+    in_bazaar: bool,
+    /// Lines remaining until the next bazaar (combined player+opponent lines).
+    lines_til_baz: i32,
+
     events: Vec<GameEvent>,
 }
 
@@ -116,6 +146,15 @@ impl Game {
             drop_accum: 0,
             slide_accum: 0,
             paused: false,
+            weapons: ActiveFlags::new(),
+            remaining: [0; BT_MAX_WEAPONS],
+            arsenal: Arsenal::new(),
+            pending: Vec::new(),
+            hatter_accum: 0,
+            slick_accum: 0,
+            slick_dir: 0,
+            in_bazaar: false,
+            lines_til_baz: BT_LINES_TIL_BAZ,
             events: Vec::new(),
         };
         g.start_game();
@@ -184,9 +223,10 @@ impl Game {
     /// Advance the virtual clock by `dt_ms`, firing drop/slide steps as their
     /// intervals elapse. No-op while paused or after game over.
     pub fn tick(&mut self, dt_ms: i32) {
-        if self.paused || self.phase == Phase::Over || dt_ms <= 0 {
+        if self.paused || self.in_bazaar || self.phase == Phase::Over || dt_ms <= 0 {
             return;
         }
+        self.tick_weapons(dt_ms);
         match self.phase {
             Phase::Falling => {
                 self.drop_accum += dt_ms;
@@ -275,6 +315,21 @@ impl Game {
                 funds: clear.funds,
             });
 
+            // BT_LINE: count down active-weapon durations; BT_FUNDS/SCORE +
+            // bazaar trigger; then publish our score for the opponent.
+            if clear.lines > 0 {
+                self.tick_durations(clear.lines);
+                self.update_bazaar();
+            }
+            self.events.push(GameEvent::Scored {
+                score: self.score.score,
+                lines: self.score.lines,
+                funds: self.score.funds,
+            });
+
+            // flushWeapons: apply weapons the opponent launched at us.
+            self.flush_pending();
+
             // Next piece (or top-out).
             self.spawn();
         } else {
@@ -350,5 +405,212 @@ impl Game {
     /// `BTGame::pause` (local toggle; no network send).
     pub fn set_paused(&mut self, paused: bool) {
         self.paused = paused;
+    }
+
+    // ---- weapons & two-player relay ---------------------------------------
+
+    pub fn is_in_bazaar(&self) -> bool {
+        self.in_bazaar
+    }
+    pub fn lines_til_bazaar(&self) -> i32 {
+        self.lines_til_baz
+    }
+    /// Weapon token in arsenal slot `i`, as its protocol index (or -1 if empty).
+    pub fn arsenal_token(&self, i: usize) -> i32 {
+        self.arsenal.token(i).map(|t| t.index() as i32).unwrap_or(-1)
+    }
+    pub fn arsenal_quantity(&self, i: usize) -> u16 {
+        self.arsenal.quantity(i)
+    }
+
+    /// `BTWeaponManager::launchWeapon` — fire arsenal slot `slot` (0-based) at
+    /// the opponent (emits [`GameEvent::WeaponLaunched`]).
+    pub fn launch_weapon(&mut self, slot: usize) {
+        if self.in_bazaar || self.phase == Phase::Over {
+            return;
+        }
+        if let Some(tok) = self.arsenal.token(slot) {
+            self.arsenal.use_slot(slot);
+            self.events.push(GameEvent::WeaponLaunched(tok));
+        }
+    }
+
+    /// A weapon launched by the opponent arrives here; applied at the next
+    /// piece lock (`BTCommManager::weapq_` / `flushWeapons`).
+    pub fn receive_weapon(&mut self, token: WeaponToken) {
+        self.pending.push(token);
+    }
+
+    /// `BT_OP_SCORE` — the opponent's score changed. Updates the mirror, applies
+    /// Lawyers' Delite, and advances the bazaar trigger.
+    pub fn receive_op_score(&mut self, op_score: i64, op_lines: i64, op_funds: i64) {
+        let old_op_lines = self.score.op_lines;
+        self.score.op_score = op_score;
+        self.score.op_funds = op_funds;
+        if self.weapons.is_active(WeaponToken::Lawyers) {
+            for _ in 0..(op_lines - old_op_lines).max(0) {
+                self.board.insert_line(&mut self.rng);
+            }
+        }
+        self.score.op_lines = op_lines;
+        self.update_bazaar();
+    }
+
+    /// Buy `token` in the bazaar; honors Carter (price doubling). Returns true
+    /// on success.
+    pub fn buy_weapon(&mut self, token: WeaponToken) -> bool {
+        if !self.in_bazaar {
+            return false;
+        }
+        let mut price = weapon_table()[token.index()].price as i64;
+        if self.weapons.is_active(WeaponToken::Carter) {
+            price *= 2;
+        }
+        if self.score.funds < price {
+            return false;
+        }
+        if self.arsenal.buy(token) {
+            self.score.funds -= price;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Leave the bazaar and resume play (`BTGame::leaveBazaar`).
+    pub fn leave_bazaar(&mut self) {
+        self.in_bazaar = false;
+    }
+
+    /// `BTGame::receive(BT_WPN_ON)` + the per-subsystem effects — activate a
+    /// weapon on THIS (victim) player.
+    fn apply_weapon_on(&mut self, token: WeaponToken) {
+        self.weapons.activate(token);
+        self.remaining[token.index()] += weapon_table()[token.index()].duration as i32;
+
+        self.board.set_active(token, true);
+        self.board.apply_weapon(token, &mut self.rng);
+        self.pieces.weapon_on(token);
+
+        match token {
+            WeaponToken::Upbyside => {
+                self.def_y = BT_BOARD_HGT - 4;
+                self.delta_y = -1;
+                self.left_x = 1;
+                self.right_x = -1;
+            }
+            WeaponToken::Speedy => {
+                self.base_drop_time >>= 1;
+                if self.drop_time != self.fast_drop_time {
+                    self.drop_time = self.base_drop_time.max(1);
+                }
+            }
+            WeaponToken::Meadow => {
+                self.fast_drop_time <<= 1;
+                self.base_drop_time <<= 1;
+                if self.drop_time != self.fast_drop_time {
+                    self.drop_time = self.base_drop_time;
+                }
+            }
+            WeaponToken::Keating => self.score.funds = 0,
+            WeaponToken::Reagan => self.score.funds = -self.score.funds,
+            _ => {}
+        }
+    }
+
+    /// `BT_WPN_OFF` — a weapon's duration expired; revert its effect.
+    fn apply_weapon_off(&mut self, token: WeaponToken) {
+        self.weapons.deactivate(token);
+        self.board.revert_weapon(token);
+        self.board.set_active(token, false);
+        self.pieces.weapon_off(token);
+
+        match token {
+            WeaponToken::Upbyside => {
+                self.def_x = BT_DEFAULT_X;
+                self.def_y = BT_DEFAULT_Y;
+                self.delta_y = 1;
+                self.left_x = -1;
+                self.right_x = 1;
+            }
+            WeaponToken::Speedy => self.base_drop_time <<= 1,
+            WeaponToken::Meadow => {
+                self.base_drop_time >>= 1;
+                self.fast_drop_time >>= 1;
+            }
+            _ => {}
+        }
+    }
+
+    /// `BTWeaponManager::receive(BT_LINE)` — count active-weapon durations down
+    /// by the lines just cleared; expire any that hit zero.
+    fn tick_durations(&mut self, lines: i32) {
+        for i in 0..BT_MAX_WEAPONS {
+            if self.remaining[i] == 0 {
+                continue;
+            }
+            self.remaining[i] = (self.remaining[i] - lines).max(0);
+            if self.remaining[i] == 0 {
+                if let Some(tok) = WeaponToken::from_index(i as i32) {
+                    self.apply_weapon_off(tok);
+                }
+            }
+        }
+    }
+
+    /// Apply weapons the opponent launched (queued via [`Self::receive_weapon`]).
+    fn flush_pending(&mut self) {
+        let pend: Vec<WeaponToken> = self.pending.drain(..).collect();
+        for tok in pend {
+            self.apply_weapon_on(tok);
+        }
+    }
+
+    /// Recompute the bazaar countdown from combined lines; fire on crossing.
+    fn update_bazaar(&mut self) {
+        let combined = self.score.op_lines + self.score.lines;
+        let new_til = BT_LINES_TIL_BAZ - (combined.rem_euclid(BT_LINES_TIL_BAZ as i64)) as i32;
+        if new_til > self.lines_til_baz {
+            self.in_bazaar = true;
+            self.events.push(GameEvent::EnterBazaar);
+        }
+        self.lines_til_baz = new_til;
+    }
+
+    /// Mad Hatter (auto-rotate) / Slick Willy (auto-slide) sub-timers.
+    fn tick_weapons(&mut self, dt: i32) {
+        if self.weapons.is_active(WeaponToken::Hatter) {
+            self.hatter_accum += dt;
+            while self.hatter_accum >= 20 {
+                self.hatter_accum -= 20;
+                self.rotate_internal();
+            }
+        }
+        if self.weapons.is_active(WeaponToken::Slick) {
+            self.slick_accum += dt;
+            while self.slick_accum >= 20 {
+                self.slick_accum -= 20;
+                self.slick_step();
+            }
+        }
+    }
+
+    fn rotate_internal(&mut self) {
+        if let Some(mut p) = self.current.take() {
+            p.rotate(&self.board, false);
+            self.current = Some(p);
+        }
+    }
+
+    fn slick_step(&mut self) {
+        if let Some(mut p) = self.current.take() {
+            let dir = if self.slick_dir == 0 { self.left_x } else { self.right_x };
+            if p.move_to(&self.board, self.x + dir, self.y) {
+                self.x += dir;
+            } else {
+                self.slick_dir ^= 1;
+            }
+            self.current = Some(p);
+        }
     }
 }

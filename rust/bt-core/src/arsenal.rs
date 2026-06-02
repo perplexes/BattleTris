@@ -1,0 +1,111 @@
+//! The player's weapon arsenal — a faithful port of `BTArsenal`
+//! (`usr/src/game/BTArsenal.{H,C}`): `BT_ARSENAL_SIZE` (10) slots, each holding
+//! a weapon token and a quantity. New purchases stack onto a matching slot or
+//! fill the first empty one.
+
+use crate::constants::BT_ARSENAL_SIZE;
+use crate::weapons::WeaponToken;
+
+#[derive(Clone, Debug)]
+pub struct Arsenal {
+    rep: [Option<WeaponToken>; BT_ARSENAL_SIZE],
+    quantity: [u16; BT_ARSENAL_SIZE],
+}
+
+impl Default for Arsenal {
+    fn default() -> Self {
+        Arsenal::new()
+    }
+}
+
+impl Arsenal {
+    pub fn new() -> Arsenal {
+        Arsenal { rep: [None; BT_ARSENAL_SIZE], quantity: [0; BT_ARSENAL_SIZE] }
+    }
+
+    /// `BTArsenal::buyWeapon` — stack onto a matching slot, else the first empty
+    /// slot. Returns false if the arsenal is full.
+    pub fn buy(&mut self, w: WeaponToken) -> bool {
+        for i in 0..BT_ARSENAL_SIZE {
+            if self.rep[i] == Some(w) {
+                self.quantity[i] += 1;
+                return true;
+            }
+            if self.rep[i].is_none() {
+                self.rep[i] = Some(w);
+                self.quantity[i] += 1;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// `BTArsenal::useWeapon` — consume one from slot `index`; empties the slot
+    /// when the quantity hits zero.
+    pub fn use_slot(&mut self, index: usize) {
+        if index >= BT_ARSENAL_SIZE || self.quantity[index] == 0 {
+            return;
+        }
+        self.quantity[index] -= 1;
+        if self.quantity[index] == 0 {
+            self.rep[index] = None;
+        }
+    }
+
+    pub fn token(&self, index: usize) -> Option<WeaponToken> {
+        self.rep.get(index).copied().flatten()
+    }
+
+    pub fn quantity(&self, index: usize) -> u16 {
+        self.quantity.get(index).copied().unwrap_or(0)
+    }
+
+    pub fn clear(&mut self) {
+        self.rep = [None; BT_ARSENAL_SIZE];
+        self.quantity = [0; BT_ARSENAL_SIZE];
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn buy_stacks_and_fills() {
+        let mut a = Arsenal::new();
+        assert!(a.buy(WeaponToken::RiseUp));
+        assert!(a.buy(WeaponToken::RiseUp));
+        assert_eq!(a.token(0), Some(WeaponToken::RiseUp));
+        assert_eq!(a.quantity(0), 2);
+        assert!(a.buy(WeaponToken::Blind));
+        assert_eq!(a.token(1), Some(WeaponToken::Blind));
+        assert_eq!(a.quantity(1), 1);
+    }
+
+    #[test]
+    fn use_empties_slot_at_zero() {
+        let mut a = Arsenal::new();
+        a.buy(WeaponToken::Swap);
+        a.use_slot(0);
+        assert_eq!(a.token(0), None);
+        assert_eq!(a.quantity(0), 0);
+    }
+
+    #[test]
+    fn full_arsenal_rejects_new_kinds() {
+        let mut a = Arsenal::new();
+        let kinds = [
+            WeaponToken::FearedWeird, WeaponToken::FourByFour, WeaponToken::Hatter,
+            WeaponToken::Upbyside, WeaponToken::FallOut, WeaponToken::Swap,
+            WeaponToken::Lawyers, WeaponToken::RiseUp, WeaponToken::FlipOut,
+            WeaponToken::Speedy,
+        ];
+        for k in kinds {
+            assert!(a.buy(k));
+        }
+        // 11th distinct weapon: no empty slot left.
+        assert!(!a.buy(WeaponToken::Blind));
+        // but stacking an existing one still works
+        assert!(a.buy(WeaponToken::Speedy));
+    }
+}

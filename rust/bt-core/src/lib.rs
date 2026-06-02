@@ -12,6 +12,7 @@
 //!   * [`weapons`]   — `BTWeaponToken`, `BTActive[]`, `BTWeapon`
 //!   * [`rng`]       — `rand` / `drand48` / `lrand48`
 
+pub mod arsenal;
 pub mod board;
 pub mod cell;
 pub mod constants;
@@ -21,6 +22,7 @@ pub mod piece_manager;
 pub mod rng;
 pub mod weapons;
 
+pub use arsenal::Arsenal;
 pub use board::{Board, LineClear};
 pub use cell::{Cell, CellKind};
 pub use game::{Game, GameEvent, Score};
