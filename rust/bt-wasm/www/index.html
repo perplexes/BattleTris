@@ -17,10 +17,11 @@
             <button id="modePractice" class="mode-btn active">Practice</button>
             <button id="modeVsComputer" class="mode-btn">vs Computer</button>
             <button id="modeVsPlayer" class="mode-btn">vs Player (2 tabs)</button>
-            <button id="modeOnline" class="mode-btn">Online</button>
+            <button id="modeOnline" class="mode-btn" title="Queue for an online match in the background — keep playing while you wait, and drop in when matched">⚔ Find Match</button>
             <button id="reportBug" class="mode-btn bug-trigger" title="Report a bug — attaches a faithful replay of your game">🐛 Bug</button>
             <button id="shareReplay" class="mode-btn" title="Save this game and copy a shareable replay link">🔗 Share</button>
             <button id="openLibrary" class="mode-btn" title="Browse and watch saved replays">📚 Library</button>
+            <button id="openLeaderboard" class="mode-btn" title="Ranked online players (Elo-styled TrueSkill)">🏆 Leaderboard</button>
             <label class="ernie-level" title="Ernie's difficulty (start a vs Computer game to apply)">
                 Ernie:
                 <select id="ernieLevel">
@@ -43,7 +44,10 @@
             </label>
         </div>
 
-        <div id="onlineStatus" class="online-status" style="display:none;"></div>
+        <div class="online-bar">
+            <div id="onlineStatus" class="online-status" style="display:none;"></div>
+            <button id="cancelSearch" class="cancel-search-btn" style="display:none;">✕ Cancel search</button>
+        </div>
 
         <!-- Mobile-only compact stats bar (shown above board on small screens) -->
         <div id="mobileStats" class="mobile-stats">

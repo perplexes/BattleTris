@@ -23,6 +23,8 @@ let pc = null;       // RTCPeerConnection
 let dc = null;       // RTCDataChannel
 let onlinePaused = true;  // true until the data channel opens
 let onlineOpponentName = '';
+let searching = false;    // background matchmaking in progress (queued, not yet matched)
+let playerName = null;    // remembered after the first prompt
 
 // Canvas and context
 const canvas = document.getElementById('gameCanvas');
@@ -60,6 +62,7 @@ const modeOnlineBtn = document.getElementById('modeOnline');
 const aiBoard = document.getElementById('aiBoard');
 const aiLabel = document.getElementById('aiLabel');
 const onlineStatus = document.getElementById('onlineStatus');
+const cancelSearchBtn = document.getElementById('cancelSearch');
 const ernieLevelSelect = document.getElementById('ernieLevel');
 // Default Ernie difficulty: "Willing" (index 5 -> 1000ms/move). The original
 // defaults to the slider minimum (Comatose); 1000ms is a fairer modern default.
@@ -143,20 +146,84 @@ function startOnlineGame() {
     setOnlineStatus(`Connected — fight!  (vs ${oppLabel})`);
 }
 
-async function beginOnlineMode() {
-    // Ask for player name
-    const defaultName = 'player' + Math.floor(Math.random() * 900 + 100);
-    const playerName = prompt('Enter your player name:', defaultName) || defaultName;
+function getPlayerName() {
+    if (playerName) return playerName;
+    try { playerName = localStorage.getItem('bt_player_name') || null; } catch (_) {}
+    if (!playerName) {
+        // Asked once, then remembered (it's your leaderboard identity). Clear
+        // localStorage 'bt_player_name' to be asked again.
+        const dflt = 'player' + Math.floor(Math.random() * 900 + 100);
+        playerName = prompt('Choose a player name (shown on the leaderboard):', dflt) || dflt;
+        try { localStorage.setItem('bt_player_name', playerName); } catch (_) {}
+    }
+    return playerName;
+}
 
-    // Clean up any previous online session
+// Background matchmaking: open the signaling socket and queue WITHOUT
+// interrupting your current local game. You keep playing practice / vs Computer
+// while the search runs; `enterOnlineGame` swaps you in when a match is found.
+// Switching between local modes leaves the search running (see startGame); only
+// an explicit Cancel or tearing down an established online game stops it.
+function findMatch() {
+    if (searching || mode === 'online') return; // already queued, or already playing online
+    const name = getPlayerName();
+
+    cleanupOnline(); // drop any stale socket/peer from a previous session
+    searching = true;
+    modeOnlineBtn.classList.add('searching');
+    onlineStatus.style.display = 'block';
+    cancelSearchBtn.style.display = 'inline-block';
+    setOnlineStatus('🔍 Searching for an opponent… keep playing — you’ll drop in when matched.');
+
+    // Same-origin WebSocket: the bt-server serves both the page and /ws on one
+    // port (ws on localhost/LAN, wss behind TLS, e.g. on fly.io).
+    const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const wsUrl = `${wsProto}://${location.host}/ws`;
+    ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => ws.send(JSON.stringify({ type: 'queue', name }));
+
+    ws.onerror = (err) => {
+        console.warn('WebSocket error', err);
+        setOnlineStatus(`Connection error — is the server reachable at ${wsUrl}?`);
+    };
+
+    ws.onclose = () => {
+        if (!gameEnded) setOnlineStatus('Disconnected from server.');
+        if (searching) {
+            searching = false;
+            modeOnlineBtn.classList.remove('searching');
+            cancelSearchBtn.style.display = 'none';
+        }
+    };
+
+    ws.onmessage = onSignalMessage;
+}
+
+// Stop a background search and hide its UI. Leaves your local game untouched.
+function cancelSearch() {
+    searching = false;
+    modeOnlineBtn.classList.remove('searching');
+    cancelSearchBtn.style.display = 'none';
+    onlineStatus.style.display = 'none';
     cleanupOnline();
+}
 
-    // Start a paused WasmGame (seed from time + random)
+// Drop into a fresh online match. Online boards are independent (each player has
+// their own seed and exchanges weapons + scores over the data channel), so this
+// starts a clean board — the practice / vs-Computer game you played while waiting
+// is discarded here.
+function enterOnlineGame() {
+    searching = false;
+    modeOnlineBtn.classList.remove('searching');
+    cancelSearchBtn.style.display = 'none';
+    mode = 'online';
+    updateModeButtons();
+
     const seed = (performance.now() | 0) ^ (Math.floor(Math.random() * 1e9));
     game = new WasmGame(seed);
     onlinePaused = true;
 
-    // Resize canvases
     const width = game.width();
     const height = game.height();
     canvas.width = width * CELL_SIZE;
@@ -171,109 +238,89 @@ async function beginOnlineMode() {
     gameOverOverlay.style.display = 'none';
     bazaarOverlay.style.display = 'none';
     onlineStatus.style.display = 'block';
-    setOnlineStatus('Matchmaking…');
+    lastFrameTime = performance.now();
+    tickAccumulator = 0;
+}
 
-    // Open WebSocket to the signaling server on the same host that served this
-    // page (so it works over localhost, LAN, or Tailscale). Use wss when the
-    // page itself is served over https.
-    // Same-origin WebSocket: the bt-server serves both the page and /ws on one
-    // port (and wss behind TLS, e.g. on fly.io).
-    const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const wsUrl = `${wsProto}://${location.host}/ws`;
-    ws = new WebSocket(wsUrl);
+// Signaling-socket message handler: matchmaking result + WebRTC relay. Shared by
+// the background search and the live online game.
+async function onSignalMessage(ev) {
+    const msg = JSON.parse(ev.data);
 
-    ws.onopen = () => {
-        ws.send(JSON.stringify({ type: 'queue', name: playerName }));
-    };
+    if (msg.type === 'matched') {
+        enterOnlineGame();
+        onlineOpponentName = msg.opponent || 'Opponent';
+        const conservative = (msg.oppMu - 3 * msg.oppSigma).toFixed(1);
+        const quality = msg.quality != null ? Math.round(msg.quality * 100) : '?';
+        setOnlineStatus(
+            `Matched vs ${onlineOpponentName} (rating μ−3σ ≈ ${conservative}` +
+            `, quality ${quality}%) — connecting…`
+        );
 
-    ws.onerror = (err) => {
-        console.warn('WebSocket error', err);
-        setOnlineStatus(`Connection error — is bt-server running on ${wsUrl}?`);
-    };
+        // Create peer connection
+        pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
 
-    ws.onclose = () => {
-        if (!gameEnded && mode === 'online') {
-            setOnlineStatus('Disconnected from server.');
-        }
-    };
+        pc.onicecandidate = (e) => {
+            if (e.candidate) {
+                ws.send(JSON.stringify({ type: 'signal', data: { candidate: e.candidate } }));
+            }
+        };
 
-    ws.onmessage = async (ev) => {
-        const msg = JSON.parse(ev.data);
+        pc.onconnectionstatechange = () => {
+            console.log('PC connection state:', pc.connectionState);
+        };
 
-        if (msg.type === 'matched') {
-            onlineOpponentName = msg.opponent || 'Opponent';
-            const conservative = (msg.oppMu - 3 * msg.oppSigma).toFixed(1);
-            const quality = msg.quality != null ? Math.round(msg.quality * 100) : '?';
-            setOnlineStatus(
-                `vs ${onlineOpponentName} (rating μ−3σ ≈ ${conservative})` +
-                ` — match quality ${quality}% — Waiting for opponent…`
-            );
+        if (msg.role === 'offer') {
+            // We are the offerer: create data channel then offer
+            dc = pc.createDataChannel('game');
+            setupDataChannel(dc);
 
-            // Create peer connection
-            pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            ws.send(JSON.stringify({ type: 'signal', data: { sdp: pc.localDescription } }));
 
-            pc.onicecandidate = (e) => {
-                if (e.candidate) {
-                    ws.send(JSON.stringify({ type: 'signal', data: { candidate: e.candidate } }));
-                }
-            };
-
-            pc.onconnectionstatechange = () => {
-                console.log('PC connection state:', pc.connectionState);
-            };
-
-            if (msg.role === 'offer') {
-                // We are the offerer: create data channel then offer
-                dc = pc.createDataChannel('game');
+        } else {
+            // We are the answerer: wait for data channel from peer
+            pc.ondatachannel = (e) => {
+                dc = e.channel;
                 setupDataChannel(dc);
+            };
+            // The answer SDP is sent when we receive the offer signal (below)
+        }
 
-                const offer = await pc.createOffer();
-                await pc.setLocalDescription(offer);
+    } else if (msg.type === 'signal') {
+        const d = msg.data;
+        if (d.sdp) {
+            await pc.setRemoteDescription(d.sdp);
+            if (d.sdp.type === 'offer') {
+                const ans = await pc.createAnswer();
+                await pc.setLocalDescription(ans);
                 ws.send(JSON.stringify({ type: 'signal', data: { sdp: pc.localDescription } }));
-
-            } else {
-                // We are the answerer: wait for data channel from peer
-                pc.ondatachannel = (e) => {
-                    dc = e.channel;
-                    setupDataChannel(dc);
-                };
-                // The answer SDP is sent when we receive the offer signal (see 'signal' handler below)
             }
-
-        } else if (msg.type === 'signal') {
-            const d = msg.data;
-            if (d.sdp) {
-                await pc.setRemoteDescription(d.sdp);
-                if (d.sdp.type === 'offer') {
-                    const ans = await pc.createAnswer();
-                    await pc.setLocalDescription(ans);
-                    ws.send(JSON.stringify({ type: 'signal', data: { sdp: pc.localDescription } }));
-                }
-            } else if (d.candidate) {
-                try {
-                    await pc.addIceCandidate(d.candidate);
-                } catch (e) {
-                    console.warn('addIceCandidate error', e);
-                }
-            }
-
-        } else if (msg.type === 'rating') {
-            const conservative = (msg.mu - 3 * msg.sigma).toFixed(1);
-            const result = msg.won ? 'WIN' : 'LOSS';
-            setOnlineStatus(
-                `${result} — New rating: μ=${msg.mu.toFixed(2)}, σ=${msg.sigma.toFixed(2)},` +
-                ` μ−3σ ≈ ${conservative}`
-            );
-
-        } else if (msg.type === 'opponentLeft') {
-            setOnlineStatus('Opponent left.');
-            if (!gameEnded) {
-                gameEnded = true;
-                gameOverText.textContent = 'Opponent left.';
-                gameOverOverlay.style.display = 'flex';
+        } else if (d.candidate) {
+            try {
+                await pc.addIceCandidate(d.candidate);
+            } catch (e) {
+                console.warn('addIceCandidate error', e);
             }
         }
-    };
+
+    } else if (msg.type === 'rating') {
+        const conservative = (msg.mu - 3 * msg.sigma).toFixed(1);
+        const result = msg.won ? 'WIN' : 'LOSS';
+        setOnlineStatus(
+            `${result} — New rating: μ=${msg.mu.toFixed(2)}, σ=${msg.sigma.toFixed(2)},` +
+            ` μ−3σ ≈ ${conservative}`
+        );
+
+    } else if (msg.type === 'opponentLeft') {
+        setOnlineStatus('Opponent left.');
+        if (!gameEnded) {
+            gameEnded = true;
+            gameOverText.textContent = 'Opponent left.';
+            gameOverOverlay.style.display = 'flex';
+        }
+    }
 }
 
 // ─── Game initialization ──────────────────────────────────────────────────────
@@ -285,20 +332,24 @@ async function initGame() {
 }
 
 function startGame(newMode) {
-    // Clean up online resources when leaving Online mode
-    if (mode === 'online' || newMode !== 'online') {
+    // Online matchmaking is a background action, not a local mode — route there.
+    if (newMode === 'online') {
+        findMatch();
+        return;
+    }
+
+    // Tearing down an established online game closes its connection. A background
+    // search (mode is still a local one) is intentionally left running, so you
+    // can switch between practice and vs Computer while you wait to be matched.
+    if (mode === 'online') {
         cleanupOnline();
+        searching = false;
+        modeOnlineBtn.classList.remove('searching');
+        cancelSearchBtn.style.display = 'none';
         onlineStatus.style.display = 'none';
     }
 
     mode = newMode;
-
-    if (mode === 'online') {
-        // Online mode bootstraps separately via beginOnlineMode()
-        updateModeButtons();
-        beginOnlineMode();
-        return;
-    }
 
     const seed = (performance.now() | 0) ^ (Math.floor(Math.random() * 1e9));
 
@@ -362,6 +413,14 @@ function updateModeButtons() {
 }
 
 function newGame() {
+    if (mode === 'online') {
+        // A P2P match can't be unilaterally restarted — drop back to a local
+        // board and queue for a fresh opponent. (startGame sees mode==='online'
+        // here, so it tears the connection down first.)
+        startGame('practice');
+        findMatch();
+        return;
+    }
     startGame(mode);
 }
 
@@ -972,6 +1031,7 @@ modePracticeBtn.addEventListener('click', () => startGame('practice'));
 modeVsComputerBtn.addEventListener('click', () => startGame('vscomputer'));
 modeVsPlayerBtn.addEventListener('click', () => startGame('vsplayer'));
 modeOnlineBtn.addEventListener('click', () => startGame('online'));
+if (cancelSearchBtn) cancelSearchBtn.addEventListener('click', cancelSearch);
 
 // Changing Ernie's difficulty restarts the current vs-computer game so it
 // takes effect immediately (it's read at WasmVsComputer construction).
@@ -1114,6 +1174,9 @@ if (shareReplayBtn) shareReplayBtn.addEventListener('click', shareReplay);
 
 const openLibraryBtn = document.getElementById('openLibrary');
 if (openLibraryBtn) openLibraryBtn.addEventListener('click', () => { location.href = '/www/library.html'; });
+
+const openLeaderboardBtn = document.getElementById('openLeaderboard');
+if (openLeaderboardBtn) openLeaderboardBtn.addEventListener('click', () => { location.href = '/www/leaderboard.html'; });
 
 // Initialize and start game loop
 (async () => {

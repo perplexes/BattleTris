@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BattleTris — Leaderboard</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="title-wrap">
+            <img src="assets/bttitle.png" alt="BattleTris" class="title-img">
+        </div>
+
+        <div class="library-wrap">
+            <h2 class="library-title">Leaderboard</h2>
+            <p class="leaderboard-note">Ranked by conservative skill (TrueSkill μ−3σ), shown as an Elo-styled rating. Win online matches to climb.</p>
+            <div id="leaderboardStatus" class="library-status">Loading&hellip;</div>
+            <div id="leaderboardList" class="library-list"></div>
+            <div class="replay-foot"><a href="/www/">&larr; Back to BattleTris</a></div>
+        </div>
+    </div>
+
+    <script type="module" src="leaderboard.js"></script>
+</body>
+</html>

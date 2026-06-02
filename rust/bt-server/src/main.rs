@@ -563,6 +563,52 @@ async fn list_replays(State(db): State<Db>) -> impl IntoResponse {
     Json(json!({ "replays": replays })).into_response()
 }
 
+// --- leaderboard --------------------------------------------------------
+//
+// TrueSkill stays the rating engine; the leaderboard just presents it. Players
+// rank by conservative skill (μ−3σ, the same number matchmaking trusts), shown
+// as an Elo-styled figure — a cosmetic linear transform so the board reads like
+// a familiar ladder rather than raw TrueSkill units.
+
+/// Map conservative TrueSkill (μ−3σ, ~0 for a new player, rising as σ shrinks
+/// with games played) onto an Elo-styled scale (new ≈ 1000, strong ≈ 1900).
+fn elo_styled(conservative: f64) -> i64 {
+    (1000.0 + conservative * 30.0).round().max(100.0) as i64
+}
+
+/// Rank players by conservative rating (descending), capped, as the JSON the
+/// leaderboard page renders.
+fn rank_players(ratings: &HashMap<String, (f64, f64, u32)>) -> Vec<Value> {
+    let mut rows: Vec<(f64, Value)> = ratings
+        .iter()
+        .map(|(name, &(mu, sigma, games))| {
+            let conservative = mu - 3.0 * sigma;
+            (
+                conservative,
+                json!({
+                    "name": name,
+                    "elo": elo_styled(conservative),
+                    "mu": mu,
+                    "sigma": sigma,
+                    "games": games,
+                }),
+            )
+        })
+        .collect();
+    rows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    rows.into_iter().take(200).map(|(_, v)| v).collect()
+}
+
+/// `GET /api/leaderboard` — players ranked by conservative TrueSkill, Elo-styled.
+/// Backs `leaderboard.html`.
+async fn leaderboard(State(state): State<Shared>) -> impl IntoResponse {
+    let players = {
+        let app = state.lock().await;
+        rank_players(&app.ratings)
+    };
+    Json(json!({ "players": players })).into_response()
+}
+
 #[tokio::main]
 async fn main() {
     let db = open_db();
@@ -582,6 +628,7 @@ async fn main() {
         .route("/ws", get(ws_handler))
         .route("/api/replays", post(post_replay).get(list_replays))
         .route("/api/replays/:id", get(get_replay))
+        .route("/api/leaderboard", get(leaderboard))
         .route("/replay/:id", get(replay_page))
         .route("/", get(|| async { Redirect::permanent("/www/") }))
         .fallback_service(ServeDir::new(&static_dir))
@@ -703,6 +750,23 @@ mod tests {
 
         // Practice mode has no Ernie level -> ai_level surfaces as JSON null.
         assert!(db_list(&conn, 200).unwrap()[0]["ai_level"].is_null());
+    }
+
+    #[test]
+    fn leaderboard_ranks_by_conservative_descending() {
+        let mut r = HashMap::new();
+        r.insert("strong".to_string(), (30.0, 2.0, 50)); // μ−3σ = 24
+        r.insert("rookie".to_string(), (25.0, 25.0 / 3.0, 0)); // μ−3σ = 0
+        r.insert("mid".to_string(), (28.0, 5.0, 10)); // μ−3σ = 13
+        let p = rank_players(&r);
+        let names: Vec<&str> = p.iter().map(|v| v["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["strong", "mid", "rookie"], "sorted by conservative skill");
+        assert!(
+            p[0]["elo"].as_i64().unwrap() > p[2]["elo"].as_i64().unwrap(),
+            "stronger player has higher Elo"
+        );
+        assert_eq!(p[2]["elo"].as_i64().unwrap(), 1000, "a fresh player sits at ~1000");
+        assert_eq!(p[0]["games"], 50);
     }
 
     #[test]

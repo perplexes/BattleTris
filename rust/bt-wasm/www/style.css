@@ -268,6 +268,47 @@ body {
     word-break: break-word;
 }
 
+/* Status banner + its Cancel button sit on one centered row. */
+.online-bar {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+.online-bar .online-status {
+    margin-bottom: 0;
+}
+.cancel-search-btn {
+    padding: 6px 12px;
+    background-color: #dfdfdf;
+    border: 2px solid #808080;
+    border-right-color: #000000;
+    border-bottom-color: #000000;
+    border-left-color: #ffffff;
+    border-top-color: #ffffff;
+    font-weight: bold;
+    font-size: 12px;
+    cursor: pointer;
+    margin-bottom: 12px;
+}
+.cancel-search-btn:active {
+    border-right-color: #ffffff;
+    border-bottom-color: #ffffff;
+    border-left-color: #000000;
+    border-top-color: #000000;
+}
+
+/* The "Find Match" button pulses green while a background search is running. */
+.mode-btn.searching {
+    background-color: #d8eed8;
+    animation: bt-search-pulse 1.1s ease-in-out infinite;
+}
+@keyframes bt-search-pulse {
+    0%, 100% { background-color: #d8eed8; }
+    50%      { background-color: #a9d8a9; }
+}
+
 /* ─── Arsenal panel (right, desktop) ─────────────────────────────────────── */
 .arsenal-panel {
     background-color: #bfbfbf;
@@ -1240,3 +1281,62 @@ body {
     font-weight: bold;
     color: #044;
 }
+
+/* ─── Leaderboard ────────────────────────────────────────────────────────── */
+.leaderboard-note {
+    text-align: center;
+    font-size: 12px;
+    color: #555;
+    max-width: 560px;
+    margin: 0 auto 12px;
+}
+
+.leaderboard-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 8px 12px;
+    color: #222;
+    background-color: #dfdfdf;
+    border: 2px solid #808080;
+    border-right-color: #000;
+    border-bottom-color: #000;
+    border-left-color: #fff;
+    border-top-color: #fff;
+}
+
+.leaderboard-rank {
+    font-weight: bold;
+    color: #777;
+    min-width: 34px;
+}
+
+.leaderboard-name {
+    font-weight: bold;
+    min-width: 140px;
+    word-break: break-word;
+}
+
+.leaderboard-elo {
+    margin-left: auto;
+    font-family: monospace;
+    font-size: 16px;
+    font-weight: bold;
+    color: #044;
+}
+
+.leaderboard-stat {
+    font-family: monospace;
+    font-size: 12px;
+    color: #555;
+}
+
+.leaderboard-detail {
+    color: #777;
+}
+
+/* Top three get a subtle medal tint. */
+.leaderboard-item:nth-child(1) { background-color: #f3e9c0; }
+.leaderboard-item:nth-child(2) { background-color: #e6e6e6; }
+.leaderboard-item:nth-child(3) { background-color: #ecd9c0; }
