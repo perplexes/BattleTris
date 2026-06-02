@@ -19,6 +19,7 @@
             <button id="modeVsPlayer" class="mode-btn">vs Player (2 tabs)</button>
             <button id="modeOnline" class="mode-btn">Online</button>
             <button id="reportBug" class="mode-btn bug-trigger" title="Report a bug — attaches a faithful replay of your game">🐛 Bug</button>
+            <button id="shareReplay" class="mode-btn" title="Save this game and copy a shareable replay link">🔗 Share</button>
             <label class="ernie-level" title="Ernie's difficulty (start a vs Computer game to apply)">
                 Ernie:
                 <select id="ernieLevel">
@@ -210,6 +211,8 @@
             </div>
         </div>
     </div>
+
+    <div id="toast" class="toast"></div>
 
     <script type="module" src="main.js"></script>
 </body>

@@ -374,6 +374,15 @@ async fn get_replay(Path(id): Path<String>) -> impl IntoResponse {
     }
 }
 
+/// `GET /replay/:id` — the pretty, shareable playback link. Redirects to the
+/// static player page, which fetches the recording from `/api/replays/:id`.
+async fn replay_page(Path(id): Path<String>) -> impl IntoResponse {
+    if !valid_replay_id(&id) {
+        return (StatusCode::BAD_REQUEST, "bad id").into_response();
+    }
+    Redirect::temporary(&format!("/www/replay.html?id={id}")).into_response()
+}
+
 #[tokio::main]
 async fn main() {
     let state: Shared = Arc::new(Mutex::new(App::new()));
@@ -385,6 +394,7 @@ async fn main() {
         .route("/ws", get(ws_handler))
         .route("/api/replays", post(post_replay))
         .route("/api/replays/:id", get(get_replay))
+        .route("/replay/:id", get(replay_page))
         .route("/", get(|| async { Redirect::permanent("/www/") }))
         .fallback_service(ServeDir::new(&static_dir))
         .with_state(state);

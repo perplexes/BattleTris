@@ -276,6 +276,17 @@ impl ReplayPlayer {
         while self.step() {}
     }
 
+    /// Jump to tick `target` (clamped to `tick_count`). Seeking backward rebuilds
+    /// from the seed and fast-forwards — cheap, since the engine runs thousands
+    /// of ticks per millisecond. This is what a scrubber/seek bar calls.
+    pub fn seek(&mut self, target: u32) {
+        let target = target.min(self.replay.tick_count);
+        if target < self.executed {
+            *self = ReplayPlayer::new(self.replay.clone());
+        }
+        while self.executed < target && self.step() {}
+    }
+
     /// Ticks executed so far.
     pub fn tick_index(&self) -> u32 {
         self.executed

@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BattleTris — Replay</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <div class="title-wrap">
+            <img src="assets/bttitle.png" alt="BattleTris" class="title-img">
+        </div>
+
+        <div class="replay-wrap">
+            <div id="replayError" class="replay-error" style="display:none;"></div>
+
+            <div class="replay-boards">
+                <div class="replay-board">
+                    <div class="replay-board-label">Player</div>
+                    <canvas id="replayCanvas"></canvas>
+                </div>
+                <div id="replayAiBoard" class="replay-board" style="display:none;">
+                    <div class="replay-board-label">Ernie</div>
+                    <canvas id="replayAiCanvas"></canvas>
+                </div>
+            </div>
+
+            <div class="replay-controls">
+                <button id="replayPlay" class="bug-btn bug-btn-primary">&#9654; Play</button>
+                <button id="replayRestart" class="bug-btn">&#9198; Restart</button>
+                <input id="replaySeek" class="replay-seek" type="range" min="0" max="0" value="0">
+                <span id="replayTick" class="replay-tick">0 / 0</span>
+                <label class="replay-speed">Speed
+                    <select id="replaySpeed">
+                        <option value="0.5">0.5&times;</option>
+                        <option value="1" selected>1&times;</option>
+                        <option value="2">2&times;</option>
+                        <option value="4">4&times;</option>
+                        <option value="8">8&times;</option>
+                    </select>
+                </label>
+            </div>
+
+            <div id="replayMeta" class="replay-meta"></div>
+            <div class="replay-foot"><a href="/www/">&larr; Back to BattleTris</a></div>
+        </div>
+    </div>
+
+    <script type="module" src="replay.js"></script>
+</body>
+</html>

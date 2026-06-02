@@ -9,7 +9,7 @@ use bt_core::constants::{BT_PIECE_HEIGHT, BT_PIECE_WIDTH};
 use bt_core::game::GameEvent;
 use bt_core::weapons::{weapon_table, WeaponToken, BT_MAX_WEAPONS};
 use bt_core::Game;
-use bt_replay::{Input, Mode, Recorder};
+use bt_replay::{Input, Mode, Recorder, Replay, ReplayPlayer};
 use wasm_bindgen::prelude::*;
 
 /// Sentinel id for an empty square in [`WasmGame::render_grid`].
@@ -489,13 +489,110 @@ impl WasmVsComputer {
     }
 }
 
+// --- replay playback ----------------------------------------------------
+
+/// Plays back a recorded [`Replay`] in the browser — the engine behind the
+/// replay library's `/replay/:id` page. Deterministic: it reconstructs the game
+/// from the seed and re-applies the recorded inputs, so playback is bit-for-bit
+/// identical to the original game (Ernie is regenerated for vs-computer).
+#[wasm_bindgen]
+pub struct WasmReplayPlayer {
+    inner: ReplayPlayer,
+}
+
+#[wasm_bindgen]
+impl WasmReplayPlayer {
+    /// Build from a replay's JSON; throws if it doesn't parse.
+    pub fn from_json(json: &str) -> Result<WasmReplayPlayer, JsValue> {
+        let replay =
+            Replay::from_json(json).map_err(|e| JsValue::from_str(&format!("invalid replay: {e}")))?;
+        Ok(WasmReplayPlayer { inner: ReplayPlayer::new(replay) })
+    }
+
+    /// Advance one tick; returns false once the recording is exhausted.
+    pub fn step(&mut self) -> bool {
+        self.inner.step()
+    }
+    /// Jump to an absolute tick (the seek bar). Backward seeks rebuild + replay.
+    pub fn seek(&mut self, tick: u32) {
+        self.inner.seek(tick);
+    }
+    pub fn tick_index(&self) -> u32 {
+        self.inner.tick_index()
+    }
+    pub fn tick_count(&self) -> u32 {
+        self.inner.replay().tick_count
+    }
+    /// 0 = ongoing, 1 = player won, 2 = player lost (vs-computer replays).
+    pub fn result(&self) -> i32 {
+        self.inner.result()
+    }
+    /// "Practice" | "VsComputer" | "VsPlayer".
+    pub fn mode(&self) -> String {
+        format!("{:?}", self.inner.replay().mode)
+    }
+    pub fn seed(&self) -> u32 {
+        self.inner.replay().seed
+    }
+    pub fn engine_sha(&self) -> String {
+        self.inner.replay().engine_sha.clone()
+    }
+    pub fn has_ai(&self) -> bool {
+        self.inner.ai().is_some()
+    }
+
+    // --- rendering / stats (mirror WasmGame so the page reuses its draw code) ---
+    pub fn width(&self) -> i32 {
+        self.inner.player().board().width
+    }
+    pub fn height(&self) -> i32 {
+        self.inner.player().board().height
+    }
+    pub fn render_grid(&self) -> Vec<i32> {
+        render_grid_of(self.inner.player())
+    }
+    /// Ernie's board (empty for non-vs-computer replays).
+    pub fn render_ai_grid(&self) -> Vec<i32> {
+        match self.inner.ai() {
+            Some(g) => render_grid_of(g),
+            None => Vec::new(),
+        }
+    }
+    pub fn score(&self) -> i32 {
+        self.inner.player().score().score as i32
+    }
+    pub fn lines(&self) -> i32 {
+        self.inner.player().score().lines as i32
+    }
+    pub fn funds(&self) -> i32 {
+        self.inner.player().score().funds as i32
+    }
+    pub fn op_score(&self) -> i32 {
+        self.inner.player().score().op_score as i32
+    }
+    pub fn op_lines(&self) -> i32 {
+        self.inner.player().score().op_lines as i32
+    }
+    pub fn lines_til_bazaar(&self) -> i32 {
+        self.inner.player().lines_til_bazaar()
+    }
+    pub fn is_in_bazaar(&self) -> bool {
+        self.inner.player().is_in_bazaar()
+    }
+    pub fn arsenal_token(&self, i: u32) -> i32 {
+        self.inner.player().arsenal_token(i as usize)
+    }
+    pub fn arsenal_quantity(&self, i: u32) -> i32 {
+        self.inner.player().arsenal_quantity(i as usize) as i32
+    }
+}
+
 #[cfg(test)]
 mod recording_tests {
     //! End-to-end check that the *wrapper-level* recording (the path the browser
     //! actually drives) round-trips exactly. The wasm-bindgen types are plain
     //! Rust, so they run fine on the host.
     use super::*;
-    use bt_replay::{Replay, ReplayPlayer};
 
     #[test]
     fn wasm_game_export_replays_exactly() {
@@ -553,5 +650,44 @@ mod recording_tests {
         assert_eq!(render_grid_of(p.player()), live_player, "human board must match");
         assert_eq!(render_grid_of(p.ai().unwrap()), live_ai, "Ernie's board must match");
         assert_eq!(p.result(), live_result, "match result must match");
+    }
+
+    #[test]
+    fn replay_player_seek_is_deterministic() {
+        let seed = 4242u32;
+        let mut g = WasmVsComputer::new(seed, 9);
+        for t in 0..800u32 {
+            match t {
+                5 => g.move_left(),
+                20 => g.begin_drop(),
+                90 => g.rotate(),
+                160 => g.begin_drop(),
+                _ => {}
+            }
+            g.tick(FIXED_DT_MS);
+        }
+        let json = g.export_replay();
+        let mk = || WasmReplayPlayer::from_json(&json).ok().expect("replay parses");
+        let total = mk().tick_count();
+
+        // Reference end state, reached by stepping.
+        let mut a = mk();
+        while a.step() {}
+        let end = a.render_grid();
+        let end_ai = a.render_ai_grid();
+
+        // Seeking straight to the end matches.
+        let mut b = mk();
+        b.seek(total);
+        assert_eq!(b.render_grid(), end, "seek-to-end matches stepping");
+        assert_eq!(b.render_ai_grid(), end_ai);
+
+        // Jumping around (including backward) and landing on the end is consistent.
+        let mut c = mk();
+        c.seek(total / 2);
+        c.seek(10);
+        c.seek(total);
+        assert_eq!(c.render_grid(), end, "backward+forward seek is consistent");
+        assert_eq!(c.tick_index(), total);
     }
 }
