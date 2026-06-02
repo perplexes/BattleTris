@@ -23,6 +23,10 @@ ARG BT_GIT_SHA=dev
 
 # Browser client (release) -> bt-wasm/pkg, and a static server binary.
 RUN BT_GIT_SHA="$BT_GIT_SHA" wasm-pack build bt-wasm --target web --out-dir pkg --release
+# bt-server now embeds SQLite (rusqlite "bundled" compiles it from C). Point the
+# cc crate at the musl cross-compiler so SQLite links statically into the musl
+# binary — keeps the runtime image libc-free.
+ENV CC_x86_64_unknown_linux_musl=musl-gcc
 RUN cargo build -p bt-server --release --target x86_64-unknown-linux-musl
 
 # ---- runtime: Chainguard distroless static (nonroot, no shell) ----
@@ -35,8 +39,11 @@ COPY --from=builder /build/bt-wasm/pkg /app/site/pkg
 ENV STATIC_DIR=/app/site
 ENV PORT=8080
 # Durable ratings + uploaded replays: persisted to a fly volume at /data (see
-# fly.toml). Replays back the "report a bug" link and the replay library.
+# fly.toml). Replays (the "report a bug" link and the replay library) live in a
+# SQLite DB; REPLAYS_DIR is the legacy JSON dir, imported into the DB once at
+# startup if any files from an older deploy are still on the volume.
 ENV RATINGS_FILE=/data/ratings.json
+ENV REPLAY_DB=/data/replays.db
 ENV REPLAYS_DIR=/data/replays
 # Run as root so the process can write the root-owned volume mount. (Still a
 # distroless, no-shell, minimal-CVE image; chainguard/static defaults to

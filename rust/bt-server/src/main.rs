@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use axum::extract::{FromRef, Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Redirect};
 use axum::routing::{get, post};
@@ -37,11 +37,37 @@ use bt_replay::Replay;
 use bt_trueskill::ts2::{rate_match, MatchOutcome, PlayerState, Ts2Params, Winner};
 use bt_trueskill::{quality_1v1, Rating};
 use futures_util::{SinkExt, StreamExt};
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, Mutex};
 use tower_http::services::ServeDir;
 
+/// Matchmaking/relay state (tokio mutex — held across `.await`).
 type Shared = Arc<Mutex<App>>;
+/// The replay index/store. `rusqlite::Connection` is `Send` but not `Sync`, so a
+/// std mutex guards it; replay queries are sub-millisecond and never `.await`
+/// while the guard is held, so a blocking lock on the async runtime is fine here.
+type Db = Arc<std::sync::Mutex<Connection>>;
+
+/// Combined router state. `FromRef` lets each handler extract just the piece it
+/// needs — `State<Shared>` for the websocket, `State<Db>` for replay endpoints.
+#[derive(Clone)]
+struct AppState {
+    app: Shared,
+    db: Db,
+}
+
+impl FromRef<AppState> for Shared {
+    fn from_ref(s: &AppState) -> Shared {
+        s.app.clone()
+    }
+}
+
+impl FromRef<AppState> for Db {
+    fn from_ref(s: &AppState) -> Db {
+        s.db.clone()
+    }
+}
 
 /// Per-connected-client state.
 struct Client {
@@ -321,12 +347,22 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
 
 // --- replay store -------------------------------------------------------
 //
-// Content-addressed JSON blobs on disk (the fly volume in prod). A recording
-// uploaded by the "report a bug" button — and, later, the replay library —
-// lands here and is fetched back by id. Same replay → same id (dedup).
+// A SQLite database (the fly volume in prod) is the single source of truth: it
+// holds the full recording JSON alongside the metadata the library lists by, so
+// browsing is one indexed `SELECT … ORDER BY created_at` — not a scan that opens
+// and parses every file. A recording uploaded by the "report a bug" button or
+// the 🔗 Share button lands here keyed by a content hash (dedup), and is fetched
+// back by id. Older deployments stored replays as JSON files; those are imported
+// into the DB once at startup (see `import_dir`).
 
-/// Directory replays are stored in (`REPLAYS_DIR`, default `replays`; prod sets
-/// `/data/replays` on the fly volume).
+/// Path to the SQLite database (`REPLAY_DB`, default `replays.db`; prod sets
+/// `/data/replays.db` on the fly volume).
+fn db_path() -> String {
+    std::env::var("REPLAY_DB").unwrap_or_else(|_| "replays.db".to_string())
+}
+
+/// Legacy on-disk JSON directory, imported once at startup if present
+/// (`REPLAYS_DIR`, default `replays`; prod's old store was `/data/replays`).
 fn replays_dir() -> String {
     std::env::var("REPLAYS_DIR").unwrap_or_else(|_| "replays".to_string())
 }
@@ -340,37 +376,171 @@ fn replay_id(json: &str) -> String {
     format!("{:016x}", h.finish())
 }
 
-/// Ids are our own hex hashes; reject anything else so a fetch can't escape the
-/// store directory (path traversal).
+/// Ids are our own hex hashes; reject anything else (defensive — the DB binds
+/// ids as parameters, so this is belt-and-suspenders against malformed input).
 fn valid_replay_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+const SCHEMA: &str = "\
+CREATE TABLE IF NOT EXISTS replays (
+    id          TEXT PRIMARY KEY,
+    mode        TEXT NOT NULL,
+    seed        INTEGER NOT NULL,
+    ai_level    INTEGER,
+    tick_count  INTEGER NOT NULL,
+    inputs      INTEGER NOT NULL,
+    engine_sha  TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    json        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_replays_created ON replays(created_at);";
+
+fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(SCHEMA)
+}
+
+/// Open (creating if needed) the replay DB and ensure the schema exists. WAL +
+/// `synchronous=NORMAL` suit a single always-on machine: durable across crashes,
+/// readers never block the occasional writer.
+fn open_db() -> Connection {
+    let path = db_path();
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+    let conn = Connection::open(&path).unwrap_or_else(|e| panic!("open replay db {path}: {e}"));
+    // `execute_batch` ignores the row PRAGMA journal_mode returns.
+    let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+    init_schema(&conn).expect("init replay schema");
+    conn
+}
+
+/// Insert a recording (no-op if its content id already exists). Returns rows
+/// affected (1 = newly stored, 0 = already present).
+fn db_insert(conn: &Connection, id: &str, r: &Replay, json: &str, created_at: i64) -> rusqlite::Result<usize> {
+    conn.execute(
+        "INSERT OR IGNORE INTO replays
+            (id, mode, seed, ai_level, tick_count, inputs, engine_sha, created_at, json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        rusqlite::params![
+            id,
+            format!("{:?}", r.mode),
+            r.seed,
+            r.ai_level,
+            r.tick_count,
+            r.frames.len() as i64,
+            r.engine_sha,
+            created_at,
+            json,
+        ],
+    )
+}
+
+/// Fetch a recording's JSON by id.
+fn db_get(conn: &Connection, id: &str) -> rusqlite::Result<Option<String>> {
+    conn.query_row("SELECT json FROM replays WHERE id = ?1", [id], |row| row.get::<_, String>(0))
+        .optional()
+}
+
+/// List recordings newest-first (capped) with just the metadata the library
+/// browse page needs.
+fn db_list(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Value>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, mode, seed, ai_level, tick_count, inputs, engine_sha, created_at
+         FROM replays ORDER BY created_at DESC, id DESC LIMIT ?1",
+    )?;
+    let rows = stmt.query_map([limit], |row| {
+        let ai_level: Option<i64> = row.get(3)?;
+        Ok(json!({
+            "id": row.get::<_, String>(0)?,
+            "mode": row.get::<_, String>(1)?,
+            "seed": row.get::<_, i64>(2)?,
+            "ai_level": ai_level,
+            "tick_count": row.get::<_, i64>(4)?,
+            "inputs": row.get::<_, i64>(5)?,
+            "engine_sha": row.get::<_, String>(6)?,
+            "mtime": row.get::<_, i64>(7)?,
+        }))
+    })?;
+    rows.collect()
+}
+
+/// One-time migration: import any pre-existing on-disk replay JSON (the old file
+/// store / a fly volume from before the DB) into the DB. Idempotent (`INSERT OR
+/// IGNORE` by content id), best-effort — malformed files are skipped, and the
+/// file's mtime is preserved as `created_at` so historical ordering survives.
+fn import_dir(conn: &Connection, dir: &str) -> usize {
+    let rd = match std::fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(_) => return 0,
+    };
+    let mut imported = 0;
+    for e in rd.flatten() {
+        let path = e.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let txt = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let r = match Replay::from_json(&txt) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let created_at = e
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or_else(now_secs);
+        if let Ok(n) = db_insert(conn, &replay_id(&txt), &r, &txt, created_at) {
+            imported += n;
+        }
+    }
+    imported
+}
+
 /// `POST /api/replays` — store a recording, return `{"id": "..."}`. Validates
 /// it parses as a [`Replay`] first so we never persist junk.
-async fn post_replay(body: String) -> impl IntoResponse {
-    if Replay::from_json(&body).is_err() {
-        return (StatusCode::BAD_REQUEST, "invalid replay").into_response();
-    }
+async fn post_replay(State(db): State<Db>, body: String) -> impl IntoResponse {
+    let replay = match Replay::from_json(&body) {
+        Ok(r) => r,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid replay").into_response(),
+    };
     let id = replay_id(&body);
-    let dir = replays_dir();
-    if std::fs::create_dir_all(&dir).is_err() {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "store unavailable").into_response();
+    let stored = {
+        let conn = db.lock().unwrap();
+        db_insert(&conn, &id, &replay, &body, now_secs())
+    };
+    match stored {
+        Ok(_) => (StatusCode::OK, Json(json!({ "id": id }))).into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "store unavailable").into_response(),
     }
-    if std::fs::write(format!("{dir}/{id}.json"), body.as_bytes()).is_err() {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "write failed").into_response();
-    }
-    (StatusCode::OK, Json(json!({ "id": id }))).into_response()
 }
 
 /// `GET /api/replays/:id` — fetch a stored recording as JSON.
-async fn get_replay(Path(id): Path<String>) -> impl IntoResponse {
+async fn get_replay(State(db): State<Db>, Path(id): Path<String>) -> impl IntoResponse {
     if !valid_replay_id(&id) {
         return (StatusCode::BAD_REQUEST, "bad id").into_response();
     }
-    match std::fs::read_to_string(format!("{}/{}.json", replays_dir(), id)) {
-        Ok(txt) => ([(header::CONTENT_TYPE, "application/json")], txt).into_response(),
-        Err(_) => (StatusCode::NOT_FOUND, "not found").into_response(),
+    let found = {
+        let conn = db.lock().unwrap();
+        db_get(&conn, &id).ok().flatten()
+    };
+    match found {
+        Some(txt) => ([(header::CONTENT_TYPE, "application/json")], txt).into_response(),
+        None => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
 }
 
@@ -383,16 +553,34 @@ async fn replay_page(Path(id): Path<String>) -> impl IntoResponse {
     Redirect::temporary(&format!("/www/replay.html?id={id}")).into_response()
 }
 
+/// `GET /api/replays` — list stored recordings (newest first, capped) with just
+/// enough metadata for the library browse page. Backs `library.html`.
+async fn list_replays(State(db): State<Db>) -> impl IntoResponse {
+    let replays = {
+        let conn = db.lock().unwrap();
+        db_list(&conn, 200).unwrap_or_default()
+    };
+    Json(json!({ "replays": replays })).into_response()
+}
+
 #[tokio::main]
 async fn main() {
-    let state: Shared = Arc::new(Mutex::new(App::new()));
+    let db = open_db();
+    let imported = import_dir(&db, &replays_dir());
+    if imported > 0 {
+        println!("imported {imported} replay(s) from {} into {}", replays_dir(), db_path());
+    }
+    let state = AppState {
+        app: Arc::new(Mutex::new(App::new())),
+        db: Arc::new(std::sync::Mutex::new(db)),
+    };
 
     let static_dir = std::env::var("STATIC_DIR").unwrap_or_else(|_| "bt-wasm".to_string());
     let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8080);
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
-        .route("/api/replays", post(post_replay))
+        .route("/api/replays", post(post_replay).get(list_replays))
         .route("/api/replays/:id", get(get_replay))
         .route("/replay/:id", get(replay_page))
         .route("/", get(|| async { Redirect::permanent("/www/") }))
@@ -454,5 +642,79 @@ mod tests {
         assert!(!valid_replay_id("foo/bar"));
         assert!(!valid_replay_id(""));
         assert!(!valid_replay_id("zzzz")); // not hex
+    }
+
+    fn sample_replay(seed: u32, mode: bt_replay::Mode, ai_level: Option<u32>) -> Replay {
+        Replay {
+            version: bt_replay::REPLAY_VERSION,
+            seed,
+            mode,
+            ai_level,
+            dt_ms: 16,
+            engine_sha: "abc1234".to_string(),
+            tick_count: 100,
+            frames: vec![bt_replay::Frame { tick: 5, input: bt_replay::Input::MoveLeft }],
+        }
+    }
+
+    fn mem_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn replay_db_insert_list_get_round_trip() {
+        let conn = mem_db();
+        let r = sample_replay(42, bt_replay::Mode::VsComputer, Some(7));
+        let json = r.to_json();
+        let id = replay_id(&json);
+
+        assert_eq!(db_insert(&conn, &id, &r, &json, 1000).unwrap(), 1, "first insert stores a row");
+
+        // get returns the exact JSON we stored.
+        let got = db_get(&conn, &id).unwrap().expect("row present");
+        assert_eq!(got, json);
+        assert_eq!(Replay::from_json(&got).unwrap(), r, "round-trips back to the same Replay");
+
+        // list surfaces the metadata the library page reads.
+        let list = db_list(&conn, 200).unwrap();
+        assert_eq!(list.len(), 1);
+        let item = &list[0];
+        assert_eq!(item["id"], id);
+        assert_eq!(item["mode"], "VsComputer");
+        assert_eq!(item["seed"], 42);
+        assert_eq!(item["ai_level"], 7);
+        assert_eq!(item["tick_count"], 100);
+        assert_eq!(item["inputs"], 1);
+        assert_eq!(item["engine_sha"], "abc1234");
+        assert_eq!(item["mtime"], 1000);
+    }
+
+    #[test]
+    fn replay_db_dedups_by_content_id() {
+        let conn = mem_db();
+        let r = sample_replay(1, bt_replay::Mode::Practice, None);
+        let json = r.to_json();
+        let id = replay_id(&json);
+        assert_eq!(db_insert(&conn, &id, &r, &json, 10).unwrap(), 1);
+        assert_eq!(db_insert(&conn, &id, &r, &json, 20).unwrap(), 0, "same content -> ignored");
+        assert_eq!(db_list(&conn, 200).unwrap().len(), 1, "stored once");
+
+        // Practice mode has no Ernie level -> ai_level surfaces as JSON null.
+        assert!(db_list(&conn, 200).unwrap()[0]["ai_level"].is_null());
+    }
+
+    #[test]
+    fn replay_db_lists_newest_first() {
+        let conn = mem_db();
+        for (seed, created) in [(1u32, 100i64), (2, 300), (3, 200)] {
+            let r = sample_replay(seed, bt_replay::Mode::Practice, None);
+            let json = r.to_json();
+            db_insert(&conn, &replay_id(&json), &r, &json, created).unwrap();
+        }
+        let list = db_list(&conn, 200).unwrap();
+        let seeds: Vec<i64> = list.iter().map(|v| v["seed"].as_i64().unwrap()).collect();
+        assert_eq!(seeds, vec![2, 3, 1], "ordered by created_at descending");
     }
 }

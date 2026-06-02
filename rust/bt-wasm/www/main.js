@@ -1112,6 +1112,9 @@ async function shareReplay() {
 
 if (shareReplayBtn) shareReplayBtn.addEventListener('click', shareReplay);
 
+const openLibraryBtn = document.getElementById('openLibrary');
+if (openLibraryBtn) openLibraryBtn.addEventListener('click', () => { location.href = '/www/library.html'; });
+
 // Initialize and start game loop
 (async () => {
     await initGame();
