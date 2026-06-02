@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<!-- Must be served over HTTP (e.g., python3 -m http.server from bt-wasm dir, then open /www/) -->
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BattleTris</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>BattleTris</h1>
+
+        <div class="game-area">
+            <div class="board-wrapper">
+                <canvas id="gameCanvas"></canvas>
+                <div id="gameOverOverlay" class="game-over-overlay">
+                    <div class="game-over-text">GAME OVER</div>
+                </div>
+            </div>
+
+            <div class="stats-panel">
+                <div class="stat">
+                    <label>Your score:</label>
+                    <div id="scoreValue" class="stat-value">0</div>
+                </div>
+                <div class="stat">
+                    <label>Your lines:</label>
+                    <div id="linesValue" class="stat-value">0</div>
+                </div>
+                <div class="stat">
+                    <label>Your funds:</label>
+                    <div id="fundsValue" class="stat-value">0</div>
+                </div>
+                <div class="stat">
+                    <label>Lines 'til bazaar:</label>
+                    <div id="linesToBazaarValue" class="stat-value">20</div>
+                </div>
+
+                <button id="newGameBtn" class="new-game-btn">New Game</button>
+
+                <div class="controls-box">
+                    <h3>Controls</h3>
+                    <ul>
+                        <li><strong>Left/Right</strong> — Move</li>
+                        <li><strong>Up</strong> — Rotate</li>
+                        <li><strong>Down</strong> — Drop</li>
+                        <li><strong>P</strong> — Pause/Resume</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module" src="main.js"></script>
+</body>
+</html>
