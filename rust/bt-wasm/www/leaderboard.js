@@ -16,7 +16,7 @@ const statusEl = document.getElementById('leaderboardStatus');
 
     const players = (data && data.players) || [];
     if (!players.length) {
-        statusEl.textContent = 'No ranked players yet — play an online match (⚔ Find Match) to get on the board.';
+        statusEl.textContent = 'No ranked players yet - play an online match (Find Match) to get on the board.';
         return;
     }
     statusEl.textContent = `${players.length} ranked player${players.length === 1 ? '' : 's'}`;
@@ -36,7 +36,7 @@ const statusEl = document.getElementById('leaderboardStatus');
     });
 })();
 
-// Names are user-supplied — escape before injecting as HTML.
+// Names are user-supplied - escape before injecting as HTML.
 function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, (c) => ({
         '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',

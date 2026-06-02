@@ -116,7 +116,7 @@ function setupDataChannel(channel) {
         } else if (m.kind === 'score') {
             game.receive_op_score(m.score, m.lines, m.funds);
         } else if (m.kind === 'dead') {
-            // Opponent died — we win
+            // Opponent died - we win
             showWin();
             if (ws) {
                 ws.send(JSON.stringify({
@@ -143,7 +143,7 @@ function setupDataChannel(channel) {
 function startOnlineGame() {
     onlinePaused = false;
     const oppLabel = onlineOpponentName || 'Opponent';
-    setOnlineStatus(`Connected — fight!  (vs ${oppLabel})`);
+    setOnlineStatus(`Connected - fight!  (vs ${oppLabel})`);
 }
 
 function getPlayerName() {
@@ -173,7 +173,7 @@ function findMatch() {
     modeOnlineBtn.classList.add('searching');
     onlineStatus.style.display = 'block';
     cancelSearchBtn.style.display = 'inline-block';
-    setOnlineStatus('🔍 Searching for an opponent… keep playing — you’ll drop in when matched.');
+    setOnlineStatus('Searching for an opponent... keep playing - you\'ll drop in when matched.');
 
     // Same-origin WebSocket: the bt-server serves both the page and /ws on one
     // port (ws on localhost/LAN, wss behind TLS, e.g. on fly.io).
@@ -185,7 +185,7 @@ function findMatch() {
 
     ws.onerror = (err) => {
         console.warn('WebSocket error', err);
-        setOnlineStatus(`Connection error — is the server reachable at ${wsUrl}?`);
+        setOnlineStatus(`Connection error - is the server reachable at ${wsUrl}?`);
     };
 
     ws.onclose = () => {
@@ -211,7 +211,7 @@ function cancelSearch() {
 
 // Drop into a fresh online match. Online boards are independent (each player has
 // their own seed and exchanges weapons + scores over the data channel), so this
-// starts a clean board — the practice / vs-Computer game you played while waiting
+// starts a clean board - the practice / vs-Computer game you played while waiting
 // is discarded here.
 function enterOnlineGame() {
     searching = false;
@@ -253,8 +253,8 @@ async function onSignalMessage(ev) {
         const conservative = (msg.oppMu - 3 * msg.oppSigma).toFixed(1);
         const quality = msg.quality != null ? Math.round(msg.quality * 100) : '?';
         setOnlineStatus(
-            `Matched vs ${onlineOpponentName} (rating μ−3σ ≈ ${conservative}` +
-            `, quality ${quality}%) — connecting…`
+            `Matched vs ${onlineOpponentName} (rating μ-3σ ~ ${conservative}` +
+            `, quality ${quality}%) - connecting...`
         );
 
         // Create peer connection
@@ -309,8 +309,8 @@ async function onSignalMessage(ev) {
         const conservative = (msg.mu - 3 * msg.sigma).toFixed(1);
         const result = msg.won ? 'WIN' : 'LOSS';
         setOnlineStatus(
-            `${result} — New rating: μ=${msg.mu.toFixed(2)}, σ=${msg.sigma.toFixed(2)},` +
-            ` μ−3σ ≈ ${conservative}`
+            `${result} - New rating: μ=${msg.mu.toFixed(2)}, σ=${msg.sigma.toFixed(2)},` +
+            ` μ-3σ ~ ${conservative}`
         );
 
     } else if (msg.type === 'opponentLeft') {
@@ -332,7 +332,7 @@ async function initGame() {
 }
 
 function startGame(newMode) {
-    // Online matchmaking is a background action, not a local mode — route there.
+    // Online matchmaking is a background action, not a local mode - route there.
     if (newMode === 'online') {
         findMatch();
         return;
@@ -414,7 +414,7 @@ function updateModeButtons() {
 
 function newGame() {
     if (mode === 'online') {
-        // A P2P match can't be unilaterally restarted — drop back to a local
+        // A P2P match can't be unilaterally restarted - drop back to a local
         // board and queue for a fresh opponent. (startGame sees mode==='online'
         // here, so it tears the connection down first.)
         startGame('practice');
@@ -459,8 +459,8 @@ function updateStats() {
 function updateOpponentPanel() {
     const opScore = game.op_score();
     const opLines = game.op_lines();
-    opponentScore.textContent = opScore >= 0 ? opScore : '—';
-    opponentLines.textContent = opLines >= 0 ? opLines : '—';
+    opponentScore.textContent = opScore >= 0 ? opScore : '-';
+    opponentLines.textContent = opLines >= 0 ? opLines : '-';
 
     // Derive opponent name for mobile stats bar
     let oppName = 'Opponent';
@@ -520,7 +520,7 @@ function updateArsenalPanel() {
                 game.launch_weapon(slot);
             });
         } else {
-            mslot.textContent = `${key}\n—`;
+            mslot.textContent = `${key}\n-`;
             mslot.style.whiteSpace = 'pre';
         }
         mobileArsenalList.appendChild(mslot);
@@ -650,7 +650,7 @@ function processEvents() {
         } else if (tag === 5) {
             // GameOver: tell opponent we died
             gameEnded = true;
-            gameOverText.textContent = 'GAME OVER — You Lost';
+            gameOverText.textContent = 'GAME OVER - You Lost';
             gameOverOverlay.style.display = 'flex';
             if (mode === 'vsplayer' && broadcastChannel) {
                 broadcastChannel.postMessage({ kind: 'dead' });
@@ -688,7 +688,7 @@ function gameLoop(now) {
         !(mode === 'online' && onlinePaused);
 
     // Advance the engine in fixed FIXED_DT steps (accumulator). This keeps the
-    // simulation — and therefore every recording — deterministic and decoupled
+    // simulation - and therefore every recording - deterministic and decoupled
     // from frame-rate jitter.
     if (shouldTick) {
         tickAccumulator += frameDt;
@@ -711,7 +711,7 @@ function gameLoop(now) {
     }
 
     // Check for win/loss in vscomputer mode. NOTE: don't gate on
-    // game.is_game_over() — it returns true as soon as `result` is set (it ORs
+    // game.is_game_over() - it returns true as soon as `result` is set (it ORs
     // in result != 0), so gating on it would suppress the win banner when Ernie
     // tops out (the player is still alive). Read `result` directly.
     if (mode === 'vscomputer' && !gameEnded) {
@@ -858,7 +858,7 @@ canvas.addEventListener('touchend', (e) => {
         return;
     }
 
-    // Tap → rotate (small movement, short time, no drop)
+    // Tap -> rotate (small movement, short time, no drop)
     if (!touchState.dropped && absDx < 12 && absDy < 12 && duration < 250) {
         game.rotate();
     }
@@ -1055,13 +1055,13 @@ const bugSubmit = document.getElementById('bugSubmit');
 const bugCancel = document.getElementById('bugCancel');
 const reportBugBtn = document.getElementById('reportBug');
 
-// Replay snapshot taken when the modal opens — the "bug moment" — so it isn't
+// Replay snapshot taken when the modal opens - the "bug moment" - so it isn't
 // affected by play continuing while the user types.
 let bugReplayJson = null;
 
 function openBug() {
     bugReplayJson = (game && typeof game.export_replay === 'function') ? game.export_replay() : null;
-    bugStatus.textContent = bugReplayJson ? '' : 'No active game — the report will have no replay attached.';
+    bugStatus.textContent = bugReplayJson ? '' : 'No active game - the report will have no replay attached.';
     bugSubmit.disabled = false;
     bugOverlay.classList.add('open');
     bugTitleInput.focus();
@@ -1116,11 +1116,11 @@ async function submitBug() {
             meta = { mode: r.mode, ai_level: r.ai_level, engine_sha: r.engine_sha, seed: r.seed, tick_count: r.tick_count, inputs: (r.frames || []).length };
         } catch (e) { /* metadata is best-effort */ }
         try {
-            bugStatus.textContent = 'Uploading replay…';
+            bugStatus.textContent = 'Uploading replay...';
             const id = await uploadReplay(bugReplayJson);
             replayUrl = `${location.origin}/replay/${id}`;
         } catch (e) {
-            bugStatus.textContent = 'Replay upload failed — downloading it instead; attach it to the issue manually.';
+            bugStatus.textContent = 'Replay upload failed - downloading it instead; attach it to the issue manually.';
             downloadReplay(bugReplayJson);
         }
     }
@@ -1155,7 +1155,7 @@ async function shareReplay() {
         showToast('No active game to share.');
         return;
     }
-    showToast('Saving replay…', 10000);
+    showToast('Saving replay...', 10000);
     try {
         const id = await uploadReplay(game.export_replay());
         const url = `${location.origin}/replay/${id}`;

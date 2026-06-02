@@ -1,5 +1,5 @@
 // Replay playback page. Loads a recording by id, reconstructs the game with
-// WasmReplayPlayer (deterministic — same seed + inputs => bit-identical), and
+// WasmReplayPlayer (deterministic - same seed + inputs => bit-identical), and
 // plays it back at the original fixed timestep with play/pause/seek/speed.
 import init, { WasmReplayPlayer, fixed_dt } from '../pkg/bt_wasm.js';
 import { CELL_SIZE, drawBoard } from './render.js';

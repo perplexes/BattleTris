@@ -84,7 +84,7 @@ export function drawCellOnContext(context, x, y, cellId) {
 
     // HAPPY (21) and UNHAPPY (22)
     if (cellId === 21 || cellId === 22) {
-        // Beveled yellow box (goldenrod shadow, yellow face) — as BTBox.C.
+        // Beveled yellow box (goldenrod shadow, yellow face) - as BTBox.C.
         context.fillStyle = '#daa520';
         context.fillRect(px, py, CELL_SIZE, CELL_SIZE);
         context.fillStyle = '#eeee00';
@@ -131,7 +131,7 @@ export function drawCellOnContext(context, x, y, cellId) {
 
     // DICE (24-29)
     if (cellId >= 24 && cellId <= 29) {
-        // Beveled ivory box (gray shadow, ivory face) — as BTBox.C die boxes.
+        // Beveled ivory box (gray shadow, ivory face) - as BTBox.C die boxes.
         context.fillStyle = '#a8a8a8';
         context.fillRect(px, py, CELL_SIZE, CELL_SIZE);
         context.fillStyle = '#eeeee0';

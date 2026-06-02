@@ -25,7 +25,7 @@ function fmtAge(mtime) {
 
     const replays = (data && data.replays) || [];
     if (!replays.length) {
-        statusEl.textContent = 'No replays yet — play a game and hit 🔗 Share.';
+        statusEl.textContent = 'No replays yet - play a game and hit Share.';
         return;
     }
     statusEl.textContent = `${replays.length} replay${replays.length === 1 ? '' : 's'}`;

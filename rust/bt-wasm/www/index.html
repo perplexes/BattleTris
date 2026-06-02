@@ -17,11 +17,11 @@
             <button id="modePractice" class="mode-btn active">Practice</button>
             <button id="modeVsComputer" class="mode-btn">vs Computer</button>
             <button id="modeVsPlayer" class="mode-btn">vs Player (2 tabs)</button>
-            <button id="modeOnline" class="mode-btn" title="Queue for an online match in the background — keep playing while you wait, and drop in when matched">⚔ Find Match</button>
-            <button id="reportBug" class="mode-btn bug-trigger" title="Report a bug — attaches a faithful replay of your game">🐛 Bug</button>
-            <button id="shareReplay" class="mode-btn" title="Save this game and copy a shareable replay link">🔗 Share</button>
-            <button id="openLibrary" class="mode-btn" title="Browse and watch saved replays">📚 Library</button>
-            <button id="openLeaderboard" class="mode-btn" title="Ranked online players (Elo-styled TrueSkill)">🏆 Leaderboard</button>
+            <button id="modeOnline" class="mode-btn" title="Queue for an online match in the background - keep playing while you wait, and drop in when matched">Find Match</button>
+            <button id="reportBug" class="mode-btn bug-trigger" title="Report a bug - attaches a faithful replay of your game">Bug</button>
+            <button id="shareReplay" class="mode-btn" title="Save this game and copy a shareable replay link">Share</button>
+            <button id="openLibrary" class="mode-btn" title="Browse and watch saved replays">Library</button>
+            <button id="openLeaderboard" class="mode-btn" title="Ranked online players (Elo-styled TrueSkill)">Leaderboard</button>
             <label class="ernie-level" title="Ernie's difficulty (start a vs Computer game to apply)">
                 Ernie:
                 <select id="ernieLevel">
@@ -46,7 +46,7 @@
 
         <div class="online-bar">
             <div id="onlineStatus" class="online-status" style="display:none;"></div>
-            <button id="cancelSearch" class="cancel-search-btn" style="display:none;">✕ Cancel search</button>
+            <button id="cancelSearch" class="cancel-search-btn" style="display:none;">Cancel search</button>
         </div>
 
         <!-- Mobile-only compact stats bar (shown above board on small screens) -->
@@ -68,7 +68,7 @@
                     </div>
                     <div class="stat-row">
                         <span class="stat-label">Opponent's score:</span>
-                        <span id="opponentScore" class="stat-value">—</span>
+                        <span id="opponentScore" class="stat-value">-</span>
                     </div>
                     <div class="stat-gap"></div>
                     <div class="stat-row">
@@ -77,7 +77,7 @@
                     </div>
                     <div class="stat-row">
                         <span class="stat-label">Opponent's lines:</span>
-                        <span id="opponentLines" class="stat-value">—</span>
+                        <span id="opponentLines" class="stat-value">-</span>
                     </div>
                     <div class="stat-gap"></div>
                     <div class="stat-row">
@@ -94,12 +94,12 @@
                     <div class="controls-box">
                         <h3>Controls</h3>
                         <ul>
-                            <li><strong>Left/Right</strong> — Move</li>
-                            <li><strong>Up</strong> — Rotate</li>
-                            <li><strong>Down</strong> — Soft drop (hold = fast)</li>
-                            <li><strong>Space</strong> — Hard drop</li>
-                            <li><strong>P</strong> — Pause/Resume</li>
-                            <li><strong>1–0</strong> — Launch weapons</li>
+                            <li><strong>Left/Right</strong> - Move</li>
+                            <li><strong>Up</strong> - Rotate</li>
+                            <li><strong>Down</strong> - Soft drop (hold = fast)</li>
+                            <li><strong>Space</strong> - Hard drop</li>
+                            <li><strong>P</strong> - Pause/Resume</li>
+                            <li><strong>1-0</strong> - Launch weapons</li>
                         </ul>
                         <p style="margin-top: 10px; font-size: 10px; color: #666;">Open a second tab to battle.</p>
                     </div>
@@ -109,11 +109,11 @@
                     <h3>Opponent</h3>
                     <div class="opponent-stat">
                         <span>Score:</span>
-                        <span id="opponentScoreHidden">—</span>
+                        <span id="opponentScoreHidden">-</span>
                     </div>
                     <div class="opponent-stat">
                         <span>Lines:</span>
-                        <span id="opponentLinesHidden">—</span>
+                        <span id="opponentLinesHidden">-</span>
                     </div>
                 </div>
             </div>
@@ -188,7 +188,7 @@
     <div id="touchControls" class="touch-controls" aria-label="Game controls">
         <button class="touch-btn" id="touchLeft" aria-label="Move left">&#9664;</button>
         <!-- The engine rotates counter-clockwise (BTPiece::rotate, reverse=0), so
-             use a CCW arrow (⟲ U+27F2) — not the CW ⟳ — to match the motion. -->
+             use a CCW arrow (⟲ U+27F2) - not the CW ⟳ - to match the motion. -->
         <button class="touch-btn" id="touchRotate" aria-label="Rotate counter-clockwise">&#10226;</button>
         <button class="touch-btn" id="touchRight" aria-label="Move right">&#9654;</button>
         <button class="touch-btn" id="touchDrop" aria-label="Soft drop">&#10507;</button>
