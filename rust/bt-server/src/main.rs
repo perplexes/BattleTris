@@ -27,7 +27,8 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::Message;
 
-const LISTEN_ADDR: &str = "127.0.0.1:9000";
+// Bind on all interfaces so the server is reachable over LAN / Tailscale.
+const LISTEN_ADDR: &str = "0.0.0.0:9000";
 const RATINGS_FILE: &str = "ratings.json";
 
 /// Per-connected-client state.

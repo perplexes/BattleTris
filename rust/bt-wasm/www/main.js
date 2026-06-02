@@ -164,8 +164,13 @@ async function beginOnlineMode() {
     onlineStatus.style.display = 'block';
     setOnlineStatus('Matchmaking…');
 
-    // Open WebSocket to signaling server
-    ws = new WebSocket('ws://127.0.0.1:9000');
+    // Open WebSocket to the signaling server on the same host that served this
+    // page (so it works over localhost, LAN, or Tailscale). Use wss when the
+    // page itself is served over https.
+    const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const wsHost = location.hostname || '127.0.0.1';
+    const wsUrl = `${wsProto}://${wsHost}:9000`;
+    ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
         ws.send(JSON.stringify({ type: 'queue', name: playerName }));
@@ -173,7 +178,7 @@ async function beginOnlineMode() {
 
     ws.onerror = (err) => {
         console.warn('WebSocket error', err);
-        setOnlineStatus('Connection error — is bt-server running on ws://127.0.0.1:9000?');
+        setOnlineStatus(`Connection error — is bt-server running on ${wsUrl}?`);
     };
 
     ws.onclose = () => {
