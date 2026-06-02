@@ -26,6 +26,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{FromRef, Path, State};
@@ -81,9 +82,13 @@ struct Client {
 struct App {
     clients: HashMap<u64, Client>,
     waiting: Vec<u64>,
-    /// Connections that opened the page (sent `watch`) — the live "players
-    /// online" count. A subset of `clients` (a matchmaking-only socket isn't one).
-    watchers: HashSet<u64>,
+    /// Last time each connection pressed a gameplay button. "Players online" is
+    /// the count of these within `ACTIVE_WINDOW` (set on `active`, pruned on
+    /// disconnect). Only pages send `active`, so matchmaking sockets never appear.
+    last_active: HashMap<u64, Instant>,
+    /// Last player count we broadcast, so the decay tick only re-broadcasts on a
+    /// real change.
+    last_broadcast_players: usize,
     /// Persisted ratings by player name: (mu, sigma, experience).
     ratings: HashMap<String, (f64, f64, u32)>,
     /// Pairings already rated (keyed by min(id_a, id_b)).
@@ -98,7 +103,8 @@ impl App {
         App {
             clients: HashMap::new(),
             waiting: Vec::new(),
-            watchers: HashSet::new(),
+            last_active: HashMap::new(),
+            last_broadcast_players: 0,
             ratings: load_ratings(),
             settled: HashSet::new(),
             params: Ts2Params::default(),
@@ -137,14 +143,39 @@ fn broadcast(app: &App, msg: &Value) {
     }
 }
 
-/// The live stats frame pushed to every page: players online now + the
+/// "Players online" window: anyone who pressed a gameplay button this recently.
+const ACTIVE_WINDOW: Duration = Duration::from_secs(30);
+
+/// Number of players active within `ACTIVE_WINDOW` as of `now` (testable: `now`
+/// is passed in rather than read from the clock).
+fn active_count(app: &App, now: Instant) -> usize {
+    app.last_active
+        .values()
+        .filter(|&&t| now.saturating_duration_since(t) < ACTIVE_WINDOW)
+        .count()
+}
+
+fn current_hits(app: &App) -> i64 {
+    let conn = app.db.lock().unwrap();
+    db_hits(&conn)
+}
+
+/// The live stats frame pushed to every page: active players now + the
 /// persistent total visit count.
-fn stats_value(app: &App) -> Value {
-    let hits = {
-        let conn = app.db.lock().unwrap();
-        db_hits(&conn)
-    };
-    json!({ "type": "stats", "players": app.watchers.len(), "hits": hits })
+fn stats_msg(players: usize, hits: i64) -> Value {
+    json!({ "type": "stats", "players": players, "hits": hits })
+}
+
+/// Recompute the active-player count and, if it changed since the last
+/// broadcast, push fresh stats to everyone. Called on activity, on disconnect,
+/// and from the decay tick (so the count falls as players go idle).
+fn maybe_broadcast_stats(app: &mut App) {
+    let players = active_count(app, Instant::now());
+    if players != app.last_broadcast_players {
+        app.last_broadcast_players = players;
+        let msg = stats_msg(players, current_hits(app));
+        broadcast(app, &msg);
+    }
 }
 
 fn load_ratings() -> HashMap<String, (f64, f64, u32)> {
@@ -291,17 +322,26 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
         Err(_) => return,
     };
     match v.get("type").and_then(|t| t.as_str()) {
-        // A page opened: count it as a visitor (persistent hit counter) and a
-        // live player, then push fresh stats to everyone.
+        // A page opened: count it as a visitor (persistent hit counter), then
+        // push the current numbers to everyone so the new page is populated.
+        // (It isn't an active player yet — that needs a gameplay button.)
         Some("watch") => {
             let mut app = state.lock().await;
-            app.watchers.insert(id);
             {
                 let conn = app.db.lock().unwrap();
                 let _ = db_bump_hits(&conn);
             }
-            let msg = stats_value(&app);
+            let players = active_count(&app, Instant::now());
+            app.last_broadcast_players = players;
+            let msg = stats_msg(players, current_hits(&app));
             broadcast(&app, &msg);
+        }
+        // A gameplay button was pressed: this connection is an active player for
+        // the next `ACTIVE_WINDOW`. Re-broadcast if the live count went up.
+        Some("active") => {
+            let mut app = state.lock().await;
+            app.last_active.insert(id, Instant::now());
+            maybe_broadcast_stats(&mut app);
         }
         Some("queue") => {
             let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("anon").to_string();
@@ -377,11 +417,10 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
             }
         }
         a.clients.remove(&id);
-        // If a page (not just a matchmaking socket) closed, the live player count
-        // changed — push it to everyone still here.
-        if a.watchers.remove(&id) {
-            let msg = stats_value(&a);
-            broadcast(&a, &msg);
+        // If an active player's page closed, the live count may drop — recompute
+        // and push it to everyone still here.
+        if a.last_active.remove(&id).is_some() {
+            maybe_broadcast_stats(&mut a);
         }
     }
     writer.abort();
@@ -691,6 +730,19 @@ async fn main() {
         db,
     };
 
+    // Decay tick: re-broadcast the "players online" count as players go idle past
+    // the 30s window (no client message triggers that, so the server must).
+    {
+        let app = state.app.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(2));
+            loop {
+                tick.tick().await;
+                maybe_broadcast_stats(&mut *app.lock().await);
+            }
+        });
+    }
+
     let static_dir = std::env::var("STATIC_DIR").unwrap_or_else(|_| "bt-wasm".to_string());
     let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8080);
 
@@ -820,6 +872,20 @@ mod tests {
 
         // Practice mode has no Ernie level -> ai_level surfaces as JSON null.
         assert!(db_list(&conn, 200).unwrap()[0]["ai_level"].is_null());
+    }
+
+    #[test]
+    fn active_count_respects_30s_window() {
+        let db: Db = Arc::new(std::sync::Mutex::new(mem_db()));
+        let mut app = App::new(db);
+        // Build instants relative to a base so adding durations never underflows.
+        let base = Instant::now();
+        let now = base + Duration::from_secs(100);
+        app.last_active.insert(1, base + Duration::from_secs(99)); // 1s ago  -> active
+        app.last_active.insert(2, base + Duration::from_secs(75)); // 25s ago -> active
+        app.last_active.insert(3, base + Duration::from_secs(69)); // 31s ago -> idle
+        app.last_active.insert(4, base); //                           100s ago -> idle
+        assert_eq!(active_count(&app, now), 2, "only the two within 30s count");
     }
 
     #[test]

@@ -80,6 +80,12 @@ const mobileArsenalList = document.getElementById('mobileArsenalList');
 
 const ARSENAL_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
 
+// Keys that count as a "gameplay button" for the players-online activity ping.
+const GAMEPLAY_KEYS = new Set([
+    'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', ' ', 'Spacebar', 'p', 'P',
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+]);
+
 // ─── Online helpers ───────────────────────────────────────────────────────────
 
 function setOnlineStatus(msg) {
@@ -121,6 +127,19 @@ function setHitCounter(n) {
     if (!hitCounterEl) return;
     const s = String(Math.max(0, n | 0)).padStart(6, '0');
     hitCounterEl.innerHTML = Array.from(s, (d) => `<span class="odo-digit">${d}</span>`).join('');
+}
+
+// "Players online" = anyone who pressed a gameplay button in the last 30s. Tell
+// the server we're active when a gameplay control fires. Throttled: one ping per
+// few seconds keeps us inside the server's window without flooding the socket.
+let lastActiveSent = 0;
+function markActive() {
+    const now = performance.now();
+    if (now - lastActiveSent < 5000) return;
+    lastActiveSent = now;
+    if (statsWs && statsWs.readyState === WebSocket.OPEN) {
+        statsWs.send(JSON.stringify({ type: 'active' }));
+    }
 }
 
 function dcSend(obj) {
@@ -925,6 +944,7 @@ function setupTouchButton(btnId, action, repeatInterval) {
     function fireAction() {
         if (!game || gameEnded || game.is_game_over() || game.is_in_bazaar()) return;
         if (mode === 'online' && onlinePaused) return;
+        markActive();
         action();
     }
 
@@ -991,6 +1011,10 @@ function handleKeyDown(e) {
     if (game.is_in_bazaar()) return;
 
     const key = e.key;
+
+    // Count this as activity only for keys that actually drive the game (so a
+    // stray Tab/Shift doesn't mark you "online").
+    if (GAMEPLAY_KEYS.has(key)) markActive();
 
     // Arrow keys and pause
     switch (key) {
