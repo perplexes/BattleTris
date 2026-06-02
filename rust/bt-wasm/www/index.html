@@ -12,41 +12,74 @@
         <h1>BattleTris</h1>
 
         <div class="game-area">
-            <div class="board-wrapper">
-                <canvas id="gameCanvas"></canvas>
-                <div id="gameOverOverlay" class="game-over-overlay">
-                    <div class="game-over-text">GAME OVER</div>
+            <div class="left-panel">
+                <div class="stats-panel">
+                    <div class="stat">
+                        <label>Your score:</label>
+                        <div id="scoreValue" class="stat-value">0</div>
+                    </div>
+                    <div class="stat">
+                        <label>Your lines:</label>
+                        <div id="linesValue" class="stat-value">0</div>
+                    </div>
+                    <div class="stat">
+                        <label>Your funds:</label>
+                        <div id="fundsValue" class="stat-value">0</div>
+                    </div>
+                    <div class="stat">
+                        <label>Lines 'til bazaar:</label>
+                        <div id="linesToBazaarValue" class="stat-value">20</div>
+                    </div>
+
+                    <button id="newGameBtn" class="new-game-btn">New Game</button>
+
+                    <div class="controls-box">
+                        <h3>Controls</h3>
+                        <ul>
+                            <li><strong>Left/Right</strong> — Move</li>
+                            <li><strong>Up</strong> — Rotate</li>
+                            <li><strong>Down</strong> — Drop</li>
+                            <li><strong>P</strong> — Pause/Resume</li>
+                            <li><strong>1–0</strong> — Launch weapons</li>
+                        </ul>
+                        <p style="margin-top: 10px; font-size: 10px; color: #666;">Open a second tab to battle.</p>
+                    </div>
+                </div>
+
+                <div class="opponent-panel">
+                    <h3>Opponent</h3>
+                    <div class="opponent-stat">
+                        <span>Score:</span>
+                        <span id="opponentScore">—</span>
+                    </div>
+                    <div class="opponent-stat">
+                        <span>Lines:</span>
+                        <span id="opponentLines">—</span>
+                    </div>
                 </div>
             </div>
 
-            <div class="stats-panel">
-                <div class="stat">
-                    <label>Your score:</label>
-                    <div id="scoreValue" class="stat-value">0</div>
+            <div class="center-panel">
+                <div class="board-wrapper">
+                    <canvas id="gameCanvas"></canvas>
+                    <div id="gameOverOverlay" class="game-over-overlay">
+                        <div class="game-over-text" id="gameOverText">GAME OVER</div>
+                    </div>
+                    <div id="bazaarOverlay" class="bazaar-overlay">
+                        <div class="bazaar-panel">
+                            <h2>WEAPONS BAZAAR</h2>
+                            <div class="bazaar-funds">Funds: $<span id="bazaarFunds">0</span></div>
+                            <div id="bazaarList" class="bazaar-list"></div>
+                            <button id="bazaarDoneBtn" class="bazaar-btn">Done</button>
+                        </div>
+                    </div>
                 </div>
-                <div class="stat">
-                    <label>Your lines:</label>
-                    <div id="linesValue" class="stat-value">0</div>
-                </div>
-                <div class="stat">
-                    <label>Your funds:</label>
-                    <div id="fundsValue" class="stat-value">0</div>
-                </div>
-                <div class="stat">
-                    <label>Lines 'til bazaar:</label>
-                    <div id="linesToBazaarValue" class="stat-value">20</div>
-                </div>
+            </div>
 
-                <button id="newGameBtn" class="new-game-btn">New Game</button>
-
-                <div class="controls-box">
-                    <h3>Controls</h3>
-                    <ul>
-                        <li><strong>Left/Right</strong> — Move</li>
-                        <li><strong>Up</strong> — Rotate</li>
-                        <li><strong>Down</strong> — Drop</li>
-                        <li><strong>P</strong> — Pause/Resume</li>
-                    </ul>
+            <div class="right-panel">
+                <div class="arsenal-panel">
+                    <h3>Arsenal</h3>
+                    <div id="arsenalList" class="arsenal-list"></div>
                 </div>
             </div>
         </div>

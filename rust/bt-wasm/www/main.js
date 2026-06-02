@@ -1,9 +1,11 @@
-import init, { WasmGame } from '../pkg/bt_wasm.js';
+import init, { WasmGame, max_weapons, weapon_name, weapon_description, weapon_price, weapon_duration } from '../pkg/bt_wasm.js';
 
 // Game state
 let game = null;
 let lastFrameTime = 0;
 let paused = false;
+let gameEnded = false;
+let broadcastChannel = null;
 
 // Canvas and context
 const canvas = document.getElementById('gameCanvas');
@@ -15,7 +17,15 @@ const linesValue = document.getElementById('linesValue');
 const fundsValue = document.getElementById('fundsValue');
 const linesToBazaarValue = document.getElementById('linesToBazaarValue');
 const gameOverOverlay = document.getElementById('gameOverOverlay');
+const gameOverText = document.getElementById('gameOverText');
 const newGameBtn = document.getElementById('newGameBtn');
+const bazaarOverlay = document.getElementById('bazaarOverlay');
+const bazaarList = document.getElementById('bazaarList');
+const bazaarFunds = document.getElementById('bazaarFunds');
+const bazaarDoneBtn = document.getElementById('bazaarDoneBtn');
+const arsenalList = document.getElementById('arsenalList');
+const opponentScore = document.getElementById('opponentScore');
+const opponentLines = document.getElementById('opponentLines');
 
 // Palette: cell id -> { bright, dark }
 const PALETTE = {
@@ -34,11 +44,12 @@ const PALETTE = {
 
 const CELL_SIZE = 23;
 const BEVEL_BORDER = 3;
+const ARSENAL_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
 
 // Initialize the game
 async function initGame() {
     await init();
-    const seed = performance.now() | 0;
+    const seed = (performance.now() | 0) ^ (Math.floor(Math.random() * 1e9));
     game = new WasmGame(seed);
 
     // Set canvas size based on game dimensions
@@ -52,15 +63,19 @@ async function initGame() {
     canvas.style.height = (height * CELL_SIZE * 1.6) + 'px';
 
     paused = false;
+    gameEnded = false;
     gameOverOverlay.style.display = 'none';
+    bazaarOverlay.style.display = 'none';
     lastFrameTime = performance.now();
 }
 
 function newGame() {
-    const seed = performance.now() | 0;
+    const seed = (performance.now() | 0) ^ (Math.floor(Math.random() * 1e9));
     game = new WasmGame(seed);
     paused = false;
+    gameEnded = false;
     gameOverOverlay.style.display = 'none';
+    bazaarOverlay.style.display = 'none';
     lastFrameTime = performance.now();
 }
 
@@ -205,17 +220,113 @@ function render() {
             drawCell(x, y, cellId);
         }
     }
-
-    // Drain events (for now just consume them)
-    game.drain_events();
 }
 
 function updateStats() {
     scoreValue.textContent = game.score();
     linesValue.textContent = game.lines();
     fundsValue.textContent = game.funds();
-    const linesToBazaar = 20 - (game.lines() % 20);
-    linesToBazaarValue.textContent = linesToBazaar;
+    linesToBazaarValue.textContent = game.lines_til_bazaar();
+}
+
+function updateOpponentPanel() {
+    const opScore = game.op_score();
+    const opLines = game.op_lines();
+    opponentScore.textContent = opScore >= 0 ? opScore : '—';
+    opponentLines.textContent = opLines >= 0 ? opLines : '—';
+}
+
+function updateArsenalPanel() {
+    arsenalList.innerHTML = '';
+    for (let i = 0; i < 10; i++) {
+        const token = game.arsenal_token(i);
+        const key = ARSENAL_KEYS[i];
+        const div = document.createElement('div');
+        div.className = 'arsenal-item';
+
+        if (token >= 0) {
+            const name = weapon_name(token);
+            const qty = game.arsenal_quantity(i);
+            div.textContent = `${key}. ${name} (x${qty})`;
+        } else {
+            div.textContent = `${key}. < Empty >`;
+        }
+        arsenalList.appendChild(div);
+    }
+}
+
+function populateBazaar() {
+    bazaarList.innerHTML = '';
+    const maxWeapons = max_weapons();
+
+    for (let t = 0; t < maxWeapons; t++) {
+        const name = weapon_name(t);
+        const desc = weapon_description(t);
+        const price = weapon_price(t);
+        const duration = weapon_duration(t);
+
+        const row = document.createElement('div');
+        row.className = 'bazaar-item';
+        row.title = desc;
+
+        const html = `
+            <div class="bazaar-item-name">${name}</div>
+            <div>$${price} <span class="bazaar-item-duration">(${duration} lines)</span></div>
+        `;
+        row.innerHTML = html;
+
+        row.addEventListener('click', () => {
+            if (game.buy_weapon(t)) {
+                updateStats();
+                updateArsenalPanel();
+                bazaarFunds.textContent = game.funds();
+            }
+        });
+
+        bazaarList.appendChild(row);
+    }
+
+    bazaarFunds.textContent = game.funds();
+}
+
+function updateBazaarOverlay() {
+    if (game.is_in_bazaar()) {
+        bazaarOverlay.style.display = 'flex';
+        populateBazaar();
+    } else {
+        bazaarOverlay.style.display = 'none';
+    }
+}
+
+function processEvents() {
+    const events = game.drain_events();
+
+    for (let i = 0; i < events.length; i += 4) {
+        const tag = events[i];
+        const a = events[i + 1];
+        const b = events[i + 2];
+        const c = events[i + 3];
+
+        if (tag === 1) {
+            // WeaponLaunched: post to opponent
+            if (broadcastChannel && !gameEnded) {
+                broadcastChannel.postMessage({ kind: 'weapon', token: a });
+            }
+        } else if (tag === 2) {
+            // Scored: relay score update
+            if (broadcastChannel && !gameEnded) {
+                broadcastChannel.postMessage({ kind: 'score', score: a, lines: b, funds: c });
+            }
+        } else if (tag === 5) {
+            // GameOver: tell opponent we died
+            gameEnded = true;
+            gameOverText.textContent = 'GAME OVER — You Lost';
+            gameOverOverlay.style.display = 'flex';
+            if (broadcastChannel) {
+                broadcastChannel.postMessage({ kind: 'dead' });
+            }
+        }
+    }
 }
 
 function gameLoop(now) {
@@ -226,58 +337,96 @@ function gameLoop(now) {
     const dt = Math.min(now - lastFrameTime, 100);
     lastFrameTime = now;
 
-    // Advance game if not paused
-    if (!paused && !game.is_game_over()) {
+    // Advance game if not paused and not in bazaar
+    if (!paused && !gameEnded && !game.is_game_over()) {
         game.tick(dt);
     }
+
+    // Process events and relay to opponent
+    processEvents();
 
     // Render
     render();
     updateStats();
-
-    // Show game over overlay if needed
-    if (game.is_game_over()) {
-        gameOverOverlay.style.display = 'flex';
-    }
+    updateOpponentPanel();
+    updateArsenalPanel();
+    updateBazaarOverlay();
 
     requestAnimationFrame(gameLoop);
+}
+
+function handleBroadcastMessage(ev) {
+    const m = ev.data;
+
+    if (m.kind === 'weapon') {
+        // Opponent launched a weapon at us
+        game.receive_weapon(m.token);
+    } else if (m.kind === 'score') {
+        // Opponent score update
+        game.receive_op_score(m.score, m.lines, m.funds);
+    } else if (m.kind === 'dead') {
+        // Opponent died; we win
+        gameEnded = true;
+        gameOverText.textContent = 'YOU WIN!\n(opponent died)';
+        gameOverOverlay.style.display = 'flex';
+    }
 }
 
 // Input handling
 function handleKeyDown(e) {
     if (!game) return;
 
-    switch (e.key) {
+    const key = e.key;
+
+    // Arrow keys and pause
+    switch (key) {
         case 'ArrowLeft':
             e.preventDefault();
             game.move_left();
-            break;
+            return;
         case 'ArrowRight':
             e.preventDefault();
             game.move_right();
-            break;
+            return;
         case 'ArrowUp':
             e.preventDefault();
             game.rotate();
-            break;
+            return;
         case 'ArrowDown':
             e.preventDefault();
             game.begin_drop();
-            break;
+            return;
         case 'p':
         case 'P':
             paused = !paused;
             game.set_paused(paused);
-            break;
+            return;
+    }
+
+    // Weapon launch: digits 1-0 map to arsenal slots 0-9
+    if (key >= '1' && key <= '9') {
+        const slot = parseInt(key) - 1;
+        game.launch_weapon(slot);
+    } else if (key === '0') {
+        game.launch_weapon(9);
     }
 }
 
 // Event listeners
 document.addEventListener('keydown', handleKeyDown);
 newGameBtn.addEventListener('click', newGame);
+bazaarDoneBtn.addEventListener('click', () => {
+    game.leave_bazaar();
+    bazaarOverlay.style.display = 'none';
+});
 
 // Initialize and start game loop
 (async () => {
     await initGame();
+
+    // Set up broadcast channel for two-player communication
+    broadcastChannel = new BroadcastChannel('battletris');
+    broadcastChannel.onmessage = handleBroadcastMessage;
+
     requestAnimationFrame(gameLoop);
 })();
