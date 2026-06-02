@@ -1,0 +1,13 @@
+[package]
+name = "bt-replay"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Deterministic recording + playback for BattleTris: capture inputs, re-run the engine bit-exact."
+
+[dependencies]
+bt-core = { path = "../bt-core" }
+bt-ai = { path = "../bt-ai" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

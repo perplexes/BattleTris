@@ -1,9 +1,17 @@
-import init, { WasmGame, WasmVsComputer, max_weapons, weapon_name, weapon_description, weapon_price, weapon_duration } from '../pkg/bt_wasm.js';
+import init, { WasmGame, WasmVsComputer, fixed_dt, max_weapons, weapon_name, weapon_description, weapon_price, weapon_duration } from '../pkg/bt_wasm.js';
 
 // Game state
 let game = null;
 let mode = 'practice'; // 'practice', 'vscomputer', 'vsplayer', 'online'
 let lastFrameTime = 0;
+// Fixed-timestep accumulator. The engine is advanced in constant FIXED_DT steps
+// (read from wasm) decoupled from requestAnimationFrame, so play and every
+// recording are deterministic regardless of frame-rate jitter. Set once wasm is
+// initialised (see initGame).
+let FIXED_DT = 16;
+let tickAccumulator = 0;
+const MAX_FRAME_DT = 250; // clamp huge gaps (e.g. backgrounded tab) to avoid a spiral of death
+const MAX_STEPS_PER_FRAME = 8; // cap catch-up work per frame
 let paused = false;
 let gameEnded = false;
 let broadcastChannel = null;
@@ -294,6 +302,7 @@ async function beginOnlineMode() {
 
 async function initGame() {
     await init();
+    FIXED_DT = fixed_dt(); // canonical timestep from the engine
     startGame('practice');
 }
 
@@ -354,6 +363,7 @@ function startGame(newMode) {
     gameOverOverlay.style.display = 'none';
     bazaarOverlay.style.display = 'none';
     lastFrameTime = performance.now();
+    tickAccumulator = 0;
 }
 
 function updateModeButtons() {
@@ -775,16 +785,30 @@ function gameLoop(now) {
         lastFrameTime = now;
     }
 
-    const dt = Math.min(now - lastFrameTime, 100);
+    let frameDt = now - lastFrameTime;
     lastFrameTime = now;
+    if (frameDt > MAX_FRAME_DT) frameDt = MAX_FRAME_DT;
 
     // In online mode, don't tick until the data channel is open
     const shouldTick = !paused && !gameEnded && !game.is_game_over() &&
         !(mode === 'online' && onlinePaused);
 
-    // Advance game if not paused and not in bazaar
+    // Advance the engine in fixed FIXED_DT steps (accumulator). This keeps the
+    // simulation — and therefore every recording — deterministic and decoupled
+    // from frame-rate jitter.
     if (shouldTick) {
-        game.tick(dt);
+        tickAccumulator += frameDt;
+        let steps = 0;
+        while (tickAccumulator >= FIXED_DT && steps < MAX_STEPS_PER_FRAME) {
+            game.tick(FIXED_DT);
+            tickAccumulator -= FIXED_DT;
+            steps++;
+        }
+        // If we hit the catch-up cap, drop the backlog rather than banking time.
+        if (steps >= MAX_STEPS_PER_FRAME) tickAccumulator = 0;
+    } else {
+        // Don't accumulate wall-clock time while paused / over / not yet live.
+        tickAccumulator = 0;
     }
 
     // Process events and relay to opponent (vsplayer or online)

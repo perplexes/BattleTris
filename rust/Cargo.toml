@@ -4,6 +4,7 @@ members = [
     "bt-core",
     "bt-trueskill",
     "bt-ai",
+    "bt-replay",
     "bt-wasm",
     "bt-server",
 ]
@@ -13,6 +14,7 @@ default-members = [
     "bt-core",
     "bt-trueskill",
     "bt-ai",
+    "bt-replay",
 ]
 
 [workspace.package]

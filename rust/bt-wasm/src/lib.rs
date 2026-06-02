@@ -9,10 +9,30 @@ use bt_core::constants::{BT_PIECE_HEIGHT, BT_PIECE_WIDTH};
 use bt_core::game::GameEvent;
 use bt_core::weapons::{weapon_table, WeaponToken, BT_MAX_WEAPONS};
 use bt_core::Game;
+use bt_replay::{Input, Mode, Recorder};
 use wasm_bindgen::prelude::*;
 
 /// Sentinel id for an empty square in [`WasmGame::render_grid`].
 pub const EMPTY: i32 = -2;
+
+/// The fixed timestep (ms) the engine is advanced with. The front-end reads this
+/// via [`fixed_dt`] and drives an accumulator loop at this rate, so play (and
+/// every recording) is deterministic regardless of `requestAnimationFrame`
+/// jitter. Recordings replay bit-exact only when stepped at this same rate.
+pub const FIXED_DT_MS: i32 = 16;
+
+/// The engine build recordings are stamped with — the `git` short SHA passed in
+/// at compile time (`BT_GIT_SHA`), or "dev" for local builds.
+const ENGINE_SHA: &str = match option_env!("BT_GIT_SHA") {
+    Some(s) => s,
+    None => "dev",
+};
+
+/// The canonical fixed timestep (ms) the host must tick at.
+#[wasm_bindgen]
+pub fn fixed_dt() -> i32 {
+    FIXED_DT_MS
+}
 
 // Event tags (paired with 3 i32 payload slots in `drain_events`).
 const TAG_LOCKED: i32 = 0; // [lines, value, funds]
@@ -26,13 +46,20 @@ const TAG_IDIOT: i32 = 6; // [reason, 0, 0]
 #[wasm_bindgen]
 pub struct WasmGame {
     inner: Game,
+    rec: Recorder,
 }
 
 #[wasm_bindgen]
 impl WasmGame {
     #[wasm_bindgen(constructor)]
     pub fn new(seed: u32) -> WasmGame {
-        WasmGame { inner: Game::new(seed as u64) }
+        // Practice / 2-player share this wrapper; replays of a 2-player side are
+        // self-contained because `receive_weapon` / `receive_op_score` are
+        // recorded too (the runner treats Practice and VsPlayer identically).
+        WasmGame {
+            inner: Game::new(seed as u64),
+            rec: Recorder::new(seed, Mode::Practice, None, FIXED_DT_MS, ENGINE_SHA),
+        }
     }
 
     pub fn width(&self) -> i32 {
@@ -44,26 +71,33 @@ impl WasmGame {
 
     pub fn tick(&mut self, dt_ms: i32) {
         self.inner.tick(dt_ms);
+        self.rec.on_tick();
     }
 
     pub fn move_left(&mut self) {
         self.inner.move_left();
+        self.rec.record(Input::MoveLeft);
     }
     pub fn move_right(&mut self) {
         self.inner.move_right();
+        self.rec.record(Input::MoveRight);
     }
     pub fn rotate(&mut self) {
         self.inner.rotate();
+        self.rec.record(Input::Rotate);
     }
     pub fn begin_drop(&mut self) {
         self.inner.begin_drop();
+        self.rec.record(Input::BeginDrop);
     }
     /// Soft drop one cell (tap = 1; hold-repeat for fast descent).
     pub fn soft_drop(&mut self) {
         self.inner.soft_drop();
+        self.rec.record(Input::SoftDrop);
     }
     pub fn set_paused(&mut self, paused: bool) {
         self.inner.set_paused(paused);
+        self.rec.record(Input::SetPaused(paused));
     }
 
     pub fn is_game_over(&self) -> bool {
@@ -96,17 +130,24 @@ impl WasmGame {
     // --- weapons / bazaar ---
     pub fn launch_weapon(&mut self, slot: u32) {
         self.inner.launch_weapon(slot as usize);
+        self.rec.record(Input::LaunchWeapon(slot));
     }
     /// Deliver a weapon the opponent launched (token = protocol index).
     pub fn receive_weapon(&mut self, token: i32) {
         if let Some(t) = WeaponToken::from_index(token) {
             self.inner.receive_weapon(t);
+            self.rec.record(Input::ReceiveWeapon(token));
         }
     }
     /// Deliver the opponent's latest score (`BT_OP_SCORE`).
     pub fn receive_op_score(&mut self, score: i32, lines: i32, funds: i32) {
         self.inner
             .receive_op_score(score as i64, lines as i64, funds as i64);
+        self.rec.record(Input::ReceiveOpScore {
+            score: score as i64,
+            lines: lines as i64,
+            funds: funds as i64,
+        });
     }
     pub fn is_in_bazaar(&self) -> bool {
         self.inner.is_in_bazaar()
@@ -117,19 +158,28 @@ impl WasmGame {
     /// Buy a weapon by token index; returns true on success.
     pub fn buy_weapon(&mut self, token: i32) -> bool {
         match WeaponToken::from_index(token) {
-            Some(t) => self.inner.buy_weapon(t),
+            Some(t) => {
+                let ok = self.inner.buy_weapon(t);
+                self.rec.record(Input::BuyWeapon(token));
+                ok
+            }
             None => false,
         }
     }
     /// Sell a weapon back (bazaar "Remove"); refunds its price.
     pub fn sell_weapon(&mut self, token: i32) -> bool {
         match WeaponToken::from_index(token) {
-            Some(t) => self.inner.sell_weapon(t),
+            Some(t) => {
+                let ok = self.inner.sell_weapon(t);
+                self.rec.record(Input::SellWeapon(token));
+                ok
+            }
             None => false,
         }
     }
     pub fn leave_bazaar(&mut self) {
         self.inner.leave_bazaar();
+        self.rec.record(Input::LeaveBazaar);
     }
     /// Arsenal slot `i`: token index, or -1 if empty.
     pub fn arsenal_token(&self, i: u32) -> i32 {
@@ -184,6 +234,13 @@ impl WasmGame {
             Some(t) => self.inner.bazaar_price(t),
             None => 0,
         }
+    }
+
+    /// The recording of this game so far, as JSON — the trace for a bug report
+    /// or a saved replay. Re-running it on the same engine build reproduces the
+    /// game exactly.
+    pub fn export_replay(&self) -> String {
+        self.rec.to_json()
     }
 }
 
@@ -283,6 +340,7 @@ fn event_quad(e: GameEvent) -> [i32; 4] {
 #[wasm_bindgen]
 pub struct WasmVsComputer {
     inner: VsComputer,
+    rec: Recorder,
 }
 
 #[wasm_bindgen]
@@ -293,11 +351,20 @@ impl WasmVsComputer {
     pub fn new(seed: u32, level: u32) -> WasmVsComputer {
         WasmVsComputer {
             inner: VsComputer::new(seed as u64, level as usize),
+            // Only the human's inputs are recorded — Ernie is regenerated from
+            // the seed + level on replay.
+            rec: Recorder::new(seed, Mode::VsComputer, Some(level), FIXED_DT_MS, ENGINE_SHA),
         }
     }
 
     pub fn tick(&mut self, dt_ms: i32) {
         self.inner.tick(dt_ms);
+        self.rec.on_tick();
+    }
+
+    /// The recording of this match so far, as JSON.
+    pub fn export_replay(&self) -> String {
+        self.rec.to_json()
     }
 
     /// 0 = ongoing, 1 = player won, 2 = player lost.
@@ -314,21 +381,27 @@ impl WasmVsComputer {
     }
     pub fn move_left(&mut self) {
         self.inner.player_mut().move_left();
+        self.rec.record(Input::MoveLeft);
     }
     pub fn move_right(&mut self) {
         self.inner.player_mut().move_right();
+        self.rec.record(Input::MoveRight);
     }
     pub fn rotate(&mut self) {
         self.inner.player_mut().rotate();
+        self.rec.record(Input::Rotate);
     }
     pub fn begin_drop(&mut self) {
         self.inner.player_mut().begin_drop();
+        self.rec.record(Input::BeginDrop);
     }
     pub fn soft_drop(&mut self) {
         self.inner.player_mut().soft_drop();
+        self.rec.record(Input::SoftDrop);
     }
     pub fn set_paused(&mut self, paused: bool) {
         self.inner.player_mut().set_paused(paused);
+        self.rec.record(Input::SetPaused(paused));
     }
     pub fn is_game_over(&self) -> bool {
         self.inner.player().is_game_over() || self.inner.result() != 0
@@ -356,6 +429,7 @@ impl WasmVsComputer {
     }
     pub fn launch_weapon(&mut self, slot: u32) {
         self.inner.player_mut().launch_weapon(slot as usize);
+        self.rec.record(Input::LaunchWeapon(slot));
     }
     pub fn is_in_bazaar(&self) -> bool {
         self.inner.player().is_in_bazaar()
@@ -365,18 +439,27 @@ impl WasmVsComputer {
     }
     pub fn buy_weapon(&mut self, token: i32) -> bool {
         match WeaponToken::from_index(token) {
-            Some(t) => self.inner.player_mut().buy_weapon(t),
+            Some(t) => {
+                let ok = self.inner.player_mut().buy_weapon(t);
+                self.rec.record(Input::BuyWeapon(token));
+                ok
+            }
             None => false,
         }
     }
     pub fn sell_weapon(&mut self, token: i32) -> bool {
         match WeaponToken::from_index(token) {
-            Some(t) => self.inner.player_mut().sell_weapon(t),
+            Some(t) => {
+                let ok = self.inner.player_mut().sell_weapon(t);
+                self.rec.record(Input::SellWeapon(token));
+                ok
+            }
             None => false,
         }
     }
     pub fn leave_bazaar(&mut self) {
         self.inner.player_mut().leave_bazaar();
+        self.rec.record(Input::LeaveBazaar);
     }
     pub fn bazaar_price(&self, token: i32) -> i32 {
         match WeaponToken::from_index(token) {
@@ -403,5 +486,72 @@ impl WasmVsComputer {
             out.extend_from_slice(&event_quad(e));
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod recording_tests {
+    //! End-to-end check that the *wrapper-level* recording (the path the browser
+    //! actually drives) round-trips exactly. The wasm-bindgen types are plain
+    //! Rust, so they run fine on the host.
+    use super::*;
+    use bt_replay::{Replay, ReplayPlayer};
+
+    #[test]
+    fn wasm_game_export_replays_exactly() {
+        let seed = 0x00AB_CDEF;
+        let mut g = WasmGame::new(seed);
+        for t in 0..400u32 {
+            match t {
+                3 => g.move_left(),
+                4 => g.move_left(),
+                9 => g.rotate(),
+                14 => g.begin_drop(),
+                60 => g.move_right(),
+                95 => g.rotate(),
+                130 => g.begin_drop(),
+                220 => g.move_left(),
+                260 => g.begin_drop(),
+                _ => {}
+            }
+            g.tick(FIXED_DT_MS);
+        }
+        let live = g.render_grid();
+
+        let replay = Replay::from_json(&g.export_replay()).expect("replay parses");
+        assert_eq!(replay.dt_ms, FIXED_DT_MS);
+        let mut p = ReplayPlayer::new(replay);
+        p.run_to_end();
+
+        assert_eq!(render_grid_of(p.player()), live, "wrapper recording must replay exactly");
+    }
+
+    #[test]
+    fn wasm_vs_computer_export_replays_exactly() {
+        let seed = 4242u32;
+        let level = 9u32;
+        let mut g = WasmVsComputer::new(seed, level);
+        for t in 0..1200u32 {
+            match t {
+                5 => g.move_left(),
+                11 => g.rotate(),
+                20 => g.begin_drop(),
+                90 => g.move_right(),
+                160 => g.begin_drop(),
+                _ => {}
+            }
+            g.tick(FIXED_DT_MS);
+        }
+        let live_player = g.render_grid();
+        let live_ai = g.render_ai_grid();
+        let live_result = g.result();
+
+        let replay = Replay::from_json(&g.export_replay()).expect("replay parses");
+        let mut p = ReplayPlayer::new(replay);
+        p.run_to_end();
+
+        assert_eq!(render_grid_of(p.player()), live_player, "human board must match");
+        assert_eq!(render_grid_of(p.ai().unwrap()), live_ai, "Ernie's board must match");
+        assert_eq!(p.result(), live_result, "match result must match");
     }
 }
