@@ -36,6 +36,9 @@
 
 use bt_core::{Board, Game, Piece};
 
+mod vs;
+pub use vs::{VsComputer, AI_LAUNCH_PERIOD_MS, AI_LEVELS};
+
 // ---------------------------------------------------------------------------
 // Penalty constants — from BTComputer.C
 // ---------------------------------------------------------------------------
@@ -416,6 +419,7 @@ pub fn best_placement(board: &Board, piece: &Piece) -> Placement {
 ///
 /// Mirrors `BTComputer` in BTComputer.C. `take_turn` drives a single piece to
 /// the best placement computed by [`best_placement`].
+#[derive(Clone, Debug)]
 pub struct Computer {
     // Reserved for future difficulty / move-delay extension.
     _priv: (),

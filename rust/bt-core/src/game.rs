@@ -404,7 +404,7 @@ impl Game {
 
     /// `BTGame::beginDrop` — engage fast drop and award the hard-drop bonus.
     pub fn begin_drop(&mut self) {
-        if self.paused || self.phase == Phase::Over {
+        if self.paused || self.in_bazaar || self.phase == Phase::Over {
             return;
         }
         self.dropping = true;
@@ -670,5 +670,56 @@ impl Game {
             }
             self.current = Some(p);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// While the weapons bazaar is open the whole game is frozen
+    /// (`BTGame::pauseAllTimeOuts`), so player input must be inert. This guards
+    /// the regression where a held drop key kept the falling piece moving while
+    /// the human was supposed to be shopping.
+    #[test]
+    fn begin_drop_is_ignored_in_the_bazaar() {
+        let mut g = Game::new(1);
+        assert!(g.current_piece().is_some(), "a piece should be falling");
+        assert!(!g.dropping);
+
+        // Enter the bazaar (the synchronized weapons barrier).
+        g.in_bazaar = true;
+        g.begin_drop();
+        assert!(!g.dropping, "begin_drop must be a no-op while the bazaar is open");
+
+        // Leaving the bazaar re-enables fast drop.
+        g.in_bazaar = false;
+        g.begin_drop();
+        assert!(g.dropping, "begin_drop should engage once the bazaar closes");
+    }
+
+    #[test]
+    fn soft_drop_is_ignored_in_the_bazaar() {
+        let mut g = Game::new(1);
+        let y0 = g.y;
+        g.in_bazaar = true;
+        g.soft_drop();
+        assert_eq!(g.y, y0, "soft_drop must not advance the piece in the bazaar");
+    }
+
+    /// A game in the bazaar is frozen: ticking the virtual clock must not move
+    /// or lock the piece, change the score, or emit events.
+    #[test]
+    fn tick_is_frozen_in_the_bazaar() {
+        let mut g = Game::new(1);
+        g.in_bazaar = true;
+        let y0 = g.y;
+        let score0 = g.score().score;
+        for _ in 0..200 {
+            g.tick(16);
+        }
+        assert_eq!(g.y, y0, "the piece must not fall while frozen");
+        assert_eq!(g.score().score, score0, "score must not change while frozen");
+        assert!(g.take_events().is_empty(), "no events while frozen");
     }
 }

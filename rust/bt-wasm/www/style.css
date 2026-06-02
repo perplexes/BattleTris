@@ -36,6 +36,22 @@ body {
     justify-content: center;
     margin-bottom: 20px;
     flex-wrap: wrap;
+    align-items: center;
+}
+
+.ernie-level {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 14px;
+    color: #404040;
+}
+
+.ernie-level select {
+    padding: 6px 8px;
+    background-color: #dfdfdf;
+    border: 2px solid #808080;
+    font-family: inherit;
 }
 
 .mode-btn {

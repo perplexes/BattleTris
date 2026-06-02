@@ -51,6 +51,10 @@ const modeOnlineBtn = document.getElementById('modeOnline');
 const aiBoard = document.getElementById('aiBoard');
 const aiLabel = document.getElementById('aiLabel');
 const onlineStatus = document.getElementById('onlineStatus');
+const ernieLevelSelect = document.getElementById('ernieLevel');
+// Default Ernie difficulty: "Willing" (index 5 -> 1000ms/move). The original
+// defaults to the slider minimum (Comatose); 1000ms is a fairer modern default.
+const DEFAULT_ERNIE_LEVEL = 5;
 
 // Mobile UI elements
 const mobileScore = document.getElementById('mobileScore');
@@ -313,7 +317,8 @@ function startGame(newMode) {
 
     // Create game instance based on mode
     if (mode === 'vscomputer') {
-        game = new WasmVsComputer(seed);
+        const level = ernieLevelSelect ? (parseInt(ernieLevelSelect.value, 10) || 0) : DEFAULT_ERNIE_LEVEL;
+        game = new WasmVsComputer(seed, level);
     } else {
         game = new WasmGame(seed);
     }
@@ -787,8 +792,11 @@ function gameLoop(now) {
         processEvents();
     }
 
-    // Check for win/loss in vscomputer mode
-    if (mode === 'vscomputer' && !gameEnded && game.is_game_over() === false) {
+    // Check for win/loss in vscomputer mode. NOTE: don't gate on
+    // game.is_game_over() — it returns true as soon as `result` is set (it ORs
+    // in result != 0), so gating on it would suppress the win banner when Ernie
+    // tops out (the player is still alive). Read `result` directly.
+    if (mode === 'vscomputer' && !gameEnded) {
         const result = game.result();
         if (result === 1) {
             gameEnded = true;
@@ -839,7 +847,7 @@ canvas.addEventListener('touchstart', (e) => {
     if (e.changedTouches.length === 0) return;
     e.preventDefault();
 
-    if (!game || gameEnded || game.is_game_over()) return;
+    if (!game || gameEnded || game.is_game_over() || game.is_in_bazaar()) return;
     if (mode === 'online' && onlinePaused) return;
 
     const touch = e.changedTouches[0];
@@ -958,7 +966,7 @@ function setupTouchButton(btnId, action, repeatInterval) {
     let delayTimer = null;
 
     function fireAction() {
-        if (!game || gameEnded || game.is_game_over()) return;
+        if (!game || gameEnded || game.is_game_over() || game.is_in_bazaar()) return;
         if (mode === 'online' && onlinePaused) return;
         action();
     }
@@ -1020,6 +1028,10 @@ function handleKeyDown(e) {
 
     // In online mode, don't accept input until connected
     if (mode === 'online' && onlinePaused) return;
+
+    // The bazaar freezes the match (its own Add/Remove/Done buttons drive it);
+    // ignore gameplay keys so a held Space can't slam pieces or inflate score.
+    if (game.is_in_bazaar()) return;
 
     const key = e.key;
 
@@ -1101,6 +1113,14 @@ modePracticeBtn.addEventListener('click', () => startGame('practice'));
 modeVsComputerBtn.addEventListener('click', () => startGame('vscomputer'));
 modeVsPlayerBtn.addEventListener('click', () => startGame('vsplayer'));
 modeOnlineBtn.addEventListener('click', () => startGame('online'));
+
+// Changing Ernie's difficulty restarts the current vs-computer game so it
+// takes effect immediately (it's read at WasmVsComputer construction).
+if (ernieLevelSelect) {
+    ernieLevelSelect.addEventListener('change', () => {
+        if (mode === 'vscomputer') startGame('vscomputer');
+    });
+}
 
 // Initialize and start game loop
 (async () => {
