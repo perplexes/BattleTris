@@ -44,19 +44,21 @@ const aiBoard = document.getElementById('aiBoard');
 const aiLabel = document.getElementById('aiLabel');
 const onlineStatus = document.getElementById('onlineStatus');
 
-// Palette: cell id -> { bright, dark }
+// Palette: cell id -> { bright, dark }. Exact RGB from the original X11
+// resource defaults (BattleTris.C): bright = base color, dark = its
+// dark/shadow variant used for the bevel border.
 const PALETTE = {
-    1: { bright: '#fffff0', dark: '#808080' }, // IVORY
-    2: { bright: '#ffff00', dark: '#b8860b' }, // YELLOW
-    3: { bright: '#ff0000', dark: '#8b0000' }, // RED
-    4: { bright: '#3050ff', dark: '#00008b' }, // BLUE
-    5: { bright: '#ffa500', dark: '#b25900' }, // ORANGE
-    6: { bright: '#00d000', dark: '#006400' }, // GREEN
-    7: { bright: '#00ffff', dark: '#008b8b' }, // CYAN
-    8: { bright: '#a020f0', dark: '#551a8b' }, // PURPLE
-    9: { bright: '#bebebe', dark: '#bebebe' }, // NEUTRAL
-    20: { bright: '#bebebe', dark: '#bebebe' }, // BOTTLE-NECK STRUCT
-    23: { bright: '#ff00ff', dark: '#800080' }, // GIMP
+    1: { bright: '#eeeee0', dark: '#a8a8a8' }, // IVORY  / GRAY
+    2: { bright: '#eeee00', dark: '#daa520' }, // YELLOW / dark (goldenrod)
+    3: { bright: '#ee0000', dark: '#8b0000' }, // RED    / dark red
+    4: { bright: '#0000cd', dark: '#00008b' }, // BLUE   / dark blue
+    5: { bright: '#ee9a00', dark: '#da7600' }, // ORANGE / dark orange
+    6: { bright: '#32cd32', dark: '#228b22' }, // GREEN  / forest green
+    7: { bright: '#009acd', dark: '#436eee' }, // CYAN   (a deep blue!) / variant
+    8: { bright: '#a020f0', dark: '#68228b' }, // PURPLE / dark purple
+    9: { bright: '#bfbfbf', dark: '#bfbfbf' }, // NEUTRAL
+    20: { bright: '#bfbfbf', dark: '#bfbfbf' }, // BOTTLE-NECK STRUCT
+    23: { bright: '#ff00ff', dark: '#800080' }, // GIMP (placeholder; orig is an image)
 };
 
 const CELL_SIZE = 23;
@@ -405,10 +407,10 @@ function drawCellOnContext(context, x, y, cellId) {
 
     // HAPPY (21) and UNHAPPY (22)
     if (cellId === 21 || cellId === 22) {
-        // Beveled yellow box
-        context.fillStyle = '#b8860b';
+        // Beveled yellow box (goldenrod shadow, yellow face) — as BTBox.C.
+        context.fillStyle = '#daa520';
         context.fillRect(px, py, CELL_SIZE, CELL_SIZE);
-        context.fillStyle = '#ffff00';
+        context.fillStyle = '#eeee00';
         context.fillRect(px, py, CELL_SIZE - BEVEL_BORDER, CELL_SIZE - BEVEL_BORDER);
 
         // Draw face
@@ -452,22 +454,23 @@ function drawCellOnContext(context, x, y, cellId) {
 
     // DICE (24-29)
     if (cellId >= 24 && cellId <= 29) {
-        // Beveled ivory box
-        context.fillStyle = '#808080';
+        // Beveled ivory box (gray shadow, ivory face) — as BTBox.C die boxes.
+        context.fillStyle = '#a8a8a8';
         context.fillRect(px, py, CELL_SIZE, CELL_SIZE);
-        context.fillStyle = '#fffff0';
+        context.fillStyle = '#eeeee0';
         context.fillRect(px, py, CELL_SIZE - BEVEL_BORDER, CELL_SIZE - BEVEL_BORDER);
 
-        // Draw pips
+        // Draw pips: a 5x5 gray square with a 3x3 black inset (BTBox.C).
         const value = cellId - 23;
         const X = [1, 7, 13];
         const Y = [1, 7, 13];
         const pipSize = 5;
 
-        context.fillStyle = '#000000';
-
         const drawPip = (offsetX, offsetY) => {
+            context.fillStyle = '#a8a8a8';
             context.fillRect(px + offsetX, py + offsetY, pipSize, pipSize);
+            context.fillStyle = '#000000';
+            context.fillRect(px + offsetX + 1, py + offsetY + 1, pipSize - 2, pipSize - 2);
         };
 
         // Pip placement rules
