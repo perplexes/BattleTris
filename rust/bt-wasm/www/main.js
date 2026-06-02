@@ -1146,6 +1146,102 @@ if (ernieLevelSelect) {
     });
 }
 
+// ─── Bug report ─────────────────────────────────────────────────────────────
+// Capture a deterministic replay of the current game, upload it for a shareable
+// link, and open a prefilled GitHub issue. No server-side secret: the user
+// reviews and posts the issue themselves.
+const BUG_REPO = 'perplexes/BattleTris';
+const bugOverlay = document.getElementById('bugOverlay');
+const bugTitleInput = document.getElementById('bugTitle');
+const bugExpected = document.getElementById('bugExpected');
+const bugActual = document.getElementById('bugActual');
+const bugStatus = document.getElementById('bugStatus');
+const bugSubmit = document.getElementById('bugSubmit');
+const bugCancel = document.getElementById('bugCancel');
+const reportBugBtn = document.getElementById('reportBug');
+
+// Replay snapshot taken when the modal opens — the "bug moment" — so it isn't
+// affected by play continuing while the user types.
+let bugReplayJson = null;
+
+function openBug() {
+    bugReplayJson = (game && typeof game.export_replay === 'function') ? game.export_replay() : null;
+    bugStatus.textContent = bugReplayJson ? '' : 'No active game — the report will have no replay attached.';
+    bugSubmit.disabled = false;
+    bugOverlay.classList.add('open');
+    bugTitleInput.focus();
+}
+
+function closeBug() {
+    bugOverlay.classList.remove('open');
+}
+
+async function uploadReplay(json) {
+    const res = await fetch('/api/replays', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: json,
+    });
+    if (!res.ok) throw new Error('upload failed (' + res.status + ')');
+    return (await res.json()).id;
+}
+
+function downloadReplay(json) {
+    const blob = new Blob([json], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'battletris-replay.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+}
+
+function buildIssueBody(expected, actual, replayUrl, meta) {
+    let b = '';
+    b += '**Expected**\n' + (expected.trim() || '_(not provided)_') + '\n\n';
+    b += '**Actual**\n' + (actual.trim() || '_(not provided)_') + '\n\n';
+    b += '---\n';
+    if (replayUrl) b += '- Replay: ' + replayUrl + '\n';
+    if (meta) {
+        const lvl = (meta.ai_level !== null && meta.ai_level !== undefined) ? ` (Ernie ${meta.ai_level})` : '';
+        b += `- Mode: ${meta.mode}${lvl}\n`;
+        b += `- Engine: \`${meta.engine_sha}\` · seed: ${meta.seed} · ticks: ${meta.tick_count} · inputs: ${meta.inputs}\n`;
+    }
+    b += `- Page: ${location.href}\n`;
+    b += `- Browser: ${navigator.userAgent}\n`;
+    return b;
+}
+
+async function submitBug() {
+    bugSubmit.disabled = true;
+    let replayUrl = null;
+    let meta = null;
+    if (bugReplayJson) {
+        try {
+            const r = JSON.parse(bugReplayJson);
+            meta = { mode: r.mode, ai_level: r.ai_level, engine_sha: r.engine_sha, seed: r.seed, tick_count: r.tick_count, inputs: (r.frames || []).length };
+        } catch (e) { /* metadata is best-effort */ }
+        try {
+            bugStatus.textContent = 'Uploading replay…';
+            const id = await uploadReplay(bugReplayJson);
+            replayUrl = `${location.origin}/api/replays/${id}`;
+        } catch (e) {
+            bugStatus.textContent = 'Replay upload failed — downloading it instead; attach it to the issue manually.';
+            downloadReplay(bugReplayJson);
+        }
+    }
+    const title = bugTitleInput.value.trim() || 'Bug report';
+    const body = buildIssueBody(bugExpected.value, bugActual.value, replayUrl, meta);
+    const url = `https://github.com/${BUG_REPO}/issues/new?title=${encodeURIComponent(title)}&body=${encodeURIComponent(body)}&labels=bug`;
+    window.open(url, '_blank', 'noopener');
+    bugSubmit.disabled = false;
+    closeBug();
+}
+
+if (reportBugBtn) reportBugBtn.addEventListener('click', openBug);
+if (bugCancel) bugCancel.addEventListener('click', closeBug);
+if (bugSubmit) bugSubmit.addEventListener('click', submitBug);
+if (bugOverlay) bugOverlay.addEventListener('click', (e) => { if (e.target === bugOverlay) closeBug(); });
+
 // Initialize and start game loop
 (async () => {
     await initGame();

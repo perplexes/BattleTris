@@ -28,10 +28,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{Path, State};
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Redirect};
-use axum::routing::get;
-use axum::Router;
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use bt_replay::Replay;
 use bt_trueskill::ts2::{rate_match, MatchOutcome, PlayerState, Ts2Params, Winner};
 use bt_trueskill::{quality_1v1, Rating};
 use futures_util::{SinkExt, StreamExt};
@@ -317,6 +319,61 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
     println!("client {id} disconnected");
 }
 
+// --- replay store -------------------------------------------------------
+//
+// Content-addressed JSON blobs on disk (the fly volume in prod). A recording
+// uploaded by the "report a bug" button — and, later, the replay library —
+// lands here and is fetched back by id. Same replay → same id (dedup).
+
+/// Directory replays are stored in (`REPLAYS_DIR`, default `replays`; prod sets
+/// `/data/replays` on the fly volume).
+fn replays_dir() -> String {
+    std::env::var("REPLAYS_DIR").unwrap_or_else(|_| "replays".to_string())
+}
+
+/// A stable, content-derived id (16 hex chars). `DefaultHasher` uses fixed keys,
+/// so identical JSON always maps to the same id across runs.
+fn replay_id(json: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    json.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
+/// Ids are our own hex hashes; reject anything else so a fetch can't escape the
+/// store directory (path traversal).
+fn valid_replay_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// `POST /api/replays` — store a recording, return `{"id": "..."}`. Validates
+/// it parses as a [`Replay`] first so we never persist junk.
+async fn post_replay(body: String) -> impl IntoResponse {
+    if Replay::from_json(&body).is_err() {
+        return (StatusCode::BAD_REQUEST, "invalid replay").into_response();
+    }
+    let id = replay_id(&body);
+    let dir = replays_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "store unavailable").into_response();
+    }
+    if std::fs::write(format!("{dir}/{id}.json"), body.as_bytes()).is_err() {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "write failed").into_response();
+    }
+    (StatusCode::OK, Json(json!({ "id": id }))).into_response()
+}
+
+/// `GET /api/replays/:id` — fetch a stored recording as JSON.
+async fn get_replay(Path(id): Path<String>) -> impl IntoResponse {
+    if !valid_replay_id(&id) {
+        return (StatusCode::BAD_REQUEST, "bad id").into_response();
+    }
+    match std::fs::read_to_string(format!("{}/{}.json", replays_dir(), id)) {
+        Ok(txt) => ([(header::CONTENT_TYPE, "application/json")], txt).into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, "not found").into_response(),
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let state: Shared = Arc::new(Mutex::new(App::new()));
@@ -326,6 +383,8 @@ async fn main() {
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
+        .route("/api/replays", post(post_replay))
+        .route("/api/replays/:id", get(get_replay))
         .route("/", get(|| async { Redirect::permanent("/www/") }))
         .fallback_service(ServeDir::new(&static_dir))
         .with_state(state);
@@ -367,5 +426,23 @@ mod tests {
         let parsed: Value = serde_json::from_str(&txt).unwrap();
         let mu = parsed["alice"]["mu"].as_f64().unwrap();
         assert!((mu - 29.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn replay_id_is_stable_and_content_addressed() {
+        let a = r#"{"seed":1,"frames":[]}"#;
+        let b = r#"{"seed":2,"frames":[]}"#;
+        assert_eq!(replay_id(a), replay_id(a), "same content -> same id");
+        assert_ne!(replay_id(a), replay_id(b), "different content -> different id");
+        assert_eq!(replay_id(a).len(), 16);
+    }
+
+    #[test]
+    fn replay_id_validation_blocks_path_traversal() {
+        assert!(valid_replay_id("0123abcdef9876ff"));
+        assert!(!valid_replay_id("../../etc/passwd"));
+        assert!(!valid_replay_id("foo/bar"));
+        assert!(!valid_replay_id(""));
+        assert!(!valid_replay_id("zzzz")); // not hex
     }
 }

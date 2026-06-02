@@ -124,6 +124,7 @@ name = "bt-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "bt-replay",
  "bt-trueskill",
  "futures-util",
  "serde_json",

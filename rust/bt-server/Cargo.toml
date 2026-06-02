@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 bt-trueskill = { path = "../bt-trueskill" }
+bt-replay = { path = "../bt-replay" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "signal"] }
 axum = { version = "0.7", features = ["ws"] }
 tower-http = { version = "0.5", features = ["fs"] }

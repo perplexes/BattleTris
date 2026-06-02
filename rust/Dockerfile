@@ -34,8 +34,10 @@ COPY --from=builder /build/bt-wasm/pkg /app/site/pkg
 
 ENV STATIC_DIR=/app/site
 ENV PORT=8080
-# Durable ratings: persisted to a fly volume mounted at /data (see fly.toml).
+# Durable ratings + uploaded replays: persisted to a fly volume at /data (see
+# fly.toml). Replays back the "report a bug" link and the replay library.
 ENV RATINGS_FILE=/data/ratings.json
+ENV REPLAYS_DIR=/data/replays
 # Run as root so the process can write the root-owned volume mount. (Still a
 # distroless, no-shell, minimal-CVE image; chainguard/static defaults to
 # nonroot, which can't write a fly volume.)

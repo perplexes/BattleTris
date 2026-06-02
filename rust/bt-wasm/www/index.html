@@ -18,6 +18,7 @@
             <button id="modeVsComputer" class="mode-btn">vs Computer</button>
             <button id="modeVsPlayer" class="mode-btn">vs Player (2 tabs)</button>
             <button id="modeOnline" class="mode-btn">Online</button>
+            <button id="reportBug" class="mode-btn bug-trigger" title="Report a bug — attaches a faithful replay of your game">🐛 Bug</button>
             <label class="ernie-level" title="Ernie's difficulty (start a vs Computer game to apply)">
                 Ernie:
                 <select id="ernieLevel">
@@ -185,6 +186,29 @@
         <button class="touch-btn" id="touchRotate" aria-label="Rotate counter-clockwise">&#10226;</button>
         <button class="touch-btn" id="touchRight" aria-label="Move right">&#9654;</button>
         <button class="touch-btn" id="touchDrop" aria-label="Soft drop">&#10507;</button>
+    </div>
+
+    <!-- Bug report modal: attaches a deterministic replay so the bug can be
+         reproduced exactly, then opens a prefilled GitHub issue. -->
+    <div id="bugOverlay" class="bug-overlay">
+        <div class="bug-panel">
+            <h2>Report a bug</h2>
+            <p class="bug-sub">A faithful replay of your current game is attached so it can be reproduced exactly. You'll review the issue on GitHub before posting.</p>
+            <label class="bug-field">Title
+                <input id="bugTitle" type="text" maxlength="120" placeholder="Short summary">
+            </label>
+            <label class="bug-field">Expected
+                <textarea id="bugExpected" rows="3" placeholder="What did you expect to happen?"></textarea>
+            </label>
+            <label class="bug-field">Actual
+                <textarea id="bugActual" rows="3" placeholder="What actually happened?"></textarea>
+            </label>
+            <div id="bugStatus" class="bug-status"></div>
+            <div class="bug-actions">
+                <button id="bugCancel" class="bug-btn">Cancel</button>
+                <button id="bugSubmit" class="bug-btn bug-btn-primary">Open GitHub issue</button>
+            </div>
+        </div>
     </div>
 
     <script type="module" src="main.js"></script>
