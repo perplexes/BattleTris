@@ -1,0 +1,44 @@
+name: CI + Deploy
+
+# Tests run on every push / PR to main. A green test run on a push to main (or a
+# manual dispatch from main) then deploys to fly.io. The app runs a single
+# always-on machine (in-process matchmaking), so deploy with --ha=false.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test (cargo test --workspace)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: cargo test
+        working-directory: rust
+        run: cargo test --workspace --locked
+
+  deploy:
+    name: Deploy to fly.io
+    needs: test
+    # Only on a real push/dispatch to main — never on PRs (which may come from
+    # forks and must not touch production or see secrets).
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Serialize deploys so two pushes can't race the single machine.
+    concurrency: deploy-battletris
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: flyctl deploy
+        working-directory: rust
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        # Stamp the build with the commit so recordings carry a real engine_sha.
+        run: flyctl deploy --remote-only --ha=false --build-arg BT_GIT_SHA="${GITHUB_SHA::7}"

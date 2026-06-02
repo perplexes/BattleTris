@@ -16,8 +16,13 @@ RUN rustup target add wasm32-unknown-unknown x86_64-unknown-linux-musl \
 
 COPY . .
 
+# The commit being built, stamped into recordings (read by bt-wasm at compile
+# time via option_env!("BT_GIT_SHA")); defaults to "dev". Scoped to the wasm
+# RUN so only that layer's cache depends on it — the server build stays cached.
+ARG BT_GIT_SHA=dev
+
 # Browser client (release) -> bt-wasm/pkg, and a static server binary.
-RUN wasm-pack build bt-wasm --target web --out-dir pkg --release
+RUN BT_GIT_SHA="$BT_GIT_SHA" wasm-pack build bt-wasm --target web --out-dir pkg --release
 RUN cargo build -p bt-server --release --target x86_64-unknown-linux-musl
 
 # ---- runtime: Chainguard distroless static (nonroot, no shell) ----
