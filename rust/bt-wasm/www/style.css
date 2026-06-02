@@ -1351,22 +1351,6 @@ body {
     font-weight: bold;
     color: #333;
 }
-/* Blinking "live" dot, like an old "users online now" badge. */
-.online-dot {
-    display: inline-block;
-    width: 9px;
-    height: 9px;
-    margin-right: 6px;
-    border-radius: 50%;
-    background-color: #2a2;
-    box-shadow: 0 0 3px #2a2;
-    vertical-align: baseline;
-    animation: bt-blink 1.4s step-start infinite;
-}
-@keyframes bt-blink {
-    0%, 60% { opacity: 1; }
-    61%, 100% { opacity: 0.25; }
-}
 
 .site-footer {
     margin: 24px auto 12px;
