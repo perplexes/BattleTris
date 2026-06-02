@@ -3,13 +3,15 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>BattleTris</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
     <div class="container">
-        <h1>BattleTris</h1>
+        <div class="title-wrap">
+            <img src="assets/bttitle.png" alt="BattleTris" class="title-img">
+        </div>
 
         <div class="mode-selector">
             <button id="modePractice" class="mode-btn active">Practice</button>
@@ -20,24 +22,44 @@
 
         <div id="onlineStatus" class="online-status" style="display:none;"></div>
 
+        <!-- Mobile-only compact stats bar (shown above board on small screens) -->
+        <div id="mobileStats" class="mobile-stats">
+            <span><strong>Score:</strong> <span id="mobileScore">0</span></span>
+            <span><strong>Lines:</strong> <span id="mobileLines">0</span></span>
+            <span><strong>Funds:</strong> $<span id="mobileFunds">0</span></span>
+            <span><strong>'til bazaar:</strong> <span id="mobileLinesToBazaar">20</span></span>
+            <span id="mobileOpponent" class="mobile-opponent"></span>
+        </div>
+
         <div class="game-area">
             <div class="left-panel">
+                <!-- Combined stats panel: your stats + opponent stats interleaved -->
                 <div class="stats-panel">
-                    <div class="stat">
-                        <label>Your score:</label>
-                        <div id="scoreValue" class="stat-value">0</div>
+                    <div class="stat-row">
+                        <span class="stat-label">Your score:</span>
+                        <span id="scoreValue" class="stat-value">0</span>
                     </div>
-                    <div class="stat">
-                        <label>Your lines:</label>
-                        <div id="linesValue" class="stat-value">0</div>
+                    <div class="stat-row">
+                        <span class="stat-label">Opponent's score:</span>
+                        <span id="opponentScore" class="stat-value">—</span>
                     </div>
-                    <div class="stat">
-                        <label>Your funds:</label>
-                        <div id="fundsValue" class="stat-value">0</div>
+                    <div class="stat-gap"></div>
+                    <div class="stat-row">
+                        <span class="stat-label">Your lines:</span>
+                        <span id="linesValue" class="stat-value">0</span>
                     </div>
-                    <div class="stat">
-                        <label>Lines 'til bazaar:</label>
-                        <div id="linesToBazaarValue" class="stat-value">20</div>
+                    <div class="stat-row">
+                        <span class="stat-label">Opponent's lines:</span>
+                        <span id="opponentLines" class="stat-value">—</span>
+                    </div>
+                    <div class="stat-gap"></div>
+                    <div class="stat-row">
+                        <span class="stat-label">Your funds:</span>
+                        <span id="fundsValue" class="stat-value">0</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">Lines 'til bazaar:</span>
+                        <span id="linesToBazaarValue" class="stat-value">20</span>
                     </div>
 
                     <button id="newGameBtn" class="new-game-btn">New Game</button>
@@ -54,16 +76,16 @@
                         <p style="margin-top: 10px; font-size: 10px; color: #666;">Open a second tab to battle.</p>
                     </div>
                 </div>
-
-                <div class="opponent-panel">
+                <!-- Opponent panel hidden on desktop (data is in combined stats panel above) -->
+                <div class="opponent-panel" style="display:none;">
                     <h3>Opponent</h3>
                     <div class="opponent-stat">
                         <span>Score:</span>
-                        <span id="opponentScore">—</span>
+                        <span id="opponentScoreHidden">—</span>
                     </div>
                     <div class="opponent-stat">
                         <span>Lines:</span>
-                        <span id="opponentLines">—</span>
+                        <span id="opponentLinesHidden">—</span>
                     </div>
                 </div>
             </div>
@@ -77,14 +99,46 @@
                     </div>
                     <div id="bazaarOverlay" class="bazaar-overlay">
                         <div class="bazaar-panel">
-                            <h2>WEAPONS BAZAAR</h2>
-                            <div class="bazaar-funds">Funds: $<span id="bazaarFunds">0</span></div>
-                            <div id="bazaarList" class="bazaar-list"></div>
-                            <button id="bazaarDoneBtn" class="bazaar-btn">Done</button>
+                            <!-- Banner image replaces the plain h2 title -->
+                            <img src="assets/btbazaar.png" alt="Weapons Bazaar" class="bazaar-banner">
+
+                            <!-- Three-column shop layout -->
+                            <div class="bazaar-body">
+                                <!-- LEFT: scrollable weapon list -->
+                                <div class="bazaar-col bazaar-col-left">
+                                    <div class="bazaar-col-header">Weapons</div>
+                                    <div id="bazaarWeaponList" class="bazaar-weapon-list"></div>
+                                </div>
+
+                                <!-- MIDDLE: funds + add/remove/done -->
+                                <div class="bazaar-col bazaar-col-mid">
+                                    <div id="bazaarFundsDisplay" class="bazaar-funds-display">Funds: $<span id="bazaarFunds">0</span></div>
+                                    <button id="bazaarAddBtn" class="bazaar-action-btn">Add &#9658;</button>
+                                    <button id="bazaarRemoveBtn" class="bazaar-action-btn">&#9668; Remove</button>
+                                    <button id="bazaarDoneBtn" class="bazaar-done-btn">DONE</button>
+                                    <!-- Selected weapon info -->
+                                    <div id="bazaarInfo" class="bazaar-info">
+                                        <div id="bazaarInfoPrice" class="bazaar-info-price"></div>
+                                        <div id="bazaarInfoDuration" class="bazaar-info-duration"></div>
+                                        <div id="bazaarInfoDesc" class="bazaar-info-desc"></div>
+                                    </div>
+                                </div>
+
+                                <!-- RIGHT: current arsenal -->
+                                <div class="bazaar-col bazaar-col-right">
+                                    <div class="bazaar-col-header">Your Arsenal</div>
+                                    <div id="bazaarArsenalList" class="bazaar-arsenal-list"></div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
                 <div id="aiLabel" class="ai-label" style="display: none;">Ernie (computer)</div>
+            </div>
+
+            <!-- Mobile-only arsenal strip shown below board -->
+            <div id="mobileArsenal" class="mobile-arsenal">
+                <div id="mobileArsenalList" class="mobile-arsenal-list"></div>
             </div>
 
             <div class="right-panel">
@@ -100,6 +154,14 @@
                 </div>
             </div>
         </div>
+    </div>
+
+    <!-- Touch control bar: only visible on touch/small screens via CSS -->
+    <div id="touchControls" class="touch-controls" aria-label="Game controls">
+        <button class="touch-btn" id="touchLeft" aria-label="Move left">&#9664;</button>
+        <button class="touch-btn" id="touchRotate" aria-label="Rotate">&#10227;</button>
+        <button class="touch-btn" id="touchRight" aria-label="Move right">&#9654;</button>
+        <button class="touch-btn" id="touchDrop" aria-label="Hard drop">&#10507;</button>
     </div>
 
     <script type="module" src="main.js"></script>

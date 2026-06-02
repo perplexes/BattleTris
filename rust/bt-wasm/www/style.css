@@ -15,14 +15,21 @@ body {
     margin: 0 auto;
 }
 
-h1 {
+/* ─── Title logo ──────────────────────────────────────────────────────────── */
+.title-wrap {
     text-align: center;
-    margin-bottom: 20px;
-    font-size: 36px;
-    color: #333;
-    text-shadow: 1px 1px 2px rgba(255, 255, 255, 0.8);
+    margin-bottom: 16px;
 }
 
+.title-img {
+    max-width: 533px;
+    width: 100%;
+    display: inline-block;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+}
+
+/* ─── Mode buttons ────────────────────────────────────────────────────────── */
 .mode-selector {
     display: flex;
     gap: 10px;
@@ -63,6 +70,7 @@ h1 {
     border-bottom-color: #808080;
 }
 
+/* ─── Game layout ─────────────────────────────────────────────────────────── */
 .game-area {
     display: flex;
     gap: 20px;
@@ -85,6 +93,7 @@ h1 {
     flex-direction: column;
 }
 
+/* ─── Board ───────────────────────────────────────────────────────────────── */
 .board-wrapper {
     position: relative;
     background: #000000;
@@ -98,6 +107,7 @@ h1 {
     image-rendering: pixelated;
     image-rendering: crisp-edges;
     background-color: #000000;
+    touch-action: none;
 }
 
 .game-over-overlay {
@@ -121,43 +131,56 @@ h1 {
     letter-spacing: 4px;
 }
 
+/* ─── Combined Stats panel (left) ─────────────────────────────────────────── */
 .stats-panel {
     background-color: #bfbfbf;
     border: 3px solid #808080;
-    padding: 20px;
-    width: 200px;
+    padding: 14px 16px;
+    width: 220px;
     box-shadow: inset 1px 1px 0 #ffffff, inset -1px -1px 0 #000000, 2px 2px 4px rgba(0, 0, 0, 0.5);
 }
 
-.stat {
-    margin-bottom: 20px;
-    padding-bottom: 15px;
-    border-bottom: 1px solid #808080;
+/* Visual gap row between stat groups */
+.stat-gap {
+    height: 8px;
 }
 
-.stat:last-of-type {
-    border-bottom: none;
+/* Each stat row: label left, value right on same line */
+.stat-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 4px;
+    gap: 6px;
 }
 
-.stat label {
-    display: block;
-    font-size: 12px;
+.stat-label {
+    font-family: 'Courier New', monospace;
     font-weight: bold;
-    color: #333;
-    margin-bottom: 5px;
+    color: #0000cd;
+    font-size: 11px;
+    flex-shrink: 0;
 }
 
 .stat-value {
-    font-size: 24px;
+    font-family: 'Courier New', monospace;
     font-weight: bold;
-    color: #000;
-    font-family: monospace;
+    color: #0000cd;
+    font-size: 13px;
+    text-align: right;
+    white-space: nowrap;
+}
+
+/* Keep the hidden legacy opponent panel out of flow */
+.opponent-panel {
+    display: none;
 }
 
 .new-game-btn {
     width: 100%;
     padding: 10px;
-    margin-bottom: 15px;
+    margin-top: 12px;
+    margin-bottom: 12px;
     background-color: #dfdfdf;
     border: 2px solid #808080;
     border-right-color: #000000;
@@ -185,7 +208,7 @@ h1 {
     background-color: #e8e8e8;
     border: 2px solid #808080;
     padding: 10px;
-    margin-top: 15px;
+    margin-top: 4px;
     font-size: 11px;
 }
 
@@ -209,182 +232,7 @@ h1 {
     color: #000;
 }
 
-.opponent-panel {
-    background-color: #bfbfbf;
-    border: 3px solid #808080;
-    padding: 15px;
-    width: 200px;
-    box-shadow: inset 1px 1px 0 #ffffff, inset -1px -1px 0 #000000, 2px 2px 4px rgba(0, 0, 0, 0.5);
-}
-
-.opponent-panel h3 {
-    margin-bottom: 10px;
-    font-size: 14px;
-    color: #333;
-    border-bottom: 1px solid #808080;
-    padding-bottom: 5px;
-}
-
-.opponent-stat {
-    display: flex;
-    justify-content: space-between;
-    margin-bottom: 8px;
-    font-size: 13px;
-    color: #333;
-}
-
-.opponent-stat span:first-child {
-    font-weight: bold;
-}
-
-.opponent-stat span:last-child {
-    font-family: monospace;
-    color: #000;
-}
-
-.arsenal-panel {
-    background-color: #bfbfbf;
-    border: 3px solid #808080;
-    padding: 15px;
-    width: 200px;
-    box-shadow: inset 1px 1px 0 #ffffff, inset -1px -1px 0 #000000, 2px 2px 4px rgba(0, 0, 0, 0.5);
-}
-
-.arsenal-panel h3 {
-    margin-bottom: 10px;
-    font-size: 14px;
-    color: #333;
-    border-bottom: 1px solid #808080;
-    padding-bottom: 5px;
-}
-
-.arsenal-list {
-    font-size: 11px;
-    line-height: 1.8;
-    color: #333;
-    font-family: monospace;
-}
-
-.arsenal-item {
-    margin-bottom: 4px;
-    padding: 2px 0;
-    border-bottom: 1px solid #d0d0d0;
-}
-
-.arsenal-item:last-child {
-    border-bottom: none;
-}
-
-.bazaar-overlay {
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background-color: rgba(0, 0, 0, 0.85);
-    display: none;
-    align-items: center;
-    justify-content: center;
-    z-index: 20;
-}
-
-.bazaar-panel {
-    background-color: #bfbfbf;
-    border: 5px solid #808080;
-    padding: 20px;
-    max-width: 400px;
-    max-height: 600px;
-    overflow-y: auto;
-    box-shadow: inset 1px 1px 0 #ffffff, inset -1px -1px 0 #000000, 5px 5px 10px rgba(0, 0, 0, 0.7);
-}
-
-.bazaar-panel h2 {
-    text-align: center;
-    margin-bottom: 15px;
-    font-size: 24px;
-    color: #333;
-    letter-spacing: 2px;
-}
-
-.bazaar-funds {
-    text-align: center;
-    margin-bottom: 15px;
-    font-size: 14px;
-    font-weight: bold;
-    color: #333;
-    padding: 8px;
-    background-color: #e8e8e8;
-    border: 1px solid #808080;
-}
-
-.bazaar-list {
-    margin-bottom: 15px;
-    max-height: 400px;
-    overflow-y: auto;
-}
-
-.bazaar-item {
-    background-color: #e8e8e8;
-    border: 2px solid #808080;
-    padding: 8px 10px;
-    margin-bottom: 8px;
-    cursor: pointer;
-    transition: all 0.1s;
-    font-size: 12px;
-    color: #333;
-    line-height: 1.4;
-}
-
-.bazaar-item:hover {
-    background-color: #f5f5f5;
-    border-color: #000000;
-}
-
-.bazaar-item:active {
-    background-color: #d0d0d0;
-}
-
-.bazaar-item-name {
-    font-weight: bold;
-    color: #000;
-}
-
-.bazaar-item-price {
-    color: #008000;
-    font-weight: bold;
-}
-
-.bazaar-item-duration {
-    color: #666;
-    font-size: 11px;
-}
-
-.bazaar-btn {
-    width: 100%;
-    padding: 12px;
-    background-color: #dfdfdf;
-    border: 2px solid #808080;
-    border-right-color: #000000;
-    border-bottom-color: #000000;
-    border-left-color: #ffffff;
-    border-top-color: #ffffff;
-    font-weight: bold;
-    cursor: pointer;
-    font-size: 14px;
-    transition: all 0.1s;
-}
-
-.bazaar-btn:active {
-    border-right-color: #ffffff;
-    border-bottom-color: #ffffff;
-    border-left-color: #000000;
-    border-top-color: #000000;
-}
-
-.bazaar-btn:hover {
-    background-color: #efefef;
-}
-
+/* ─── Online status bar ───────────────────────────────────────────────────── */
 .online-status {
     text-align: center;
     margin-bottom: 12px;
@@ -404,6 +252,69 @@ h1 {
     word-break: break-word;
 }
 
+/* ─── Arsenal panel (right, desktop) ─────────────────────────────────────── */
+.arsenal-panel {
+    background-color: #bfbfbf;
+    border: 3px solid #808080;
+    padding: 15px;
+    width: 200px;
+    box-shadow: inset 1px 1px 0 #ffffff, inset -1px -1px 0 #000000, 2px 2px 4px rgba(0, 0, 0, 0.5);
+}
+
+.arsenal-panel h3 {
+    margin-bottom: 10px;
+    font-size: 14px;
+    color: #333;
+    border-bottom: 1px solid #808080;
+    padding-bottom: 5px;
+}
+
+.arsenal-list {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+/* Arsenal slots: Motif/Win95 raised-bevel buttons */
+.arsenal-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 4px 8px;
+    font-family: 'Courier New', monospace;
+    font-size: 11px;
+    color: #000000;
+    background-color: #cfcfcf;
+    border: 2px outset #cfcfcf;
+    cursor: default;
+    user-select: none;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    border-top-color: #ffffff;
+    border-left-color: #ffffff;
+    border-bottom-color: #808080;
+    border-right-color: #808080;
+}
+
+.arsenal-item.occupied {
+    cursor: pointer;
+    color: #000000;
+}
+
+.arsenal-item.occupied:hover {
+    background-color: #d8d8d8;
+}
+
+.arsenal-item.occupied:active {
+    border-top-color: #808080;
+    border-left-color: #808080;
+    border-bottom-color: #ffffff;
+    border-right-color: #ffffff;
+    background-color: #c0c0c0;
+}
+
+/* ─── AI board panel ──────────────────────────────────────────────────────── */
 .ai-label {
     text-align: center;
     margin-top: 10px;
@@ -442,4 +353,559 @@ h1 {
     image-rendering: pixelated;
     image-rendering: crisp-edges;
     background-color: #000000;
+}
+
+/* ─── Bazaar overlay ──────────────────────────────────────────────────────── */
+.bazaar-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(0, 0, 0, 0.85);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 20;
+}
+
+.bazaar-panel {
+    background-color: #bfbfbf;
+    border: 5px solid #808080;
+    border-top-color: #ffffff;
+    border-left-color: #ffffff;
+    border-bottom-color: #000000;
+    border-right-color: #000000;
+    max-width: 680px;
+    width: 95vw;
+    max-height: 90vh;
+    overflow-y: auto;
+    box-shadow: 5px 5px 10px rgba(0, 0, 0, 0.7);
+    display: flex;
+    flex-direction: column;
+}
+
+/* Bazaar banner image */
+.bazaar-banner {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    height: auto;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    flex-shrink: 0;
+}
+
+/* Three-column body */
+.bazaar-body {
+    display: flex;
+    gap: 0;
+    flex: 1;
+    min-height: 0;
+    padding: 8px;
+    gap: 8px;
+}
+
+.bazaar-col {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.bazaar-col-left {
+    flex: 1 1 0;
+    min-width: 0;
+}
+
+.bazaar-col-mid {
+    flex: 0 0 130px;
+    min-width: 110px;
+    align-items: stretch;
+    justify-content: flex-start;
+    gap: 6px;
+}
+
+.bazaar-col-right {
+    flex: 0 0 130px;
+    min-width: 110px;
+}
+
+.bazaar-col-header {
+    font-family: 'Courier New', monospace;
+    font-weight: bold;
+    font-size: 11px;
+    color: #000;
+    background-color: #bfbfbf;
+    padding: 3px 6px;
+    border-bottom: 1px solid #808080;
+    flex-shrink: 0;
+}
+
+/* Left: weapon selection list */
+.bazaar-weapon-list {
+    flex: 1;
+    overflow-y: auto;
+    background-color: #e8e8e8;
+    border: 2px inset #808080;
+    border-top-color: #808080;
+    border-left-color: #808080;
+    border-bottom-color: #ffffff;
+    border-right-color: #ffffff;
+}
+
+.bazaar-weapon-row {
+    padding: 7px 8px;
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    color: #000;
+    cursor: pointer;
+    border-bottom: 1px solid #d0d0d0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-height: 30px;
+    display: flex;
+    align-items: center;
+}
+
+.bazaar-weapon-row:hover {
+    background-color: #d0d0ff;
+}
+
+.bazaar-weapon-row.selected {
+    background-color: #cc0000;
+    color: #ffffff;
+}
+
+/* Middle column elements */
+.bazaar-funds-display {
+    font-family: 'Courier New', monospace;
+    font-weight: bold;
+    color: #0000cd;
+    font-size: 14px;
+    padding: 8px 6px;
+    background-color: #e8e8e8;
+    border: 2px inset #808080;
+    border-top-color: #808080;
+    border-left-color: #808080;
+    border-bottom-color: #ffffff;
+    border-right-color: #ffffff;
+    margin-bottom: 4px;
+    text-align: center;
+}
+
+.bazaar-action-btn {
+    padding: 8px 6px;
+    background-color: #dfdfdf;
+    border: 2px solid #808080;
+    border-top-color: #ffffff;
+    border-left-color: #ffffff;
+    border-bottom-color: #000000;
+    border-right-color: #000000;
+    font-weight: bold;
+    font-size: 12px;
+    cursor: pointer;
+    text-align: center;
+    width: 100%;
+    margin-bottom: 4px;
+    min-height: 36px;
+}
+
+.bazaar-action-btn:active {
+    border-top-color: #000000;
+    border-left-color: #000000;
+    border-bottom-color: #ffffff;
+    border-right-color: #ffffff;
+    background-color: #c8c8c8;
+}
+
+.bazaar-action-btn:hover {
+    background-color: #efefef;
+}
+
+.bazaar-done-btn {
+    padding: 10px 6px;
+    background-color: #0000aa;
+    color: #ffffff;
+    border: 2px solid #808080;
+    border-top-color: #4444ff;
+    border-left-color: #4444ff;
+    border-bottom-color: #000066;
+    border-right-color: #000066;
+    font-weight: bold;
+    font-size: 14px;
+    cursor: pointer;
+    text-align: center;
+    width: 100%;
+    margin-top: 6px;
+    letter-spacing: 1px;
+    min-height: 40px;
+}
+
+.bazaar-done-btn:active {
+    border-top-color: #000066;
+    border-left-color: #000066;
+    border-bottom-color: #4444ff;
+    border-right-color: #4444ff;
+    background-color: #000088;
+}
+
+.bazaar-done-btn:hover {
+    background-color: #0000cc;
+}
+
+/* Selected weapon info at bottom of middle col */
+.bazaar-info {
+    margin-top: 6px;
+    padding: 6px;
+    background-color: #e8e8e8;
+    border: 1px inset #808080;
+    font-family: 'Courier New', monospace;
+    font-size: 10px;
+    flex: 1;
+    overflow-y: auto;
+    min-height: 60px;
+}
+
+.bazaar-info-price {
+    font-weight: bold;
+    color: #008000;
+    margin-bottom: 3px;
+}
+
+.bazaar-info-duration {
+    color: #555;
+    margin-bottom: 3px;
+}
+
+.bazaar-info-desc {
+    color: #0000cd;
+    line-height: 1.3;
+    font-size: 10px;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+/* Right: arsenal in bazaar */
+.bazaar-arsenal-list {
+    flex: 1;
+    overflow-y: auto;
+    font-family: 'Courier New', monospace;
+    font-size: 11px;
+    background-color: #e8e8e8;
+    border: 2px inset #808080;
+    border-top-color: #808080;
+    border-left-color: #808080;
+    border-bottom-color: #ffffff;
+    border-right-color: #ffffff;
+}
+
+.bazaar-arsenal-slot {
+    padding: 5px 8px;
+    border-bottom: 1px solid #d0d0d0;
+    color: #333;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-height: 26px;
+    display: flex;
+    align-items: center;
+}
+
+.bazaar-arsenal-slot.occupied {
+    color: #000;
+    font-weight: bold;
+}
+
+/* Legacy bazaar list / item selectors kept for compatibility (hidden) */
+.bazaar-list { display: none; }
+.bazaar-btn { display: none; }
+
+/* ─── Mobile stats bar (hidden on desktop) ───────────────────────────────── */
+.mobile-stats {
+    display: none;
+}
+
+/* ─── Mobile arsenal strip (hidden on desktop) ───────────────────────────── */
+.mobile-arsenal {
+    display: none;
+}
+
+/* ─── Touch controls bar (hidden on desktop) ─────────────────────────────── */
+.touch-controls {
+    display: none;
+}
+
+/* ─── Mobile/touch layout ────────────────────────────────────────────────── */
+@media (max-width: 768px), (pointer: coarse) {
+    body {
+        padding: 8px 4px;
+        /* Leave room at bottom for fixed touch controls bar */
+        padding-bottom: 80px;
+    }
+
+    /* Title image: smaller on mobile */
+    .title-img {
+        max-width: 70vw;
+    }
+
+    .mode-selector {
+        gap: 6px;
+        margin-bottom: 10px;
+    }
+
+    .mode-btn {
+        padding: 8px 12px;
+        font-size: 12px;
+    }
+
+    /* Mobile stats bar: compact horizontal row above/below board */
+    .mobile-stats {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 14px;
+        justify-content: center;
+        padding: 6px 8px;
+        background-color: #bfbfbf;
+        border: 2px solid #808080;
+        border-right-color: #000;
+        border-bottom-color: #000;
+        border-left-color: #fff;
+        border-top-color: #fff;
+        font-size: 12px;
+        margin-bottom: 6px;
+    }
+
+    .mobile-stats strong {
+        color: #333;
+    }
+
+    .mobile-opponent {
+        font-style: italic;
+        color: #555;
+    }
+
+    /* Stack the game area vertically */
+    .game-area {
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+    }
+
+    /* Hide the desktop left panel (stats + controls) */
+    .left-panel {
+        display: none;
+    }
+
+    /* Hide the desktop right panel (arsenal, ai board) */
+    .right-panel {
+        display: none;
+    }
+
+    /* Center panel: full width, centered */
+    .center-panel {
+        width: 100%;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+    }
+
+    /* Board: scale to viewport height, preserve aspect ratio */
+    #gameCanvas {
+        width: auto !important;
+        height: 56vh !important;
+        max-width: 96vw;
+        image-rendering: pixelated;
+        image-rendering: crisp-edges;
+    }
+
+    /* Mobile arsenal strip below board */
+    .mobile-arsenal {
+        display: block;
+        width: 100%;
+        max-width: 96vw;
+        margin-top: 4px;
+    }
+
+    .mobile-arsenal-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        justify-content: center;
+        padding: 4px;
+        background-color: #bfbfbf;
+        border: 2px solid #808080;
+        border-right-color: #000;
+        border-bottom-color: #000;
+        border-left-color: #fff;
+        border-top-color: #fff;
+        overflow-x: auto;
+    }
+
+    .mobile-arsenal-slot {
+        min-width: 60px;
+        padding: 6px 8px;
+        background-color: #e0e0e0;
+        border: 2px solid #808080;
+        border-right-color: #000;
+        border-bottom-color: #000;
+        border-left-color: #fff;
+        border-top-color: #fff;
+        font-size: 11px;
+        font-family: monospace;
+        text-align: center;
+        line-height: 1.3;
+        color: #333;
+        flex-shrink: 0;
+    }
+
+    .mobile-arsenal-slot.occupied {
+        cursor: pointer;
+        background-color: #d8eed8;
+        border-color: #4a8;
+        border-right-color: #040;
+        border-bottom-color: #040;
+        border-left-color: #8fa;
+        border-top-color: #8fa;
+        color: #040;
+        font-weight: bold;
+    }
+
+    .mobile-arsenal-slot.occupied:active {
+        background-color: #b0d8b0;
+        box-shadow: inset 1px 1px 0 #040;
+    }
+
+    /* Touch control bar: fixed at bottom of screen */
+    .touch-controls {
+        display: flex;
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        z-index: 100;
+        background-color: #bfbfbf;
+        border-top: 3px solid #808080;
+        box-shadow: 0 -2px 6px rgba(0, 0, 0, 0.4);
+        padding: 6px 8px;
+        gap: 8px;
+        justify-content: space-around;
+        align-items: center;
+        height: 68px;
+        box-sizing: border-box;
+    }
+
+    .touch-btn {
+        flex: 1;
+        min-height: 56px;
+        max-width: 100px;
+        background-color: #dfdfdf;
+        border: 2px solid #808080;
+        border-right-color: #000;
+        border-bottom-color: #000;
+        border-left-color: #fff;
+        border-top-color: #fff;
+        font-size: 22px;
+        font-weight: bold;
+        cursor: pointer;
+        user-select: none;
+        -webkit-user-select: none;
+        touch-action: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 2px;
+    }
+
+    .touch-btn:active {
+        background-color: #c8c8c8;
+        border-right-color: #fff;
+        border-bottom-color: #fff;
+        border-left-color: #000;
+        border-top-color: #000;
+    }
+
+    /* Bazaar overlay: fit small screen */
+    .bazaar-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+    }
+
+    .bazaar-panel {
+        max-width: 98vw;
+        max-height: 88vh;
+        overflow-y: auto;
+        padding: 0;
+    }
+
+    /* On mobile, stack bazaar columns vertically */
+    .bazaar-body {
+        flex-direction: column;
+        padding: 6px;
+        gap: 6px;
+    }
+
+    .bazaar-col-mid {
+        flex: none;
+        min-width: 0;
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 4px;
+    }
+
+    .bazaar-col-right {
+        flex: none;
+        min-width: 0;
+    }
+
+    .bazaar-col-left {
+        flex: none;
+        min-height: 120px;
+    }
+
+    .bazaar-weapon-list {
+        max-height: 120px;
+    }
+
+    .bazaar-weapon-row {
+        padding: 10px 8px;
+        font-size: 13px;
+        min-height: 44px;
+    }
+
+    .bazaar-action-btn {
+        min-height: 44px;
+        font-size: 13px;
+        flex: 1 1 80px;
+        margin-bottom: 0;
+    }
+
+    .bazaar-done-btn {
+        min-height: 48px;
+        font-size: 16px;
+        flex: 1 1 100%;
+        margin-top: 2px;
+    }
+
+    .bazaar-funds-display {
+        flex: 1 1 100%;
+    }
+
+    .bazaar-info {
+        flex: 1 1 100%;
+        min-height: 40px;
+    }
+
+    .bazaar-arsenal-list {
+        max-height: 80px;
+    }
+
+    /* Hide desktop keyboard controls box */
+    .controls-box {
+        display: none;
+    }
 }

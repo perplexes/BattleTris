@@ -30,12 +30,20 @@ const gameOverOverlay = document.getElementById('gameOverOverlay');
 const gameOverText = document.getElementById('gameOverText');
 const newGameBtn = document.getElementById('newGameBtn');
 const bazaarOverlay = document.getElementById('bazaarOverlay');
-const bazaarList = document.getElementById('bazaarList');
 const bazaarFunds = document.getElementById('bazaarFunds');
 const bazaarDoneBtn = document.getElementById('bazaarDoneBtn');
+const bazaarAddBtn = document.getElementById('bazaarAddBtn');
+const bazaarRemoveBtn = document.getElementById('bazaarRemoveBtn');
+const bazaarWeaponList = document.getElementById('bazaarWeaponList');
+const bazaarArsenalList = document.getElementById('bazaarArsenalList');
+const bazaarInfoPrice = document.getElementById('bazaarInfoPrice');
+const bazaarInfoDuration = document.getElementById('bazaarInfoDuration');
+const bazaarInfoDesc = document.getElementById('bazaarInfoDesc');
 const arsenalList = document.getElementById('arsenalList');
 const opponentScore = document.getElementById('opponentScore');
 const opponentLines = document.getElementById('opponentLines');
+// Legacy element reference kept for backward compat (element hidden in HTML)
+const bazaarList = document.getElementById('bazaarList');
 const modePracticeBtn = document.getElementById('modePractice');
 const modeVsComputerBtn = document.getElementById('modeVsComputer');
 const modeVsPlayerBtn = document.getElementById('modeVsPlayer');
@@ -43,6 +51,18 @@ const modeOnlineBtn = document.getElementById('modeOnline');
 const aiBoard = document.getElementById('aiBoard');
 const aiLabel = document.getElementById('aiLabel');
 const onlineStatus = document.getElementById('onlineStatus');
+
+// Mobile UI elements
+const mobileScore = document.getElementById('mobileScore');
+const mobileLines = document.getElementById('mobileLines');
+const mobileFunds = document.getElementById('mobileFunds');
+const mobileLinesToBazaar = document.getElementById('mobileLinesToBazaar');
+const mobileOpponent = document.getElementById('mobileOpponent');
+const mobileArsenalList = document.getElementById('mobileArsenalList');
+
+// Preload gimp image for cell id 23
+const gimpImg = new Image();
+gimpImg.src = 'assets/btgimp.png';
 
 // Palette: cell id -> { bright, dark }. Exact RGB from the original X11
 // resource defaults (BattleTris.C): bright = base color, dark = its
@@ -131,9 +151,6 @@ function startOnlineGame() {
     onlinePaused = false;
     const oppLabel = onlineOpponentName || 'Opponent';
     setOnlineStatus(`Connected — fight!  (vs ${oppLabel})`);
-    // Update the opponent panel heading
-    const opponentLabel = document.querySelector('.opponent-panel h3');
-    if (opponentLabel) opponentLabel.textContent = oppLabel;
 }
 
 async function beginOnlineMode() {
@@ -396,12 +413,16 @@ function drawCellOnContext(context, x, y, cellId) {
         return;
     }
 
-    // GIMP (23)
+    // GIMP (23): draw image if loaded, else magenta bevel placeholder
     if (cellId === 23) {
-        context.fillStyle = '#800080';
-        context.fillRect(px, py, CELL_SIZE, CELL_SIZE);
-        context.fillStyle = '#ff00ff';
-        context.fillRect(px, py, CELL_SIZE - BEVEL_BORDER, CELL_SIZE - BEVEL_BORDER);
+        if (gimpImg.complete && gimpImg.naturalWidth > 0) {
+            context.drawImage(gimpImg, px, py, CELL_SIZE, CELL_SIZE);
+        } else {
+            context.fillStyle = '#800080';
+            context.fillRect(px, py, CELL_SIZE, CELL_SIZE);
+            context.fillStyle = '#ff00ff';
+            context.fillRect(px, py, CELL_SIZE - BEVEL_BORDER, CELL_SIZE - BEVEL_BORDER);
+        }
         return;
     }
 
@@ -508,10 +529,21 @@ function render() {
 }
 
 function updateStats() {
-    scoreValue.textContent = game.score();
-    linesValue.textContent = game.lines();
-    fundsValue.textContent = game.funds();
-    linesToBazaarValue.textContent = game.lines_til_bazaar();
+    const score = game.score();
+    const lines = game.lines();
+    const funds = game.funds();
+    const tilBazaar = game.lines_til_bazaar();
+
+    scoreValue.textContent = score;
+    linesValue.textContent = lines;
+    fundsValue.textContent = funds;
+    linesToBazaarValue.textContent = tilBazaar;
+
+    // Mirror to mobile stats bar
+    mobileScore.textContent = score;
+    mobileLines.textContent = lines;
+    mobileFunds.textContent = funds;
+    mobileLinesToBazaar.textContent = tilBazaar;
 }
 
 function updateOpponentPanel() {
@@ -520,23 +552,32 @@ function updateOpponentPanel() {
     opponentScore.textContent = opScore >= 0 ? opScore : '—';
     opponentLines.textContent = opLines >= 0 ? opLines : '—';
 
-    // Update opponent label based on mode
-    const opponentLabel = document.querySelector('.opponent-panel h3');
+    // Derive opponent name for mobile stats bar
+    let oppName = 'Opponent';
     if (mode === 'vscomputer') {
-        opponentLabel.textContent = 'Ernie (computer)';
+        oppName = 'Ernie (computer)';
     } else if (mode === 'online' && onlineOpponentName) {
-        opponentLabel.textContent = onlineOpponentName;
-    } else if (mode !== 'online') {
-        opponentLabel.textContent = 'Opponent';
+        oppName = onlineOpponentName;
     }
-    // In online mode before match: keep whatever text is already there
+
+    // Mirror to mobile stats bar
+    if (opScore >= 0) {
+        mobileOpponent.textContent = `${oppName}: ${opScore}pts ${opLines}ln`;
+    } else {
+        mobileOpponent.textContent = '';
+    }
 }
 
 function updateArsenalPanel() {
     arsenalList.innerHTML = '';
+    mobileArsenalList.innerHTML = '';
+
     for (let i = 0; i < 10; i++) {
         const token = game.arsenal_token(i);
         const key = ARSENAL_KEYS[i];
+        const slot = i; // capture for closure
+
+        // ── Desktop arsenal item ──────────────────────────────────────────
         const div = document.createElement('div');
         div.className = 'arsenal-item';
 
@@ -544,54 +585,132 @@ function updateArsenalPanel() {
             const name = weapon_name(token);
             const qty = game.arsenal_quantity(i);
             div.textContent = `${key}. ${name} (x${qty})`;
+            div.classList.add('occupied');
+            div.addEventListener('click', () => {
+                if (!game) return;
+                game.launch_weapon(slot);
+            });
         } else {
             div.textContent = `${key}. < Empty >`;
         }
         arsenalList.appendChild(div);
+
+        // ── Mobile arsenal slot ───────────────────────────────────────────
+        const mslot = document.createElement('div');
+        mslot.className = 'mobile-arsenal-slot';
+
+        if (token >= 0) {
+            const name = weapon_name(token);
+            const qty = game.arsenal_quantity(i);
+            mslot.textContent = `${key}\n${name}\nx${qty}`;
+            mslot.style.whiteSpace = 'pre';
+            mslot.classList.add('occupied');
+            mslot.addEventListener('click', () => {
+                if (!game) return;
+                game.launch_weapon(slot);
+            });
+        } else {
+            mslot.textContent = `${key}\n—`;
+            mslot.style.whiteSpace = 'pre';
+        }
+        mobileArsenalList.appendChild(mslot);
+    }
+}
+
+// Currently selected token in bazaar (-1 means nothing selected)
+let bazaarSelectedToken = -1;
+
+function refreshBazaarArsenal() {
+    bazaarArsenalList.innerHTML = '';
+    for (let i = 0; i < 10; i++) {
+        const token = game.arsenal_token(i);
+        const key = ARSENAL_KEYS[i];
+        const slot = document.createElement('div');
+        slot.className = 'bazaar-arsenal-slot';
+        if (token >= 0) {
+            const qty = game.arsenal_quantity(i);
+            const nm = weapon_name(token);
+            slot.textContent = `${key}. ${nm} x${qty}`;
+            slot.classList.add('occupied');
+        } else {
+            slot.textContent = `${key}. < Empty >`;
+        }
+        bazaarArsenalList.appendChild(slot);
+    }
+}
+
+function selectBazaarToken(token) {
+    bazaarSelectedToken = token;
+
+    // Highlight the selected row
+    const rows = bazaarWeaponList.querySelectorAll('.bazaar-weapon-row');
+    rows.forEach((r) => {
+        if (parseInt(r.dataset.token, 10) === token) {
+            r.classList.add('selected');
+        } else {
+            r.classList.remove('selected');
+        }
+    });
+
+    // Show weapon info
+    if (token >= 0) {
+        const price = game.bazaar_price(token);
+        const duration = weapon_duration(token);
+        const desc = weapon_description(token);
+        bazaarInfoPrice.textContent = `Price: $${price}`;
+        bazaarInfoDuration.textContent = `Duration: ${duration} lines`;
+        bazaarInfoDesc.textContent = desc;
+    } else {
+        bazaarInfoPrice.textContent = '';
+        bazaarInfoDuration.textContent = '';
+        bazaarInfoDesc.textContent = '';
     }
 }
 
 function populateBazaar() {
-    bazaarList.innerHTML = '';
-    const maxWeapons = max_weapons();
+    bazaarWeaponList.innerHTML = '';
+    bazaarSelectedToken = -1;
+    bazaarInfoPrice.textContent = '';
+    bazaarInfoDuration.textContent = '';
+    bazaarInfoDesc.textContent = '';
 
+    const maxWeapons = max_weapons();
     for (let t = 0; t < maxWeapons; t++) {
         const name = weapon_name(t);
-        const desc = weapon_description(t);
-        // Effective price reflects Carter Years doubling (matches the charge).
-        const price = game.bazaar_price(t);
-        const duration = weapon_duration(t);
-
         const row = document.createElement('div');
-        row.className = 'bazaar-item';
-        row.title = desc;
-
-        const html = `
-            <div class="bazaar-item-name">${name}</div>
-            <div>$${price} <span class="bazaar-item-duration">(${duration} lines)</span></div>
-        `;
-        row.innerHTML = html;
-
+        row.className = 'bazaar-weapon-row';
+        row.dataset.token = t;
+        row.textContent = name;
         row.addEventListener('click', () => {
-            if (game.buy_weapon(t)) {
-                updateStats();
-                updateArsenalPanel();
-                bazaarFunds.textContent = game.funds();
-            }
+            selectBazaarToken(t);
         });
-
-        bazaarList.appendChild(row);
+        bazaarWeaponList.appendChild(row);
     }
 
     bazaarFunds.textContent = game.funds();
+    refreshBazaarArsenal();
 }
+
+// Track whether bazaar was open last frame to avoid re-populating every tick
+let bazaarWasOpen = false;
 
 function updateBazaarOverlay() {
     if (game.is_in_bazaar()) {
         bazaarOverlay.style.display = 'flex';
-        populateBazaar();
+        if (!bazaarWasOpen) {
+            // Only fully repopulate when bazaar first opens
+            populateBazaar();
+            bazaarWasOpen = true;
+        } else {
+            // Keep funds and arsenal display fresh while open
+            bazaarFunds.textContent = game.funds();
+            refreshBazaarArsenal();
+        }
     } else {
-        bazaarOverlay.style.display = 'none';
+        if (bazaarWasOpen) {
+            bazaarOverlay.style.display = 'none';
+            bazaarWasOpen = false;
+        }
     }
 }
 
@@ -710,6 +829,176 @@ function handleBroadcastMessage(ev) {
     }
 }
 
+// ─── Touch gesture handling on game canvas ────────────────────────────────────
+
+let touchState = null; // Tracks the active game touch gesture
+
+canvas.addEventListener('touchstart', (e) => {
+    // Only track the first touch
+    if (e.changedTouches.length === 0) return;
+    e.preventDefault();
+
+    if (!game || gameEnded || game.is_game_over()) return;
+    if (mode === 'online' && onlinePaused) return;
+
+    const touch = e.changedTouches[0];
+    const cell = canvas.clientWidth / game.width();
+
+    touchState = {
+        id: touch.identifier,
+        startX: touch.clientX,
+        startY: touch.clientY,
+        lastX: touch.clientX,
+        startTime: performance.now(),
+        accDx: 0,   // accumulated horizontal delta (in pixels, reset per-cell)
+        totalDx: 0, // total horizontal travel
+        totalDy: 0, // total vertical travel
+        cell: cell,
+        dropped: false,
+    };
+}, { passive: false });
+
+canvas.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    if (!touchState || !game) return;
+
+    // Find our tracked touch
+    let touch = null;
+    for (let i = 0; i < e.changedTouches.length; i++) {
+        if (e.changedTouches[i].identifier === touchState.id) {
+            touch = e.changedTouches[i];
+            break;
+        }
+    }
+    if (!touch) return;
+
+    const dx = touch.clientX - touchState.lastX;
+    const dy = touch.clientY - touchState.startY;
+
+    touchState.totalDx = touch.clientX - touchState.startX;
+    touchState.totalDy = dy;
+    touchState.accDx += dx;
+    touchState.lastX = touch.clientX;
+
+    // Horizontal drag: move piece one cell at a time
+    const cell = touchState.cell;
+    while (touchState.accDx >= cell) {
+        game.move_right();
+        touchState.accDx -= cell;
+    }
+    while (touchState.accDx <= -cell) {
+        game.move_left();
+        touchState.accDx += cell;
+    }
+
+    // Downward flick detection during move (early trigger)
+    if (!touchState.dropped &&
+        touchState.totalDy > 45 &&
+        Math.abs(touchState.totalDy) > Math.abs(touchState.totalDx)) {
+        touchState.dropped = true;
+        game.begin_drop();
+    }
+}, { passive: false });
+
+canvas.addEventListener('touchend', (e) => {
+    e.preventDefault();
+    if (!touchState || !game) return;
+
+    // Find our tracked touch
+    let touch = null;
+    for (let i = 0; i < e.changedTouches.length; i++) {
+        if (e.changedTouches[i].identifier === touchState.id) {
+            touch = e.changedTouches[i];
+            break;
+        }
+    }
+    if (!touch) {
+        // Touch ended but not tracked; clear state
+        touchState = null;
+        return;
+    }
+
+    const duration = performance.now() - touchState.startTime;
+    const absDx = Math.abs(touchState.totalDx);
+    const absDy = Math.abs(touchState.totalDy);
+
+    // Downward flick (if not already triggered during move)
+    if (!touchState.dropped &&
+        touchState.totalDy > 45 &&
+        absDy > absDx) {
+        game.begin_drop();
+        touchState = null;
+        return;
+    }
+
+    // Tap → rotate (small movement, short time, no drop)
+    if (!touchState.dropped && absDx < 12 && absDy < 12 && duration < 250) {
+        game.rotate();
+    }
+
+    touchState = null;
+}, { passive: false });
+
+canvas.addEventListener('touchcancel', (e) => {
+    touchState = null;
+}, { passive: false });
+
+// ─── On-screen touch control bar ─────────────────────────────────────────────
+
+function setupTouchButton(btnId, action, repeatInterval) {
+    const btn = document.getElementById(btnId);
+    if (!btn) return;
+
+    let repeatTimer = null;
+
+    function fireAction() {
+        if (!game || gameEnded || game.is_game_over()) return;
+        if (mode === 'online' && onlinePaused) return;
+        action();
+    }
+
+    function startRepeat() {
+        fireAction();
+        if (repeatInterval != null) {
+            repeatTimer = setInterval(fireAction, repeatInterval);
+        }
+    }
+
+    function stopRepeat() {
+        if (repeatTimer !== null) {
+            clearInterval(repeatTimer);
+            repeatTimer = null;
+        }
+    }
+
+    btn.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        btn.setPointerCapture(e.pointerId);
+        startRepeat();
+    });
+
+    btn.addEventListener('pointerup', (e) => {
+        e.preventDefault();
+        stopRepeat();
+    });
+
+    btn.addEventListener('pointercancel', (e) => {
+        stopRepeat();
+    });
+
+    btn.addEventListener('pointerleave', (e) => {
+        stopRepeat();
+    });
+}
+
+// Set up buttons after DOM is ready (called after initGame)
+function setupTouchControls() {
+    setupTouchButton('touchLeft',   () => game.move_left(),   90);
+    setupTouchButton('touchRight',  () => game.move_right(),  90);
+    setupTouchButton('touchRotate', () => game.rotate(),      null);
+    setupTouchButton('touchDrop',   () => game.begin_drop(),  null);
+}
+
 // Input handling
 function handleKeyDown(e) {
     if (!game) return;
@@ -756,9 +1045,33 @@ function handleKeyDown(e) {
 // Event listeners
 document.addEventListener('keydown', handleKeyDown);
 newGameBtn.addEventListener('click', newGame);
+
 bazaarDoneBtn.addEventListener('click', () => {
     game.leave_bazaar();
     bazaarOverlay.style.display = 'none';
+});
+
+bazaarAddBtn.addEventListener('click', () => {
+    if (bazaarSelectedToken < 0 || !game) return;
+    if (game.buy_weapon(bazaarSelectedToken)) {
+        bazaarFunds.textContent = game.funds();
+        updateStats();
+        updateArsenalPanel();
+        refreshBazaarArsenal();
+        // Re-select to refresh price (may have changed due to Carter doubling)
+        selectBazaarToken(bazaarSelectedToken);
+    }
+});
+
+bazaarRemoveBtn.addEventListener('click', () => {
+    if (bazaarSelectedToken < 0 || !game) return;
+    if (game.sell_weapon(bazaarSelectedToken)) {
+        bazaarFunds.textContent = game.funds();
+        updateStats();
+        updateArsenalPanel();
+        refreshBazaarArsenal();
+        selectBazaarToken(bazaarSelectedToken);
+    }
 });
 
 // Mode selector buttons
@@ -774,6 +1087,9 @@ modeOnlineBtn.addEventListener('click', () => startGame('online'));
     // Set up broadcast channel for two-player communication
     broadcastChannel = new BroadcastChannel('battletris');
     broadcastChannel.onmessage = handleBroadcastMessage;
+
+    // Wire up on-screen touch control buttons
+    setupTouchControls();
 
     requestAnimationFrame(gameLoop);
 })();
