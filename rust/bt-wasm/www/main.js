@@ -555,7 +555,8 @@ function populateBazaar() {
     for (let t = 0; t < maxWeapons; t++) {
         const name = weapon_name(t);
         const desc = weapon_description(t);
-        const price = weapon_price(t);
+        // Effective price reflects Carter Years doubling (matches the charge).
+        const price = game.bazaar_price(t);
         const duration = weapon_duration(t);
 
         const row = document.createElement('div');

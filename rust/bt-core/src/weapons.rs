@@ -117,6 +117,12 @@ impl ActiveFlags {
         self.counts[token.index()] -= 1;
     }
 
+    /// Set a weapon's active flag as a boolean (`BTActive[token] = on`), matching
+    /// the original (which sets 1 on WPN_ON and 0 on WPN_OFF, not a counter).
+    pub fn set(&mut self, token: WeaponToken, on: bool) {
+        self.counts[token.index()] = if on { 1 } else { 0 };
+    }
+
     pub fn clear(&mut self) {
         self.counts = [0; BT_MAX_WEAPONS];
     }
@@ -208,5 +214,18 @@ mod tests {
         assert!(a.is_active(WeaponToken::Force));
         a.deactivate(WeaponToken::Force);
         assert!(!a.is_active(WeaponToken::Force));
+    }
+
+    #[test]
+    fn set_is_boolean_not_a_counter() {
+        // BTActive[token] is 0/1, not a count: launching the same weapon twice
+        // and expiring it once must leave it inactive (regression guard for the
+        // "duration weapon stuck active forever" bug).
+        let mut a = ActiveFlags::new();
+        a.set(WeaponToken::Speedy, true);
+        a.set(WeaponToken::Speedy, true);
+        assert_eq!(a.count(WeaponToken::Speedy), 1);
+        a.set(WeaponToken::Speedy, false);
+        assert!(!a.is_active(WeaponToken::Speedy));
     }
 }

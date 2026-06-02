@@ -60,6 +60,9 @@ pub enum GameEvent {
     /// Combined lines crossed a multiple of 20 — open the weapons bazaar
     /// (`BT_START_BAZ`).
     EnterBazaar,
+    /// An "idiot" signal after a lock (`BT_IDIOT`): bad move / near death /
+    /// missed smiley (see `BT_BAD_MOVE` / `BT_NEAR_DEATH` / `BT_MISSED_SMILEY`).
+    Idiot(i16),
     /// The player topped out (`BT_GAME_OVER`).
     GameOver,
 }
@@ -277,8 +280,9 @@ impl Game {
     /// `BTGame::startSlide` — switch to the slide timer (the lock delay).
     fn start_slide(&mut self) {
         self.sliding = 1;
-        // BT_SLIDE_TIME * (1 - BTActive[NO_SLIDE]); no weapons yet -> full delay.
-        self.slide_time = BT_SLIDE_TIME;
+        // BTGame::startSlide: BT_SLIDE_TIME * (1 - BTActive[NO_SLIDE]) — i.e. 0
+        // (instant lock) while No Slide is active.
+        self.slide_time = BT_SLIDE_TIME * (1 - self.weapons.is_active(WeaponToken::NoSlide) as i32);
         self.phase = Phase::Sliding;
         self.slide_accum = 0;
     }
@@ -302,18 +306,29 @@ impl Game {
                 self.events.push(GameEvent::Airslide);
             }
 
-            // Lock the piece into the board (fills cells + idiot detection).
+            // Lock the piece into the board (fills cells + idiot bad-move flag).
             p.land(&mut self.board);
-            self.board.flush_idiot();
 
             let clear = self.board.check_lines();
             self.score.lines += clear.lines as i64;
-            self.score.funds += clear.funds as i64;
+            // BT_FUNDS: Mondale taxes the victim to (1 - 0.30) of funds earned.
+            let gained = if self.weapons.is_active(WeaponToken::Mondale) {
+                (clear.funds as f64 * (1.0 - BT_MONDALE_RATE)) as i64
+            } else {
+                clear.funds as i64
+            };
+            self.score.funds += gained;
             self.events.push(GameEvent::Locked {
                 lines: clear.lines,
                 value: clear.value,
                 funds: clear.funds,
             });
+
+            // flushIdiot AFTER checkLines (a cleared line un-flags "idiot";
+            // near-death / missed-smiley are set by checkLines itself).
+            if let Some(reason) = self.board.flush_idiot() {
+                self.events.push(GameEvent::Idiot(reason));
+            }
 
             // BT_LINE: count down active-weapon durations; BT_FUNDS/SCORE +
             // bazaar trigger; then publish our score for the opponent.
@@ -482,10 +497,22 @@ impl Game {
         self.in_bazaar = false;
     }
 
+    /// Effective bazaar price for `token` — doubled while Carter is active
+    /// (the original displays and charges the doubled price).
+    pub fn bazaar_price(&self, token: WeaponToken) -> i32 {
+        let p = weapon_table()[token.index()].price as i32;
+        if self.weapons.is_active(WeaponToken::Carter) {
+            p * 2
+        } else {
+            p
+        }
+    }
+
     /// `BTGame::receive(BT_WPN_ON)` + the per-subsystem effects — activate a
     /// weapon on THIS (victim) player.
     fn apply_weapon_on(&mut self, token: WeaponToken) {
-        self.weapons.activate(token);
+        // BTActive[token] = 1 (boolean), remaining_ += duration (accumulates).
+        self.weapons.set(token, true);
         self.remaining[token.index()] += weapon_table()[token.index()].duration as i32;
 
         self.board.set_active(token, true);
@@ -520,7 +547,7 @@ impl Game {
 
     /// `BT_WPN_OFF` — a weapon's duration expired; revert its effect.
     fn apply_weapon_off(&mut self, token: WeaponToken) {
-        self.weapons.deactivate(token);
+        self.weapons.set(token, false);
         self.board.revert_weapon(token);
         self.board.set_active(token, false);
         self.pieces.weapon_off(token);
@@ -586,7 +613,12 @@ impl Game {
                 self.rotate_internal();
             }
         }
-        if self.weapons.is_active(WeaponToken::Slick) {
+        // Slick is suspended during hard-drop and the slide lock (BTGame removes
+        // the slick timeout in beginDrop/startSlide, re-arming after spawn).
+        if self.weapons.is_active(WeaponToken::Slick)
+            && self.phase == Phase::Falling
+            && !self.dropping
+        {
             self.slick_accum += dt;
             while self.slick_accum >= 20 {
                 self.slick_accum -= 20;

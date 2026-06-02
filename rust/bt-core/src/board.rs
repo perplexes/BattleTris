@@ -431,13 +431,10 @@ impl Board {
     // these apply the one-shot board mutation.
     // -----------------------------------------------------------------------
 
-    /// Set/clear an active-weapon flag the board logic consults.
+    /// Set/clear an active-weapon flag the board logic consults (`BTActive[]` is
+    /// boolean in the original, not a counter).
     pub fn set_active(&mut self, token: WeaponToken, on: bool) {
-        if on {
-            self.active.activate(token);
-        } else {
-            self.active.deactivate(token);
-        }
+        self.active.set(token, on);
     }
 
     fn swap(&mut self, x1: i32, y1: i32, x2: i32, y2: i32) {

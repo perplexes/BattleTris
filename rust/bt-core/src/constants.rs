@@ -147,3 +147,6 @@ pub const BT_BOTTLE_Y: i32 = 4;
 
 // Bazaar trigger: combined lines between the two players   (BTScoreManager.C)
 pub const BT_LINES_TIL_BAZ: i32 = 20;
+
+// Mondale '96 tax rate (BTScoreManager.C: BT_MONDALE_RATE .30)
+pub const BT_MONDALE_RATE: f64 = 0.30;

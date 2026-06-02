@@ -21,6 +21,7 @@ const TAG_SCORED: i32 = 2; // [score, lines, funds]
 const TAG_ENTER_BAZAAR: i32 = 3; // [0, 0, 0]
 const TAG_AIRSLIDE: i32 = 4; // [0, 0, 0]
 const TAG_GAME_OVER: i32 = 5; // [0, 0, 0]
+const TAG_IDIOT: i32 = 6; // [reason, 0, 0]
 
 #[wasm_bindgen]
 pub struct WasmGame {
@@ -161,19 +162,17 @@ impl WasmGame {
     pub fn drain_events(&mut self) -> Vec<i32> {
         let mut out = Vec::new();
         for e in self.inner.take_events() {
-            let quad = match e {
-                GameEvent::Locked { lines, value, funds } => [TAG_LOCKED, lines, value, funds],
-                GameEvent::WeaponLaunched(t) => [TAG_WEAPON_LAUNCHED, t.index() as i32, 0, 0],
-                GameEvent::Scored { score, lines, funds } => {
-                    [TAG_SCORED, score as i32, lines as i32, funds as i32]
-                }
-                GameEvent::EnterBazaar => [TAG_ENTER_BAZAAR, 0, 0, 0],
-                GameEvent::Airslide => [TAG_AIRSLIDE, 0, 0, 0],
-                GameEvent::GameOver => [TAG_GAME_OVER, 0, 0, 0],
-            };
-            out.extend_from_slice(&quad);
+            out.extend_from_slice(&event_quad(e));
         }
         out
+    }
+
+    /// Effective bazaar price for `token` (doubled while Carter is active).
+    pub fn bazaar_price(&self, token: i32) -> i32 {
+        match WeaponToken::from_index(token) {
+            Some(t) => self.inner.bazaar_price(t),
+            None => 0,
+        }
     }
 }
 
@@ -256,6 +255,7 @@ fn event_quad(e: GameEvent) -> [i32; 4] {
             [TAG_SCORED, score as i32, lines as i32, funds as i32]
         }
         GameEvent::EnterBazaar => [TAG_ENTER_BAZAAR, 0, 0, 0],
+        GameEvent::Idiot(reason) => [TAG_IDIOT, reason as i32, 0, 0],
         GameEvent::Airslide => [TAG_AIRSLIDE, 0, 0, 0],
         GameEvent::GameOver => [TAG_GAME_OVER, 0, 0, 0],
     }
@@ -441,6 +441,12 @@ impl WasmVsComputer {
     }
     pub fn leave_bazaar(&mut self) {
         self.player.leave_bazaar();
+    }
+    pub fn bazaar_price(&self, token: i32) -> i32 {
+        match WeaponToken::from_index(token) {
+            Some(t) => self.player.bazaar_price(t),
+            None => 0,
+        }
     }
     pub fn arsenal_token(&self, i: u32) -> i32 {
         self.player.arsenal_token(i as usize)
