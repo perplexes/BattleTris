@@ -10,6 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 bt-core = { path = "../bt-core" }
+bt-ai = { path = "../bt-ai" }
 bt-trueskill = { path = "../bt-trueskill" }
 wasm-bindgen = "0.2"
 

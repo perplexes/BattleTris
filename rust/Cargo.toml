@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "bt-core",
     "bt-trueskill",
+    "bt-ai",
     "bt-wasm",
 ]
 # bt-wasm only targets wasm32 (cdylib + wasm-bindgen); keep it out of the
@@ -10,6 +11,7 @@ members = [
 default-members = [
     "bt-core",
     "bt-trueskill",
+    "bt-ai",
 ]
 
 [workspace.package]

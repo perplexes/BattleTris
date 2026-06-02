@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "bt-ai"
+version = "0.1.0"
+dependencies = [
+ "bt-core",
+]
+
+[[package]]
 name = "bt-core"
 version = "0.1.0"
 
@@ -14,6 +21,7 @@ version = "0.1.0"
 name = "bt-wasm"
 version = "0.1.0"
 dependencies = [
+ "bt-ai",
  "bt-core",
  "bt-trueskill",
  "wasm-bindgen",
