@@ -5,6 +5,7 @@ members = [
     "bt-trueskill",
     "bt-ai",
     "bt-wasm",
+    "bt-server",
 ]
 # bt-wasm only targets wasm32 (cdylib + wasm-bindgen); keep it out of the
 # default host build/test so `cargo test` works without the wasm toolchain.

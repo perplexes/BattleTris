@@ -11,6 +11,12 @@
     <div class="container">
         <h1>BattleTris</h1>
 
+        <div class="mode-selector">
+            <button id="modePractice" class="mode-btn active">Practice</button>
+            <button id="modeVsComputer" class="mode-btn">vs Computer</button>
+            <button id="modeVsPlayer" class="mode-btn">vs Player (2 tabs)</button>
+        </div>
+
         <div class="game-area">
             <div class="left-panel">
                 <div class="stats-panel">
@@ -62,6 +68,7 @@
             <div class="center-panel">
                 <div class="board-wrapper">
                     <canvas id="gameCanvas"></canvas>
+                    <canvas id="aiCanvas" style="display: none;"></canvas>
                     <div id="gameOverOverlay" class="game-over-overlay">
                         <div class="game-over-text" id="gameOverText">GAME OVER</div>
                     </div>
@@ -74,12 +81,19 @@
                         </div>
                     </div>
                 </div>
+                <div id="aiLabel" class="ai-label" style="display: none;">Ernie (computer)</div>
             </div>
 
             <div class="right-panel">
                 <div class="arsenal-panel">
                     <h3>Arsenal</h3>
                     <div id="arsenalList" class="arsenal-list"></div>
+                </div>
+                <div id="aiBoard" class="ai-board-panel" style="display: none;">
+                    <h3 id="aiBoardLabel">Ernie (computer)</h3>
+                    <div class="ai-board-wrapper">
+                        <canvas id="aiGridCanvas"></canvas>
+                    </div>
                 </div>
             </div>
         </div>

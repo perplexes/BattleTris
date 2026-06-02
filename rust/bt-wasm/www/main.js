@@ -1,7 +1,8 @@
-import init, { WasmGame, max_weapons, weapon_name, weapon_description, weapon_price, weapon_duration } from '../pkg/bt_wasm.js';
+import init, { WasmGame, WasmVsComputer, max_weapons, weapon_name, weapon_description, weapon_price, weapon_duration } from '../pkg/bt_wasm.js';
 
 // Game state
 let game = null;
+let mode = 'practice'; // 'practice', 'vscomputer', 'vsplayer'
 let lastFrameTime = 0;
 let paused = false;
 let gameEnded = false;
@@ -10,6 +11,8 @@ let broadcastChannel = null;
 // Canvas and context
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
+const aiGridCanvas = document.getElementById('aiGridCanvas');
+const aiCtx = aiGridCanvas.getContext('2d');
 
 // UI elements
 const scoreValue = document.getElementById('scoreValue');
@@ -26,6 +29,11 @@ const bazaarDoneBtn = document.getElementById('bazaarDoneBtn');
 const arsenalList = document.getElementById('arsenalList');
 const opponentScore = document.getElementById('opponentScore');
 const opponentLines = document.getElementById('opponentLines');
+const modePracticeBtn = document.getElementById('modePractice');
+const modeVsComputerBtn = document.getElementById('modeVsComputer');
+const modeVsPlayerBtn = document.getElementById('modeVsPlayer');
+const aiBoard = document.getElementById('aiBoard');
+const aiLabel = document.getElementById('aiLabel');
 
 // Palette: cell id -> { bright, dark }
 const PALETTE = {
@@ -49,8 +57,19 @@ const ARSENAL_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
 // Initialize the game
 async function initGame() {
     await init();
+    startGame('practice');
+}
+
+function startGame(newMode) {
+    mode = newMode;
     const seed = (performance.now() | 0) ^ (Math.floor(Math.random() * 1e9));
-    game = new WasmGame(seed);
+
+    // Create game instance based on mode
+    if (mode === 'vscomputer') {
+        game = new WasmVsComputer(seed);
+    } else {
+        game = new WasmGame(seed);
+    }
 
     // Set canvas size based on game dimensions
     const width = game.width();
@@ -62,24 +81,62 @@ async function initGame() {
     canvas.style.width = (width * CELL_SIZE * 1.6) + 'px';
     canvas.style.height = (height * CELL_SIZE * 1.6) + 'px';
 
+    // Set up AI canvas in vscomputer mode
+    if (mode === 'vscomputer') {
+        aiGridCanvas.width = width * CELL_SIZE;
+        aiGridCanvas.height = height * CELL_SIZE;
+        // Scale AI canvas smaller (1.0x)
+        aiGridCanvas.style.width = (width * CELL_SIZE * 1.0) + 'px';
+        aiGridCanvas.style.height = (height * CELL_SIZE * 1.0) + 'px';
+        aiBoard.style.display = 'block';
+        aiLabel.style.display = 'block';
+    } else {
+        aiBoard.style.display = 'none';
+        aiLabel.style.display = 'none';
+    }
+
+    // Update UI
+    updateModeButtons();
     paused = false;
     gameEnded = false;
     gameOverOverlay.style.display = 'none';
     bazaarOverlay.style.display = 'none';
     lastFrameTime = performance.now();
+}
+
+function updateModeButtons() {
+    modePracticeBtn.classList.remove('active');
+    modeVsComputerBtn.classList.remove('active');
+    modeVsPlayerBtn.classList.remove('active');
+
+    if (mode === 'practice') {
+        modePracticeBtn.classList.add('active');
+    } else if (mode === 'vscomputer') {
+        modeVsComputerBtn.classList.add('active');
+    } else if (mode === 'vsplayer') {
+        modeVsPlayerBtn.classList.add('active');
+    }
 }
 
 function newGame() {
-    const seed = (performance.now() | 0) ^ (Math.floor(Math.random() * 1e9));
-    game = new WasmGame(seed);
-    paused = false;
-    gameEnded = false;
-    gameOverOverlay.style.display = 'none';
-    bazaarOverlay.style.display = 'none';
-    lastFrameTime = performance.now();
+    startGame(mode);
 }
 
-function drawCell(x, y, cellId) {
+function drawBoard(context, grid, width, height) {
+    // Clear canvas with black background
+    context.fillStyle = '#000000';
+    context.fillRect(0, 0, width * CELL_SIZE, height * CELL_SIZE);
+
+    // Draw each cell
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            const cellId = grid[y * width + x];
+            drawCellOnContext(context, x, y, cellId);
+        }
+    }
+}
+
+function drawCellOnContext(context, x, y, cellId) {
     const px = x * CELL_SIZE;
     const py = y * CELL_SIZE;
 
@@ -92,40 +149,40 @@ function drawCell(x, y, cellId) {
     if (cellId >= 1 && cellId <= 8) {
         const colors = PALETTE[cellId];
         // Dark shadow on bottom-right
-        ctx.fillStyle = colors.dark;
-        ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE);
+        context.fillStyle = colors.dark;
+        context.fillRect(px, py, CELL_SIZE, CELL_SIZE);
         // Bright inset on top-left
-        ctx.fillStyle = colors.bright;
-        ctx.fillRect(px, py, CELL_SIZE - BEVEL_BORDER, CELL_SIZE - BEVEL_BORDER);
+        context.fillStyle = colors.bright;
+        context.fillRect(px, py, CELL_SIZE - BEVEL_BORDER, CELL_SIZE - BEVEL_BORDER);
         return;
     }
 
     // NEUTRAL / BOTTLE-NECK (9 or 20)
     if (cellId === 9 || cellId === 20) {
-        ctx.fillStyle = '#bebebe';
-        ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE);
+        context.fillStyle = '#bebebe';
+        context.fillRect(px, py, CELL_SIZE, CELL_SIZE);
         return;
     }
 
     // GIMP (23)
     if (cellId === 23) {
-        ctx.fillStyle = '#800080';
-        ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE);
-        ctx.fillStyle = '#ff00ff';
-        ctx.fillRect(px, py, CELL_SIZE - BEVEL_BORDER, CELL_SIZE - BEVEL_BORDER);
+        context.fillStyle = '#800080';
+        context.fillRect(px, py, CELL_SIZE, CELL_SIZE);
+        context.fillStyle = '#ff00ff';
+        context.fillRect(px, py, CELL_SIZE - BEVEL_BORDER, CELL_SIZE - BEVEL_BORDER);
         return;
     }
 
     // HAPPY (21) and UNHAPPY (22)
     if (cellId === 21 || cellId === 22) {
         // Beveled yellow box
-        ctx.fillStyle = '#b8860b';
-        ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE);
-        ctx.fillStyle = '#ffff00';
-        ctx.fillRect(px, py, CELL_SIZE - BEVEL_BORDER, CELL_SIZE - BEVEL_BORDER);
+        context.fillStyle = '#b8860b';
+        context.fillRect(px, py, CELL_SIZE, CELL_SIZE);
+        context.fillStyle = '#ffff00';
+        context.fillRect(px, py, CELL_SIZE - BEVEL_BORDER, CELL_SIZE - BEVEL_BORDER);
 
         // Draw face
-        ctx.fillStyle = '#000000';
+        context.fillStyle = '#000000';
 
         // Eyes: two ellipses
         const eyeWidth = 4;
@@ -133,32 +190,32 @@ function drawCell(x, y, cellId) {
         const eyeY = py + 5;
 
         // Left eye
-        ctx.beginPath();
-        ctx.ellipse(px + 4, eyeY, eyeWidth / 2, eyeHeight / 2, 0, 0, Math.PI * 2);
-        ctx.fill();
+        context.beginPath();
+        context.ellipse(px + 4, eyeY, eyeWidth / 2, eyeHeight / 2, 0, 0, Math.PI * 2);
+        context.fill();
 
         // Right eye
-        ctx.beginPath();
-        ctx.ellipse(px + 13, eyeY, eyeWidth / 2, eyeHeight / 2, 0, 0, Math.PI * 2);
-        ctx.fill();
+        context.beginPath();
+        context.ellipse(px + 13, eyeY, eyeWidth / 2, eyeHeight / 2, 0, 0, Math.PI * 2);
+        context.fill();
 
         // Mouth
         if (cellId === 21) {
             // Happy: smile (lower half of arc)
-            ctx.beginPath();
-            ctx.arc(px + 11.5, py + 12, 5, 0, Math.PI);
-            ctx.stroke();
+            context.beginPath();
+            context.arc(px + 11.5, py + 12, 5, 0, Math.PI);
+            context.stroke();
         } else {
             // Unhappy: frown (upper half of arc)
-            ctx.beginPath();
-            ctx.arc(px + 11.5, py + 12, 5, Math.PI, 0);
-            ctx.stroke();
+            context.beginPath();
+            context.arc(px + 11.5, py + 12, 5, Math.PI, 0);
+            context.stroke();
 
             // Tear: small blue dot below right eye
-            ctx.fillStyle = '#3050ff';
-            ctx.beginPath();
-            ctx.arc(px + 13, py + 8, 2, 0, Math.PI * 2);
-            ctx.fill();
+            context.fillStyle = '#3050ff';
+            context.beginPath();
+            context.arc(px + 13, py + 8, 2, 0, Math.PI * 2);
+            context.fill();
         }
         return;
     }
@@ -166,10 +223,10 @@ function drawCell(x, y, cellId) {
     // DICE (24-29)
     if (cellId >= 24 && cellId <= 29) {
         // Beveled ivory box
-        ctx.fillStyle = '#808080';
-        ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE);
-        ctx.fillStyle = '#fffff0';
-        ctx.fillRect(px, py, CELL_SIZE - BEVEL_BORDER, CELL_SIZE - BEVEL_BORDER);
+        context.fillStyle = '#808080';
+        context.fillRect(px, py, CELL_SIZE, CELL_SIZE);
+        context.fillStyle = '#fffff0';
+        context.fillRect(px, py, CELL_SIZE - BEVEL_BORDER, CELL_SIZE - BEVEL_BORDER);
 
         // Draw pips
         const value = cellId - 23;
@@ -177,10 +234,10 @@ function drawCell(x, y, cellId) {
         const Y = [1, 7, 13];
         const pipSize = 5;
 
-        ctx.fillStyle = '#000000';
+        context.fillStyle = '#000000';
 
         const drawPip = (offsetX, offsetY) => {
-            ctx.fillRect(px + offsetX, py + offsetY, pipSize, pipSize);
+            context.fillRect(px + offsetX, py + offsetY, pipSize, pipSize);
         };
 
         // Pip placement rules
@@ -204,21 +261,16 @@ function drawCell(x, y, cellId) {
 }
 
 function render() {
-    // Clear canvas with black background
-    ctx.fillStyle = '#000000';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    // Get grid data
+    // Draw player board
     const grid = game.render_grid();
     const width = game.width();
     const height = game.height();
+    drawBoard(ctx, grid, width, height);
 
-    // Draw each cell
-    for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-            const cellId = grid[y * width + x];
-            drawCell(x, y, cellId);
-        }
+    // Draw AI board in vscomputer mode
+    if (mode === 'vscomputer') {
+        const aiGrid = game.render_ai_grid();
+        drawBoard(aiCtx, aiGrid, width, height);
     }
 }
 
@@ -234,6 +286,14 @@ function updateOpponentPanel() {
     const opLines = game.op_lines();
     opponentScore.textContent = opScore >= 0 ? opScore : '—';
     opponentLines.textContent = opLines >= 0 ? opLines : '—';
+
+    // Update opponent label based on mode
+    const opponentLabel = document.querySelector('.opponent-panel h3');
+    if (mode === 'vscomputer') {
+        opponentLabel.textContent = 'Ernie (computer)';
+    } else {
+        opponentLabel.textContent = 'Opponent';
+    }
 }
 
 function updateArsenalPanel() {
@@ -308,21 +368,21 @@ function processEvents() {
         const c = events[i + 3];
 
         if (tag === 1) {
-            // WeaponLaunched: post to opponent
-            if (broadcastChannel && !gameEnded) {
+            // WeaponLaunched: post to opponent (vsplayer only)
+            if (mode === 'vsplayer' && broadcastChannel && !gameEnded) {
                 broadcastChannel.postMessage({ kind: 'weapon', token: a });
             }
         } else if (tag === 2) {
-            // Scored: relay score update
-            if (broadcastChannel && !gameEnded) {
+            // Scored: relay score update (vsplayer only)
+            if (mode === 'vsplayer' && broadcastChannel && !gameEnded) {
                 broadcastChannel.postMessage({ kind: 'score', score: a, lines: b, funds: c });
             }
         } else if (tag === 5) {
-            // GameOver: tell opponent we died
+            // GameOver: tell opponent we died (vsplayer only)
             gameEnded = true;
             gameOverText.textContent = 'GAME OVER — You Lost';
             gameOverOverlay.style.display = 'flex';
-            if (broadcastChannel) {
+            if (mode === 'vsplayer' && broadcastChannel) {
                 broadcastChannel.postMessage({ kind: 'dead' });
             }
         }
@@ -342,8 +402,22 @@ function gameLoop(now) {
         game.tick(dt);
     }
 
-    // Process events and relay to opponent
+    // Process events and relay to opponent (vsplayer only)
     processEvents();
+
+    // Check for win/loss in vscomputer mode
+    if (mode === 'vscomputer' && !gameEnded && game.is_game_over() === false) {
+        const result = game.result();
+        if (result === 1) {
+            gameEnded = true;
+            gameOverText.textContent = 'YOU WIN!';
+            gameOverOverlay.style.display = 'flex';
+        } else if (result === 2) {
+            gameEnded = true;
+            gameOverText.textContent = 'GAME OVER';
+            gameOverOverlay.style.display = 'flex';
+        }
+    }
 
     // Render
     render();
@@ -356,6 +430,8 @@ function gameLoop(now) {
 }
 
 function handleBroadcastMessage(ev) {
+    if (mode !== 'vsplayer') return;
+
     const m = ev.data;
 
     if (m.kind === 'weapon') {
@@ -419,6 +495,11 @@ bazaarDoneBtn.addEventListener('click', () => {
     game.leave_bazaar();
     bazaarOverlay.style.display = 'none';
 });
+
+// Mode selector buttons
+modePracticeBtn.addEventListener('click', () => startGame('practice'));
+modeVsComputerBtn.addEventListener('click', () => startGame('vscomputer'));
+modeVsPlayerBtn.addEventListener('click', () => startGame('vsplayer'));
 
 // Initialize and start game loop
 (async () => {
