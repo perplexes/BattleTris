@@ -180,7 +180,9 @@
     <!-- Touch control bar: only visible on touch/small screens via CSS -->
     <div id="touchControls" class="touch-controls" aria-label="Game controls">
         <button class="touch-btn" id="touchLeft" aria-label="Move left">&#9664;</button>
-        <button class="touch-btn" id="touchRotate" aria-label="Rotate">&#10227;</button>
+        <!-- The engine rotates counter-clockwise (BTPiece::rotate, reverse=0), so
+             use a CCW arrow (⟲ U+27F2) — not the CW ⟳ — to match the motion. -->
+        <button class="touch-btn" id="touchRotate" aria-label="Rotate counter-clockwise">&#10226;</button>
         <button class="touch-btn" id="touchRight" aria-label="Move right">&#9654;</button>
         <button class="touch-btn" id="touchDrop" aria-label="Soft drop">&#10507;</button>
     </div>
