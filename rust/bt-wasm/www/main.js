@@ -949,7 +949,12 @@ function setupTouchButton(btnId, action, repeatInterval) {
     const btn = document.getElementById(btnId);
     if (!btn) return;
 
+    // Initial delay before a held button starts auto-repeating (key-repeat
+    // style). A quick tap fires exactly once; only holding past this repeats.
+    const REPEAT_DELAY = 250;
+
     let repeatTimer = null;
+    let delayTimer = null;
 
     function fireAction() {
         if (!game || gameEnded || game.is_game_over()) return;
@@ -958,13 +963,21 @@ function setupTouchButton(btnId, action, repeatInterval) {
     }
 
     function startRepeat() {
-        fireAction();
+        fireAction(); // exactly one action on press
         if (repeatInterval != null) {
-            repeatTimer = setInterval(fireAction, repeatInterval);
+            // Don't repeat until the button has been held for REPEAT_DELAY,
+            // so a single tap is never double-counted.
+            delayTimer = setTimeout(() => {
+                repeatTimer = setInterval(fireAction, repeatInterval);
+            }, REPEAT_DELAY);
         }
     }
 
     function stopRepeat() {
+        if (delayTimer !== null) {
+            clearTimeout(delayTimer);
+            delayTimer = null;
+        }
         if (repeatTimer !== null) {
             clearInterval(repeatTimer);
             repeatTimer = null;
@@ -973,7 +986,7 @@ function setupTouchButton(btnId, action, repeatInterval) {
 
     btn.addEventListener('pointerdown', (e) => {
         e.preventDefault();
-        btn.setPointerCapture(e.pointerId);
+        try { btn.setPointerCapture(e.pointerId); } catch (_) {}
         startRepeat();
     });
 
