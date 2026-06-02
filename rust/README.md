@@ -83,12 +83,42 @@ cd bt-wasm && python3 -m http.server 8000                   # then open http://l
   code, so the lines signal is an explicitly bounded approximation pending a
   factor‑graph treatment.
 
+## Faithfulness to the original
+
+The game *logic* is a direct port of `usr/src/game/`; the X11/Motif UI (→ Canvas)
+and the TCP master/slave daemons (→ WebRTC + a small signaling server) are the
+agreed reimplementations. A codex audit comparing the port to the C++ confirmed
+faithful board geometry, piece shapes + rotation, spawn offset, keep
+probabilities, the line‑clear recheck, the funds economy, and the victim‑side
+effect of ~22 of the 34 weapons.
+
+Fixed after the audit: No Slide (instant lock), boolean weapon‑active flags
+(a twice‑launched weapon no longer sticks), Slick suspended during hard‑drop /
+slide, idiot flag flushed after `checkLines`, Mondale victim‑side tax, and the
+Carter‑doubled bazaar price display.
+
+Known remaining gaps (vs the original), in rough priority order — all require
+new peer payloads or launcher‑side bookkeeping beyond the current
+weapon/score relay:
+
+- **Board/arsenal‑exchange weapons:** Swap Meet (exchange boards), Lazy Susan
+  (swap arsenals), Mirror Mirror (reflect a launched weapon), and the spy
+  weapons Ames / Ace / Condor (recon view of the opponent board). These need a
+  board‑snapshot and arsenal message over the channel.
+- **Launcher‑side economy:** Mondale tax *collection* and Keating *steal‑to‑self*
+  (victim side is done) — need to track the opponent's funds delta on op‑score.
+- **Lawyers' Delite** raises the board per opponent line (faithful effect) but is
+  not the exact piece‑aware lock/slide of `BTGame::lawyers()`.
+- **AI (`bt-ai`):** `eval_board` is faithful in its dominant terms but omits the
+  happy‑piece bonus / baseline‑delta / weapon‑flag inputs; placement is a
+  column×orientation simulation rather than the reachable‑move DFS; weapon buying
+  is a greedy bazaar heuristic rather than a port of `goShopping` / `BTCOrders`.
+
 ## Build & test
 
 ```sh
 cd rust
-cargo test                 # whole workspace
-cargo test -p bt-core      # game logic
-cargo test -p bt-trueskill # ratings
-rustup target add wasm32-unknown-unknown   # for the future wasm front-end
+cargo test                 # whole workspace (host crates)
+cargo test -p bt-server    # matchmaking/rating server
+wasm-pack build bt-wasm --target web --out-dir pkg --dev
 ```
