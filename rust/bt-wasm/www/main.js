@@ -2,11 +2,18 @@ import init, { WasmGame, WasmVsComputer, max_weapons, weapon_name, weapon_descri
 
 // Game state
 let game = null;
-let mode = 'practice'; // 'practice', 'vscomputer', 'vsplayer'
+let mode = 'practice'; // 'practice', 'vscomputer', 'vsplayer', 'online'
 let lastFrameTime = 0;
 let paused = false;
 let gameEnded = false;
 let broadcastChannel = null;
+
+// Online / WebRTC state
+let ws = null;       // WebSocket to signaling server
+let pc = null;       // RTCPeerConnection
+let dc = null;       // RTCDataChannel
+let onlinePaused = true;  // true until the data channel opens
+let onlineOpponentName = '';
 
 // Canvas and context
 const canvas = document.getElementById('gameCanvas');
@@ -32,8 +39,10 @@ const opponentLines = document.getElementById('opponentLines');
 const modePracticeBtn = document.getElementById('modePractice');
 const modeVsComputerBtn = document.getElementById('modeVsComputer');
 const modeVsPlayerBtn = document.getElementById('modeVsPlayer');
+const modeOnlineBtn = document.getElementById('modeOnline');
 const aiBoard = document.getElementById('aiBoard');
 const aiLabel = document.getElementById('aiLabel');
+const onlineStatus = document.getElementById('onlineStatus');
 
 // Palette: cell id -> { bright, dark }
 const PALETTE = {
@@ -54,14 +63,227 @@ const CELL_SIZE = 23;
 const BEVEL_BORDER = 3;
 const ARSENAL_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
 
-// Initialize the game
+// ─── Online helpers ───────────────────────────────────────────────────────────
+
+function setOnlineStatus(msg) {
+    onlineStatus.textContent = msg;
+}
+
+function dcSend(obj) {
+    if (dc && dc.readyState === 'open') {
+        dc.send(JSON.stringify(obj));
+    }
+}
+
+function cleanupOnline() {
+    if (dc) { try { dc.close(); } catch (_) {} dc = null; }
+    if (pc) { try { pc.close(); } catch (_) {} pc = null; }
+    if (ws) { try { ws.close(); } catch (_) {} ws = null; }
+    onlinePaused = true;
+    onlineOpponentName = '';
+}
+
+function showWin() {
+    gameEnded = true;
+    gameOverText.textContent = 'YOU WIN!';
+    gameOverOverlay.style.display = 'flex';
+}
+
+function setupDataChannel(channel) {
+    channel.onopen = () => {
+        startOnlineGame();
+    };
+
+    channel.onmessage = (ev) => {
+        const m = JSON.parse(ev.data);
+        if (m.kind === 'weapon') {
+            game.receive_weapon(m.token);
+        } else if (m.kind === 'score') {
+            game.receive_op_score(m.score, m.lines, m.funds);
+        } else if (m.kind === 'dead') {
+            // Opponent died — we win
+            showWin();
+            if (ws) {
+                ws.send(JSON.stringify({
+                    type: 'result',
+                    won: true,
+                    lines: game.lines(),
+                    opLines: game.op_lines()
+                }));
+            }
+        }
+    };
+
+    channel.onclose = () => {
+        if (!gameEnded) {
+            setOnlineStatus('Data channel closed.');
+        }
+    };
+
+    channel.onerror = (err) => {
+        console.warn('DataChannel error', err);
+    };
+}
+
+function startOnlineGame() {
+    onlinePaused = false;
+    const oppLabel = onlineOpponentName || 'Opponent';
+    setOnlineStatus(`Connected — fight!  (vs ${oppLabel})`);
+    // Update the opponent panel heading
+    const opponentLabel = document.querySelector('.opponent-panel h3');
+    if (opponentLabel) opponentLabel.textContent = oppLabel;
+}
+
+async function beginOnlineMode() {
+    // Ask for player name
+    const defaultName = 'player' + Math.floor(Math.random() * 900 + 100);
+    const playerName = prompt('Enter your player name:', defaultName) || defaultName;
+
+    // Clean up any previous online session
+    cleanupOnline();
+
+    // Start a paused WasmGame (seed from time + random)
+    const seed = (performance.now() | 0) ^ (Math.floor(Math.random() * 1e9));
+    game = new WasmGame(seed);
+    onlinePaused = true;
+
+    // Resize canvases
+    const width = game.width();
+    const height = game.height();
+    canvas.width = width * CELL_SIZE;
+    canvas.height = height * CELL_SIZE;
+    canvas.style.width = (width * CELL_SIZE * 1.6) + 'px';
+    canvas.style.height = (height * CELL_SIZE * 1.6) + 'px';
+    aiBoard.style.display = 'none';
+    aiLabel.style.display = 'none';
+
+    paused = false;
+    gameEnded = false;
+    gameOverOverlay.style.display = 'none';
+    bazaarOverlay.style.display = 'none';
+    onlineStatus.style.display = 'block';
+    setOnlineStatus('Matchmaking…');
+
+    // Open WebSocket to signaling server
+    ws = new WebSocket('ws://127.0.0.1:9000');
+
+    ws.onopen = () => {
+        ws.send(JSON.stringify({ type: 'queue', name: playerName }));
+    };
+
+    ws.onerror = (err) => {
+        console.warn('WebSocket error', err);
+        setOnlineStatus('Connection error — is bt-server running on ws://127.0.0.1:9000?');
+    };
+
+    ws.onclose = () => {
+        if (!gameEnded && mode === 'online') {
+            setOnlineStatus('Disconnected from server.');
+        }
+    };
+
+    ws.onmessage = async (ev) => {
+        const msg = JSON.parse(ev.data);
+
+        if (msg.type === 'matched') {
+            onlineOpponentName = msg.opponent || 'Opponent';
+            const conservative = (msg.oppMu - 3 * msg.oppSigma).toFixed(1);
+            const quality = msg.quality != null ? Math.round(msg.quality * 100) : '?';
+            setOnlineStatus(
+                `vs ${onlineOpponentName} (rating μ−3σ ≈ ${conservative})` +
+                ` — match quality ${quality}% — Waiting for opponent…`
+            );
+
+            // Create peer connection
+            pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+
+            pc.onicecandidate = (e) => {
+                if (e.candidate) {
+                    ws.send(JSON.stringify({ type: 'signal', data: { candidate: e.candidate } }));
+                }
+            };
+
+            pc.onconnectionstatechange = () => {
+                console.log('PC connection state:', pc.connectionState);
+            };
+
+            if (msg.role === 'offer') {
+                // We are the offerer: create data channel then offer
+                dc = pc.createDataChannel('game');
+                setupDataChannel(dc);
+
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                ws.send(JSON.stringify({ type: 'signal', data: { sdp: pc.localDescription } }));
+
+            } else {
+                // We are the answerer: wait for data channel from peer
+                pc.ondatachannel = (e) => {
+                    dc = e.channel;
+                    setupDataChannel(dc);
+                };
+                // The answer SDP is sent when we receive the offer signal (see 'signal' handler below)
+            }
+
+        } else if (msg.type === 'signal') {
+            const d = msg.data;
+            if (d.sdp) {
+                await pc.setRemoteDescription(d.sdp);
+                if (d.sdp.type === 'offer') {
+                    const ans = await pc.createAnswer();
+                    await pc.setLocalDescription(ans);
+                    ws.send(JSON.stringify({ type: 'signal', data: { sdp: pc.localDescription } }));
+                }
+            } else if (d.candidate) {
+                try {
+                    await pc.addIceCandidate(d.candidate);
+                } catch (e) {
+                    console.warn('addIceCandidate error', e);
+                }
+            }
+
+        } else if (msg.type === 'rating') {
+            const conservative = (msg.mu - 3 * msg.sigma).toFixed(1);
+            const result = msg.won ? 'WIN' : 'LOSS';
+            setOnlineStatus(
+                `${result} — New rating: μ=${msg.mu.toFixed(2)}, σ=${msg.sigma.toFixed(2)},` +
+                ` μ−3σ ≈ ${conservative}`
+            );
+
+        } else if (msg.type === 'opponentLeft') {
+            setOnlineStatus('Opponent left.');
+            if (!gameEnded) {
+                gameEnded = true;
+                gameOverText.textContent = 'Opponent left.';
+                gameOverOverlay.style.display = 'flex';
+            }
+        }
+    };
+}
+
+// ─── Game initialization ──────────────────────────────────────────────────────
+
 async function initGame() {
     await init();
     startGame('practice');
 }
 
 function startGame(newMode) {
+    // Clean up online resources when leaving Online mode
+    if (mode === 'online' || newMode !== 'online') {
+        cleanupOnline();
+        onlineStatus.style.display = 'none';
+    }
+
     mode = newMode;
+
+    if (mode === 'online') {
+        // Online mode bootstraps separately via beginOnlineMode()
+        updateModeButtons();
+        beginOnlineMode();
+        return;
+    }
+
     const seed = (performance.now() | 0) ^ (Math.floor(Math.random() * 1e9));
 
     // Create game instance based on mode
@@ -108,6 +330,7 @@ function updateModeButtons() {
     modePracticeBtn.classList.remove('active');
     modeVsComputerBtn.classList.remove('active');
     modeVsPlayerBtn.classList.remove('active');
+    modeOnlineBtn.classList.remove('active');
 
     if (mode === 'practice') {
         modePracticeBtn.classList.add('active');
@@ -115,6 +338,8 @@ function updateModeButtons() {
         modeVsComputerBtn.classList.add('active');
     } else if (mode === 'vsplayer') {
         modeVsPlayerBtn.classList.add('active');
+    } else if (mode === 'online') {
+        modeOnlineBtn.classList.add('active');
     }
 }
 
@@ -291,9 +516,12 @@ function updateOpponentPanel() {
     const opponentLabel = document.querySelector('.opponent-panel h3');
     if (mode === 'vscomputer') {
         opponentLabel.textContent = 'Ernie (computer)';
-    } else {
+    } else if (mode === 'online' && onlineOpponentName) {
+        opponentLabel.textContent = onlineOpponentName;
+    } else if (mode !== 'online') {
         opponentLabel.textContent = 'Opponent';
     }
+    // In online mode before match: keep whatever text is already there
 }
 
 function updateArsenalPanel() {
@@ -368,28 +596,47 @@ function processEvents() {
         const c = events[i + 3];
 
         if (tag === 1) {
-            // WeaponLaunched: post to opponent (vsplayer only)
+            // WeaponLaunched: relay to opponent
             if (mode === 'vsplayer' && broadcastChannel && !gameEnded) {
                 broadcastChannel.postMessage({ kind: 'weapon', token: a });
+            } else if (mode === 'online' && !gameEnded) {
+                dcSend({ kind: 'weapon', token: a });
             }
         } else if (tag === 2) {
-            // Scored: relay score update (vsplayer only)
+            // Scored: relay score update
             if (mode === 'vsplayer' && broadcastChannel && !gameEnded) {
                 broadcastChannel.postMessage({ kind: 'score', score: a, lines: b, funds: c });
+            } else if (mode === 'online' && !gameEnded) {
+                dcSend({ kind: 'score', score: a, lines: b, funds: c });
             }
         } else if (tag === 5) {
-            // GameOver: tell opponent we died (vsplayer only)
+            // GameOver: tell opponent we died
             gameEnded = true;
             gameOverText.textContent = 'GAME OVER — You Lost';
             gameOverOverlay.style.display = 'flex';
             if (mode === 'vsplayer' && broadcastChannel) {
                 broadcastChannel.postMessage({ kind: 'dead' });
+            } else if (mode === 'online') {
+                dcSend({ kind: 'dead' });
+                if (ws) {
+                    ws.send(JSON.stringify({
+                        type: 'result',
+                        won: false,
+                        lines: game.lines(),
+                        opLines: game.op_lines()
+                    }));
+                }
             }
         }
     }
 }
 
 function gameLoop(now) {
+    if (!game) {
+        requestAnimationFrame(gameLoop);
+        return;
+    }
+
     if (lastFrameTime === 0) {
         lastFrameTime = now;
     }
@@ -397,13 +644,19 @@ function gameLoop(now) {
     const dt = Math.min(now - lastFrameTime, 100);
     lastFrameTime = now;
 
+    // In online mode, don't tick until the data channel is open
+    const shouldTick = !paused && !gameEnded && !game.is_game_over() &&
+        !(mode === 'online' && onlinePaused);
+
     // Advance game if not paused and not in bazaar
-    if (!paused && !gameEnded && !game.is_game_over()) {
+    if (shouldTick) {
         game.tick(dt);
     }
 
-    // Process events and relay to opponent (vsplayer only)
-    processEvents();
+    // Process events and relay to opponent (vsplayer or online)
+    if (!onlinePaused || mode !== 'online') {
+        processEvents();
+    }
 
     // Check for win/loss in vscomputer mode
     if (mode === 'vscomputer' && !gameEnded && game.is_game_over() === false) {
@@ -451,6 +704,9 @@ function handleBroadcastMessage(ev) {
 // Input handling
 function handleKeyDown(e) {
     if (!game) return;
+
+    // In online mode, don't accept input until connected
+    if (mode === 'online' && onlinePaused) return;
 
     const key = e.key;
 
@@ -500,6 +756,7 @@ bazaarDoneBtn.addEventListener('click', () => {
 modePracticeBtn.addEventListener('click', () => startGame('practice'));
 modeVsComputerBtn.addEventListener('click', () => startGame('vscomputer'));
 modeVsPlayerBtn.addEventListener('click', () => startGame('vsplayer'));
+modeOnlineBtn.addEventListener('click', () => startGame('online'));
 
 // Initialize and start game loop
 (async () => {

@@ -39,13 +39,29 @@ Each Rust module names the C++ class it ports (e.g. `board.rs` ⇐
 | Classic TrueSkill 1v1 | `bt-trueskill` | ✅ matches reference values | 6 |
 | Normal math (`erfc`/probit/`v`/`w`) | `bt-trueskill::math` | ✅ | 5 |
 | TrueSkill 2 (experience/lines/quit) | `bt-trueskill::ts2` | ✅ EP-consistent lines factor (reduces to classic at λ=0) | 6 |
-| Weapon *effects* dispatch | — | ⏳ planned (`BTBoardManager` weapon switch + game timing) |
-| Two‑player bazaar/relay | — | ⏳ planned |
-| AI (`BTComputer`) | `bt-ai` | ⏳ planned |
-| Canvas front‑end + WASM | `bt-wasm` | ⏳ planned |
-| WebRTC P2P + rating backend | — | ⏳ planned |
+| Arsenal (`BTArsenal`) | `bt-core::arsenal` | ✅ stack/empty buy, use | 3 |
+| Weapon effects + relay | `bt-core::{board,game}` | ✅ all WPN_ON/OFF effects, durations, launch, op‑score, bazaar | 3 |
+| AI (`BTComputer` + `BTCBoard`) | `bt-ai` | ✅ eval heuristic + placement search + driver | 5 |
+| Canvas front‑end + WASM | `bt-wasm` | ✅ retro Canvas, arsenal, bazaar; Practice / vs Computer / 2‑tab / Online | — |
+| Matchmaking + WebRTC signaling + ratings | `bt-server` | ✅ WS server, TrueSkill match quality, signaling relay, rating persistence | 2 |
 
-Total: **69 tests passing**.
+Total: **83 tests passing** (81 host + 2 server).
+
+## Play modes (all verified in Chrome via CDP)
+
+Build & serve:
+```sh
+cd rust
+wasm-pack build bt-wasm --target web --out-dir pkg --dev   # build the wasm
+cargo run -p bt-server                                      # online matchmaking/rating server (ws://127.0.0.1:9000)
+cd bt-wasm && python3 -m http.server 8000                   # then open http://localhost:8000/www/
+```
+
+- **Practice** — solo play.
+- **vs Computer** — battle Ernie (the `bt-ai` opponent); his board shows alongside yours.
+- **vs Player (2 tabs)** — two same‑origin tabs battle via `BroadcastChannel`.
+- **Online** — WebRTC P2P data‑channel play; the server matchmakes by TrueSkill
+  quality and updates/persists ratings on the result.
 
 ## Design notes
 

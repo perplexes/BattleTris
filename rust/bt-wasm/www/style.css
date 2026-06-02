@@ -385,6 +385,25 @@ h1 {
     background-color: #efefef;
 }
 
+.online-status {
+    text-align: center;
+    margin-bottom: 12px;
+    padding: 8px 14px;
+    background-color: #e8e8e8;
+    border: 2px solid #808080;
+    border-right-color: #000000;
+    border-bottom-color: #000000;
+    border-left-color: #ffffff;
+    border-top-color: #ffffff;
+    font-size: 13px;
+    font-weight: bold;
+    color: #333;
+    max-width: 700px;
+    margin-left: auto;
+    margin-right: auto;
+    word-break: break-word;
+}
+
 .ai-label {
     text-align: center;
     margin-top: 10px;
