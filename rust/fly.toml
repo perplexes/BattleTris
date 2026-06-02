@@ -1,0 +1,25 @@
+app = "battletris"
+primary_region = "sjc"
+
+[build]
+  dockerfile = "Dockerfile"
+
+# Matchmaking + relay state is in-process, so run exactly ONE always-on machine
+# (deploy with --ha=false) — all players must reach the same process to match.
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+
+# Durable TrueSkill ratings live on a volume (single machine, single volume —
+# matches the in-process matchmaking model). Create with:
+#   fly volumes create data --app battletris --region sjc --size 1
+[mounts]
+  source = "data"
+  destination = "/data"

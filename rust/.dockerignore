@@ -1,0 +1,4 @@
+target/
+bt-wasm/pkg/
+**/*.bak
+**/.DS_Store

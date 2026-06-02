@@ -3,7 +3,7 @@ name = "bt-server"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
-description = "BattleTris matchmaking + WebRTC signaling + TrueSkill rating server."
+description = "BattleTris server: serves the web client + matchmaking/WebRTC-signaling/TrueSkill ratings."
 
 [[bin]]
 name = "bt-server"
@@ -11,8 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 bt-trueskill = { path = "../bt-trueskill" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "io-util", "time"] }
-tokio-tungstenite = "0.21"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "signal"] }
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.5", features = ["fs"] }
 futures-util = "0.3"
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"

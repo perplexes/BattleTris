@@ -186,9 +186,10 @@ async function beginOnlineMode() {
     // Open WebSocket to the signaling server on the same host that served this
     // page (so it works over localhost, LAN, or Tailscale). Use wss when the
     // page itself is served over https.
+    // Same-origin WebSocket: the bt-server serves both the page and /ws on one
+    // port (and wss behind TLS, e.g. on fly.io).
     const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const wsHost = location.hostname || '127.0.0.1';
-    const wsUrl = `${wsProto}://${wsHost}:9000`;
+    const wsUrl = `${wsProto}://${location.host}/ws`;
     ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
