@@ -1340,3 +1340,76 @@ body {
 .leaderboard-item:nth-child(1) { background-color: #f3e9c0; }
 .leaderboard-item:nth-child(2) { background-color: #e6e6e6; }
 .leaderboard-item:nth-child(3) { background-color: #ecd9c0; }
+
+/* ─── Live stats: players online + 90s visitor hit counter ───────────────── */
+.live-bar {
+    text-align: center;
+    margin: 4px 0 10px;
+}
+.players-online {
+    font-size: 12px;
+    font-weight: bold;
+    color: #333;
+}
+/* Blinking "live" dot, like an old "users online now" badge. */
+.online-dot {
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    margin-right: 6px;
+    border-radius: 50%;
+    background-color: #2a2;
+    box-shadow: 0 0 3px #2a2;
+    vertical-align: baseline;
+    animation: bt-blink 1.4s step-start infinite;
+}
+@keyframes bt-blink {
+    0%, 60% { opacity: 1; }
+    61%, 100% { opacity: 0.25; }
+}
+
+.site-footer {
+    margin: 24px auto 12px;
+    text-align: center;
+}
+.hit-counter {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    background-color: #c0c0c0;
+    border: 2px solid #808080;
+    border-right-color: #fff;
+    border-bottom-color: #fff;
+    border-left-color: #000;
+    border-top-color: #000;
+}
+.hit-label {
+    font-size: 11px;
+    font-weight: bold;
+    color: #333;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+/* The odometer: black panel of bright fixed-width digit cells. */
+.odometer {
+    display: inline-flex;
+    gap: 2px;
+    padding: 3px;
+    background-color: #000;
+    border: 2px solid #000;
+    border-right-color: #555;
+    border-bottom-color: #555;
+}
+.odo-digit {
+    display: inline-block;
+    min-width: 14px;
+    padding: 1px 0;
+    font-family: "Courier New", monospace;
+    font-size: 18px;
+    font-weight: bold;
+    text-align: center;
+    color: #33ff44;
+    background-color: #062006;
+    text-shadow: 0 0 4px #33ff44;
+}

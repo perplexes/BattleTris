@@ -63,6 +63,8 @@ const aiBoard = document.getElementById('aiBoard');
 const aiLabel = document.getElementById('aiLabel');
 const onlineStatus = document.getElementById('onlineStatus');
 const cancelSearchBtn = document.getElementById('cancelSearch');
+const playersCountEl = document.getElementById('playersCount');
+const hitCounterEl = document.getElementById('hitCounter');
 const ernieLevelSelect = document.getElementById('ernieLevel');
 // Default Ernie difficulty: "Willing" (index 5 -> 1000ms/move). The original
 // defaults to the slider minimum (Comatose); 1000ms is a fairer modern default.
@@ -82,6 +84,43 @@ const ARSENAL_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
 
 function setOnlineStatus(msg) {
     onlineStatus.textContent = msg;
+}
+
+// ─── Live site stats (players online + 90s hit counter) ─────────────────────────
+//
+// A dedicated read-only websocket, opened on page load and kept open. Sending
+// "watch" counts this page as a visitor (the persistent SQLite hit counter) and
+// a live player; the server then pushes {players, hits} to everyone whenever the
+// numbers change. Kept separate from the matchmaking socket so it stays open the
+// whole visit and never interferes with a match.
+let statsWs = null;
+
+function connectStats() {
+    const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+    statsWs = new WebSocket(`${wsProto}://${location.host}/ws`);
+    statsWs.onopen = () => statsWs.send(JSON.stringify({ type: 'watch' }));
+    statsWs.onmessage = (ev) => {
+        let m;
+        try { m = JSON.parse(ev.data); } catch (_) { return; }
+        if (m.type === 'stats') updateLiveStats(m);
+    };
+    // Keep the counters live across a server restart / dropped connection.
+    statsWs.onclose = () => { statsWs = null; setTimeout(connectStats, 3000); };
+    statsWs.onerror = () => {};
+}
+
+function updateLiveStats(m) {
+    if (typeof m.players === 'number' && playersCountEl) {
+        playersCountEl.textContent = m.players;
+    }
+    if (typeof m.hits === 'number') setHitCounter(m.hits);
+}
+
+// Render the visit total as fixed-width odometer digits (classic web-counter look).
+function setHitCounter(n) {
+    if (!hitCounterEl) return;
+    const s = String(Math.max(0, n | 0)).padStart(6, '0');
+    hitCounterEl.innerHTML = Array.from(s, (d) => `<span class="odo-digit">${d}</span>`).join('');
 }
 
 function dcSend(obj) {
@@ -1188,6 +1227,9 @@ if (openLeaderboardBtn) openLeaderboardBtn.addEventListener('click', () => { loc
 
     // Wire up on-screen touch control buttons
     setupTouchControls();
+
+    // Open the live-stats channel (players online + visitor hit counter).
+    connectStats();
 
     requestAnimationFrame(gameLoop);
 })();

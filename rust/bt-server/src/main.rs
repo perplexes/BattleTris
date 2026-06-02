@@ -81,21 +81,28 @@ struct Client {
 struct App {
     clients: HashMap<u64, Client>,
     waiting: Vec<u64>,
+    /// Connections that opened the page (sent `watch`) — the live "players
+    /// online" count. A subset of `clients` (a matchmaking-only socket isn't one).
+    watchers: HashSet<u64>,
     /// Persisted ratings by player name: (mu, sigma, experience).
     ratings: HashMap<String, (f64, f64, u32)>,
     /// Pairings already rated (keyed by min(id_a, id_b)).
     settled: HashSet<u64>,
     params: Ts2Params,
+    /// Replay/counters DB (shared with the HTTP handlers) — backs the hit counter.
+    db: Db,
 }
 
 impl App {
-    fn new() -> App {
+    fn new(db: Db) -> App {
         App {
             clients: HashMap::new(),
             waiting: Vec::new(),
+            watchers: HashSet::new(),
             ratings: load_ratings(),
             settled: HashSet::new(),
             params: Ts2Params::default(),
+            db,
         }
     }
 
@@ -120,6 +127,24 @@ fn send(app: &App, id: u64, msg: &Value) {
     if let Some(c) = app.clients.get(&id) {
         let _ = c.tx.send(Message::Text(msg.to_string()));
     }
+}
+
+/// Send a message to every connected client.
+fn broadcast(app: &App, msg: &Value) {
+    let text = msg.to_string();
+    for c in app.clients.values() {
+        let _ = c.tx.send(Message::Text(text.clone()));
+    }
+}
+
+/// The live stats frame pushed to every page: players online now + the
+/// persistent total visit count.
+fn stats_value(app: &App) -> Value {
+    let hits = {
+        let conn = app.db.lock().unwrap();
+        db_hits(&conn)
+    };
+    json!({ "type": "stats", "players": app.watchers.len(), "hits": hits })
 }
 
 fn load_ratings() -> HashMap<String, (f64, f64, u32)> {
@@ -266,6 +291,18 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
         Err(_) => return,
     };
     match v.get("type").and_then(|t| t.as_str()) {
+        // A page opened: count it as a visitor (persistent hit counter) and a
+        // live player, then push fresh stats to everyone.
+        Some("watch") => {
+            let mut app = state.lock().await;
+            app.watchers.insert(id);
+            {
+                let conn = app.db.lock().unwrap();
+                let _ = db_bump_hits(&conn);
+            }
+            let msg = stats_value(&app);
+            broadcast(&app, &msg);
+        }
         Some("queue") => {
             let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("anon").to_string();
             let mut app = state.lock().await;
@@ -340,6 +377,12 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
             }
         }
         a.clients.remove(&id);
+        // If a page (not just a matchmaking socket) closed, the live player count
+        // changed — push it to everyone still here.
+        if a.watchers.remove(&id) {
+            let msg = stats_value(&a);
+            broadcast(&a, &msg);
+        }
     }
     writer.abort();
     println!("client {id} disconnected");
@@ -401,7 +444,11 @@ CREATE TABLE IF NOT EXISTS replays (
     created_at  INTEGER NOT NULL,
     json        TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_replays_created ON replays(created_at);";
+CREATE INDEX IF NOT EXISTS idx_replays_created ON replays(created_at);
+CREATE TABLE IF NOT EXISTS counters (
+    name   TEXT PRIMARY KEY,
+    value  INTEGER NOT NULL
+);";
 
 fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(SCHEMA)
@@ -449,6 +496,26 @@ fn db_insert(conn: &Connection, id: &str, r: &Replay, json: &str, created_at: i6
 fn db_get(conn: &Connection, id: &str) -> rusqlite::Result<Option<String>> {
     conn.query_row("SELECT json FROM replays WHERE id = ?1", [id], |row| row.get::<_, String>(0))
         .optional()
+}
+
+/// Increment the persistent hit counter (the 90s "you are visitor #N" total) and
+/// return the new value. Survives restarts because it lives in the same DB.
+fn db_bump_hits(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO counters (name, value) VALUES ('hits', 1)
+         ON CONFLICT(name) DO UPDATE SET value = value + 1",
+        [],
+    )?;
+    Ok(db_hits(conn))
+}
+
+/// Read the persistent hit counter (0 if never bumped).
+fn db_hits(conn: &Connection) -> i64 {
+    conn.query_row("SELECT value FROM counters WHERE name = 'hits'", [], |row| row.get::<_, i64>(0))
+        .optional()
+        .ok()
+        .flatten()
+        .unwrap_or(0)
 }
 
 /// List recordings newest-first (capped) with just the metadata the library
@@ -611,14 +678,17 @@ async fn leaderboard(State(state): State<Shared>) -> impl IntoResponse {
 
 #[tokio::main]
 async fn main() {
-    let db = open_db();
-    let imported = import_dir(&db, &replays_dir());
+    let conn = open_db();
+    let imported = import_dir(&conn, &replays_dir());
     if imported > 0 {
         println!("imported {imported} replay(s) from {} into {}", replays_dir(), db_path());
     }
+    // One DB handle, shared by the matchmaking/stats websocket (App) and the HTTP
+    // replay/leaderboard handlers (AppState.db).
+    let db: Db = Arc::new(std::sync::Mutex::new(conn));
     let state = AppState {
-        app: Arc::new(Mutex::new(App::new())),
-        db: Arc::new(std::sync::Mutex::new(db)),
+        app: Arc::new(Mutex::new(App::new(db.clone()))),
+        db,
     };
 
     let static_dir = std::env::var("STATIC_DIR").unwrap_or_else(|_| "bt-wasm".to_string());
@@ -750,6 +820,16 @@ mod tests {
 
         // Practice mode has no Ernie level -> ai_level surfaces as JSON null.
         assert!(db_list(&conn, 200).unwrap()[0]["ai_level"].is_null());
+    }
+
+    #[test]
+    fn hit_counter_persists_and_increments() {
+        let conn = mem_db();
+        assert_eq!(db_hits(&conn), 0, "no hits before any visit");
+        assert_eq!(db_bump_hits(&conn).unwrap(), 1);
+        assert_eq!(db_bump_hits(&conn).unwrap(), 2);
+        assert_eq!(db_bump_hits(&conn).unwrap(), 3);
+        assert_eq!(db_hits(&conn), 3, "reads back the running total");
     }
 
     #[test]

@@ -13,6 +13,10 @@
             <img src="assets/bttitle.png" alt="BattleTris" class="title-img">
         </div>
 
+        <div class="live-bar">
+            <span class="players-online"><span class="online-dot"></span>Players online: <span id="playersCount">--</span></span>
+        </div>
+
         <div class="mode-selector">
             <button id="modePractice" class="mode-btn active">Practice</button>
             <button id="modeVsComputer" class="mode-btn">vs Computer</button>
@@ -180,6 +184,15 @@
                         <canvas id="aiGridCanvas"></canvas>
                     </div>
                 </div>
+            </div>
+        </div>
+
+        <!-- 90s-style visitor hit counter (persistent total, served from SQLite,
+             pushed live over the stats websocket). -->
+        <div class="site-footer">
+            <div class="hit-counter">
+                <span class="hit-label">You are visitor number</span>
+                <span id="hitCounter" class="odometer"></span>
             </div>
         </div>
     </div>
