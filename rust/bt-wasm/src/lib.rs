@@ -117,6 +117,13 @@ impl WasmGame {
             None => false,
         }
     }
+    /// Sell a weapon back (bazaar "Remove"); refunds its price.
+    pub fn sell_weapon(&mut self, token: i32) -> bool {
+        match WeaponToken::from_index(token) {
+            Some(t) => self.inner.sell_weapon(t),
+            None => false,
+        }
+    }
     pub fn leave_bazaar(&mut self) {
         self.inner.leave_bazaar();
     }
@@ -436,6 +443,12 @@ impl WasmVsComputer {
     pub fn buy_weapon(&mut self, token: i32) -> bool {
         match WeaponToken::from_index(token) {
             Some(t) => self.player.buy_weapon(t),
+            None => false,
+        }
+    }
+    pub fn sell_weapon(&mut self, token: i32) -> bool {
+        match WeaponToken::from_index(token) {
+            Some(t) => self.player.sell_weapon(t),
             None => false,
         }
     }

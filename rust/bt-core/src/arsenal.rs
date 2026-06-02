@@ -40,6 +40,18 @@ impl Arsenal {
         false
     }
 
+    /// Remove one of weapon `w` from the arsenal (the bazaar "Remove" / sell).
+    /// Returns true if one was present.
+    pub fn sell(&mut self, w: WeaponToken) -> bool {
+        for i in 0..BT_ARSENAL_SIZE {
+            if self.rep[i] == Some(w) && self.quantity[i] > 0 {
+                self.use_slot(i);
+                return true;
+            }
+        }
+        false
+    }
+
     /// `BTArsenal::useWeapon` — consume one from slot `index`; empties the slot
     /// when the quantity hits zero.
     pub fn use_slot(&mut self, index: usize) {

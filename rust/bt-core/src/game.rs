@@ -492,6 +492,20 @@ impl Game {
         }
     }
 
+    /// Sell `token` back in the bazaar (the "Remove" button): refund its
+    /// effective price and remove one from the arsenal. Returns true on success.
+    pub fn sell_weapon(&mut self, token: WeaponToken) -> bool {
+        if !self.in_bazaar {
+            return false;
+        }
+        if self.arsenal.sell(token) {
+            self.score.funds += self.bazaar_price(token) as i64;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Leave the bazaar and resume play (`BTGame::leaveBazaar`).
     pub fn leave_bazaar(&mut self) {
         self.in_bazaar = false;
