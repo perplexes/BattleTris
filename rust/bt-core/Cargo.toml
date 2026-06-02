@@ -1,0 +1,13 @@
+[package]
+name = "bt-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Faithful port of BattleTris game logic (board, pieces, weapons, scoring, RNG)."
+
+[lib]
+# Pure, deterministic, no_std-friendly game logic. No platform/UI/network deps.
+
+[dependencies]
+
+[dev-dependencies]

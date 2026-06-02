@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = [
+    "bt-core",
+    "bt-trueskill",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+authors = ["BattleTris port"]
+
+# A faithful Rust port of BattleTris (Brown CS32, 1994) targeting WASM/browser,
+# with TrueSkill 2 matchmaking. See PORTING.md and the C++ source under usr/src/.
+[profile.release]
+opt-level = 3
+lto = true
