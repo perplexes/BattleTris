@@ -417,6 +417,18 @@ impl Game {
         self.drop_accum = 0;
     }
 
+    /// Soft drop: advance the piece down exactly one cell (or begin the lock
+    /// slide if it can't move down). One call per tap; the caller can hold-
+    /// repeat this for a fast, controlled descent. Resets the gravity clock so
+    /// manual stepping isn't compounded by an immediate gravity tick.
+    pub fn soft_drop(&mut self) {
+        if self.paused || self.in_bazaar || self.phase != Phase::Falling {
+            return;
+        }
+        self.drop_step();
+        self.drop_accum = 0;
+    }
+
     /// `BTGame::pause` (local toggle; no network send).
     pub fn set_paused(&mut self, paused: bool) {
         self.paused = paused;

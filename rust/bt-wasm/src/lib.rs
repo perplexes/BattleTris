@@ -58,6 +58,10 @@ impl WasmGame {
     pub fn begin_drop(&mut self) {
         self.inner.begin_drop();
     }
+    /// Soft drop one cell (tap = 1; hold-repeat for fast descent).
+    pub fn soft_drop(&mut self) {
+        self.inner.soft_drop();
+    }
     pub fn set_paused(&mut self, paused: bool) {
         self.inner.set_paused(paused);
     }
@@ -403,6 +407,9 @@ impl WasmVsComputer {
     }
     pub fn begin_drop(&mut self) {
         self.player.begin_drop();
+    }
+    pub fn soft_drop(&mut self) {
+        self.player.soft_drop();
     }
     pub fn set_paused(&mut self, paused: bool) {
         self.player.set_paused(paused);

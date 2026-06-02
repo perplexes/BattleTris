@@ -1009,7 +1009,8 @@ function setupTouchControls() {
     setupTouchButton('touchLeft',   () => game.move_left(),   90);
     setupTouchButton('touchRight',  () => game.move_right(),  90);
     setupTouchButton('touchRotate', () => game.rotate(),      null);
-    setupTouchButton('touchDrop',   () => game.begin_drop(),  null);
+    // Soft drop: tap = one cell; hold = fast controlled descent (35ms/cell).
+    setupTouchButton('touchDrop',   () => game.soft_drop(),   35);
 }
 
 // Input handling
@@ -1036,6 +1037,13 @@ function handleKeyDown(e) {
             game.rotate();
             return;
         case 'ArrowDown':
+            // Soft drop one cell; holding repeats via the OS key-repeat.
+            e.preventDefault();
+            game.soft_drop();
+            return;
+        case ' ':
+        case 'Spacebar':
+            // Hard drop (slam to the bottom).
             e.preventDefault();
             game.begin_drop();
             return;
