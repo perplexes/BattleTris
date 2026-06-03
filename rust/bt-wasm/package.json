@@ -1,0 +1,14 @@
+{
+  "name": "bt-wasm-e2e",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Browser e2e tests for the BattleTris wasm client (Playwright).",
+  "scripts": {
+    "build:wasm": "wasm-pack build . --target web --out-dir pkg --dev",
+    "test:e2e": "playwright test",
+    "test": "npm run build:wasm && playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0"
+  }
+}

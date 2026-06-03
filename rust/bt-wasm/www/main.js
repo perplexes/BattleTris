@@ -856,7 +856,16 @@ function updateOpponentPanel() {
     }
 }
 
+let lastArsenalSig = null;
 function updateArsenalPanel() {
+    // Only rebuild the DOM when the arsenal actually changes. Rebuilding it every
+    // frame (this runs from the game loop) was destroying the item a user is
+    // mid-click on, so the click — which deploys the weapon — never landed.
+    let sig = '';
+    for (let i = 0; i < 10; i++) sig += game.arsenal_token(i) + ':' + game.arsenal_quantity(i) + ',';
+    if (sig === lastArsenalSig) return;
+    lastArsenalSig = sig;
+
     arsenalList.innerHTML = '';
     mobileArsenalList.innerHTML = '';
 
@@ -988,6 +997,7 @@ let bazaarWasOpen = false;
 // Reset per-match overlay state when a new game starts.
 function resetMatchState() {
     bazaarWasOpen = false;
+    lastArsenalSig = null; // force the arsenal to re-render for the new game
 }
 
 function updateBazaarOverlay() {
@@ -1614,6 +1624,11 @@ if (openLibraryBtn) openLibraryBtn.addEventListener('click', () => { location.hr
 
 const openLeaderboardBtn = document.getElementById('openLeaderboard');
 if (openLeaderboardBtn) openLeaderboardBtn.addEventListener('click', () => { location.href = '/www/leaderboard.html'; });
+
+// Debug / e2e hook: live access to the current game instance + mode (the getter
+// closes over the module's `game`, so it always returns the active one). Used by
+// the Playwright weapon-deploy test to pre-stock weapons and read Ernie's board.
+window.bt = { get game() { return game; }, get mode() { return mode; } };
 
 // Initialize and start game loop
 (async () => {

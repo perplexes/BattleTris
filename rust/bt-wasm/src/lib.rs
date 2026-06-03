@@ -475,6 +475,15 @@ impl WasmVsComputer {
         self.inner.player_mut().launch_weapon(slot as usize);
         self.rec.record(Input::LaunchWeapon(slot));
     }
+    /// Test/debug: give the player funds directly (e2e pre-stocking).
+    pub fn add_funds(&mut self, amount: i32) {
+        self.inner.player_mut().add_funds(amount as i64);
+    }
+    /// Test/debug: set the player's arsenal directly — used by the e2e test to
+    /// pre-stock weapons against Ernie without playing to the bazaar.
+    pub fn import_arsenal(&mut self, data: Vec<i32>) {
+        self.inner.player_mut().import_arsenal(&data);
+    }
     pub fn is_in_bazaar(&self) -> bool {
         self.inner.player().is_in_bazaar()
     }

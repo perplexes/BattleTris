@@ -34,3 +34,8 @@ usr/src/btref/btref.tmpdb*
 
 # Local bt-server runtime DB (dev)
 rust/replays.db*
+
+# Playwright e2e (bt-wasm)
+rust/bt-wasm/node_modules/
+rust/bt-wasm/test-results/
+rust/bt-wasm/playwright-report/
