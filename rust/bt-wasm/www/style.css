@@ -438,9 +438,9 @@ body {
     border-left-color: #ffffff;
     border-bottom-color: #000000;
     border-right-color: #000000;
-    max-width: 680px;
-    width: 95vw;
-    max-height: 90vh;
+    max-width: 800px;
+    width: 96vw;
+    max-height: 92vh;
     overflow-y: auto;
     box-shadow: 5px 5px 10px rgba(0, 0, 0, 0.7);
     display: flex;
@@ -480,16 +480,17 @@ body {
 }
 
 .bazaar-col-mid {
-    flex: 0 0 130px;
-    min-width: 110px;
+    flex: 0 0 165px;
+    min-width: 150px;
     align-items: stretch;
     justify-content: flex-start;
-    gap: 6px;
+    gap: 10px;
 }
 
+/* Arsenal column ~= the weapon-list column width (BTBazaar.C: both 280px wide). */
 .bazaar-col-right {
-    flex: 0 0 130px;
-    min-width: 110px;
+    flex: 1 1 0;
+    min-width: 0;
 }
 
 .bazaar-col-header {
@@ -503,35 +504,36 @@ body {
     flex-shrink: 0;
 }
 
-/* Left: weapon selection list */
+/* Left: weapon selection list — bold red SANS (BTBazaar weap_list: red3,
+   helvetica-bold-18) on gray66. */
 .bazaar-weapon-list {
     flex: 1;
     overflow-y: auto;
-    background-color: #e8e8e8;
-    border: 2px inset #808080;
-    border-top-color: #808080;
-    border-left-color: #808080;
+    background-color: #a8a8a8;                  /* gray66 */
+    border: 2px solid #808080;
+    border-top-color: #000000;
+    border-left-color: #000000;
     border-bottom-color: #ffffff;
     border-right-color: #ffffff;
 }
 
 .bazaar-weapon-row {
-    padding: 7px 8px;
-    font-family: 'lucidatypewriter';
-    font-size: 12px;
-    color: #000;
+    padding: 3px 10px;
+    font-family: Helvetica;
+    font-weight: bold;
+    font-size: 17px;
+    color: #cd0000;                             /* red3 */
     cursor: pointer;
-    border-bottom: 1px solid #d0d0d0;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    min-height: 30px;
+    min-height: 26px;
     display: flex;
     align-items: center;
 }
 
 .bazaar-weapon-row:hover {
-    background-color: #d0d0ff;
+    background-color: #b8b8b8;
 }
 
 .bazaar-weapon-row.selected {
@@ -539,82 +541,60 @@ body {
     color: #ffffff;
 }
 
-/* Middle column elements */
-.bazaar-funds-display {
+/* Funds: a big blue "Funds" label over a big red value, each a bordered gray66
+   box (BTBazaar: funds_label helvetica-bold-34 blue; funds lucidatypewriter-bold-34
+   red3). */
+.bazaar-funds-box {
+    display: flex;
+    flex-direction: column;
+    margin-bottom: 6px;
+}
+.bazaar-funds-label, .bazaar-funds-val {
+    background-color: #a8a8a8;                  /* gray66 */
+    border: 2px solid #808080;
+    border-top-color: #ffffff; border-left-color: #ffffff;
+    border-bottom-color: #000000; border-right-color: #000000;
+    text-align: center;
+}
+.bazaar-funds-label {
+    font-family: Helvetica;
+    font-weight: bold;
+    font-size: 26px;
+    color: #0000ff;                             /* blue */
+    padding: 4px 6px;
+}
+.bazaar-funds-val {
     font-family: 'lucidatypewriter';
     font-weight: bold;
-    color: #0000ff;
-    font-size: 14px;
-    padding: 8px 6px;
-    background-color: #e8e8e8;
-    border: 2px inset #808080;
-    border-top-color: #808080;
-    border-left-color: #808080;
-    border-bottom-color: #ffffff;
-    border-right-color: #ffffff;
-    margin-bottom: 4px;
-    text-align: center;
-}
-
-.bazaar-action-btn {
-    padding: 8px 6px;
-    background-color: #dfdfdf;
-    border: 2px solid #808080;
-    border-top-color: #ffffff;
-    border-left-color: #ffffff;
-    border-bottom-color: #000000;
-    border-right-color: #000000;
-    font-weight: bold;
-    font-size: 12px;
-    cursor: pointer;
-    text-align: center;
-    width: 100%;
-    margin-bottom: 4px;
-    min-height: 36px;
-}
-
-.bazaar-action-btn:active {
-    border-top-color: #000000;
-    border-left-color: #000000;
-    border-bottom-color: #ffffff;
-    border-right-color: #ffffff;
-    background-color: #bebebe;
-}
-
-.bazaar-action-btn:hover {
-    background-color: #efefef;
-}
-
-.bazaar-done-btn {
+    font-size: 30px;
+    color: #cd0000;                             /* red3 */
     padding: 10px 6px;
-    background-color: #0000aa;
-    color: #ffffff;
+    border-top: none;
+}
+
+/* Add >> / << Remove: blue text on a raised gray button (BTBazaar XmPushButton:
+   blue fg, helvetica-bold-14). DONE is the same, just big (helvetica-bold-34). */
+.bazaar-action-btn, .bazaar-done-btn {
+    background-color: #a8a8a8;                  /* gray66 */
     border: 2px solid #808080;
-    border-top-color: #4444ff;
-    border-left-color: #4444ff;
-    border-bottom-color: #000066;
-    border-right-color: #000066;
+    border-top-color: #ffffff; border-left-color: #ffffff;
+    border-bottom-color: #000000; border-right-color: #000000;
+    color: #0000ff;                             /* blue */
+    font-family: Helvetica;
     font-weight: bold;
-    font-size: 14px;
     cursor: pointer;
     text-align: center;
     width: 100%;
-    margin-top: 6px;
-    letter-spacing: 1px;
-    min-height: 40px;
 }
+.bazaar-action-btn:active, .bazaar-done-btn:active {
+    border-top-color: #000000; border-left-color: #000000;
+    border-bottom-color: #ffffff; border-right-color: #ffffff;
+    background-color: #9a9a9a;
+}
+.bazaar-action-btn:hover, .bazaar-done-btn:hover { background-color: #b8b8b8; }
 
-.bazaar-done-btn:active {
-    border-top-color: #000066;
-    border-left-color: #000066;
-    border-bottom-color: #4444ff;
-    border-right-color: #4444ff;
-    background-color: #000088;
-}
-
-.bazaar-done-btn:hover {
-    background-color: #0000cc;
-}
+.bazaar-action-btn { padding: 9px 6px; font-size: 15px; min-height: 40px; }
+.bazaar-done-btn { padding: 12px 6px; font-size: 30px; min-height: 64px; margin-top: 4px; }
 
 /* Selected-weapon description: a band spanning the bottom of the bazaar
    (BTBazaar.C weap_desc at 340,600 -> 780,780), not jammed in the middle col. */
@@ -631,53 +611,47 @@ body {
     flex-shrink: 0;
 }
 
-.bazaar-info-price {
-    font-weight: bold;
-    color: #006000;
-    margin-right: 18px;
-}
-
-.bazaar-info-duration {
-    color: #444;
-}
-
+/* The whole weapon description is red3 monospace in the original (weap_desc). */
+.bazaar-info-price, .bazaar-info-duration, .bazaar-info-desc { color: #cd0000; }
+.bazaar-info-price { display: block; font-weight: bold; }
+.bazaar-info-duration { display: block; font-weight: bold; }
 .bazaar-info-desc {
-    color: #0000ff;
     line-height: 1.35;
     font-size: 13px;
     white-space: pre-wrap;
     word-break: break-word;
-    margin-top: 5px;
+    margin-top: 10px;
 }
 
-/* Right: arsenal in bazaar */
+/* Right: arsenal — a column of raised slot buttons; empty slots read dimmed
+   "< Empty >" (insensitive), like the original. */
 .bazaar-arsenal-list {
     flex: 1;
     overflow-y: auto;
-    font-family: 'lucidatypewriter';
-    font-size: 11px;
-    background-color: #e8e8e8;
-    border: 2px inset #808080;
-    border-top-color: #808080;
-    border-left-color: #808080;
-    border-bottom-color: #ffffff;
-    border-right-color: #ffffff;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
 }
 
 .bazaar-arsenal-slot {
-    padding: 5px 8px;
-    border-bottom: 1px solid #d0d0d0;
-    color: #333;
+    padding: 6px 10px;
+    background-color: #a8a8a8;                  /* gray66 */
+    border: 2px solid #808080;
+    border-top-color: #ffffff; border-left-color: #ffffff;
+    border-bottom-color: #000000; border-right-color: #000000;
+    font-family: 'lucidatypewriter';
+    font-size: 14px;
+    color: #8a8a8a;                             /* dimmed (empty = insensitive) */
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    min-height: 26px;
+    min-height: 30px;
     display: flex;
     align-items: center;
 }
 
 .bazaar-arsenal-slot.occupied {
-    color: #000;
+    color: #0000ff;                             /* blue, like the game arsenal */
     font-weight: bold;
 }
 

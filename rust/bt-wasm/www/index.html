@@ -101,19 +101,20 @@
                             <!-- Top band: weapon list (left) · funds+buttons (center) · arsenal (right) -->
                             <div class="bazaar-body">
                                 <div class="bazaar-col bazaar-col-left">
-                                    <div class="bazaar-col-header">Weapons</div>
                                     <div id="bazaarWeaponList" class="bazaar-weapon-list"></div>
                                 </div>
 
                                 <div class="bazaar-col bazaar-col-mid">
-                                    <div id="bazaarFundsDisplay" class="bazaar-funds-display">Funds: $<span id="bazaarFunds">0</span></div>
-                                    <button id="bazaarAddBtn" class="bazaar-action-btn">Add &#9658;</button>
-                                    <button id="bazaarRemoveBtn" class="bazaar-action-btn">&#9668; Remove</button>
+                                    <div class="bazaar-funds-box">
+                                        <div class="bazaar-funds-label">Funds</div>
+                                        <div class="bazaar-funds-val"><span id="bazaarFunds">0</span></div>
+                                    </div>
+                                    <button id="bazaarAddBtn" class="bazaar-action-btn">Add &gt;&gt;</button>
+                                    <button id="bazaarRemoveBtn" class="bazaar-action-btn">&lt;&lt; Remove</button>
                                     <button id="bazaarDoneBtn" class="bazaar-done-btn">DONE</button>
                                 </div>
 
                                 <div class="bazaar-col bazaar-col-right">
-                                    <div class="bazaar-col-header">Your Arsenal</div>
                                     <div id="bazaarArsenalList" class="bazaar-arsenal-list"></div>
                                 </div>
                             </div>
