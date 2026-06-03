@@ -90,7 +90,7 @@ struct Client {
     authoritative: bool,
     /// While in an authoritative match: the channel to the match's tick loop and
     /// which side this client plays. `input` messages are forwarded here.
-    bout: Option<(mpsc::UnboundedSender<BoutInput>, Side)>,
+    bout: Option<(mpsc::Sender<BoutInput>, Side)>,
 }
 
 /// Shared server state.
@@ -221,16 +221,28 @@ fn save_ratings(ratings: &HashMap<String, (f64, f64, u32)>) {
     }
 }
 
+/// Bounded capacity of a bout's input channel. A legitimate client sends a
+/// handful of inputs per second; this caps memory and drains-per-tick under a
+/// spam flood (excess inputs are dropped at the sender via `try_send`).
+const BOUT_INPUT_CAP: usize = 256;
+
 /// Everything the async caller needs to spawn an authoritative match's tick
 /// loop, handed back by [`try_match`] when it pairs two authoritative clients.
+/// Player names + rating states are captured here so the bout can settle even
+/// if a client has disconnected (and been removed from `app.clients`) by the
+/// time the match ends.
 struct PendingBout {
     id_a: u64,
     id_b: u64,
     seed_a: u64,
     seed_b: u64,
+    name_a: String,
+    name_b: String,
+    state_a: PlayerState,
+    state_b: PlayerState,
     tx_a: mpsc::UnboundedSender<Message>,
     tx_b: mpsc::UnboundedSender<Message>,
-    input_rx: mpsc::UnboundedReceiver<BoutInput>,
+    input_rx: mpsc::Receiver<BoutInput>,
 }
 
 /// A per-match seed from a connection id — distinct across matches (ids are
@@ -296,7 +308,7 @@ fn try_match(app: &mut App, id: u64) -> Option<PendingBout> {
     if both_authoritative {
         // Server-authoritative match. opp = side A (first queued), id = side B.
         let (seed_a, seed_b) = (derive_seed(opp), derive_seed(id));
-        let (input_tx, input_rx) = mpsc::unbounded_channel::<BoutInput>();
+        let (input_tx, input_rx) = mpsc::channel::<BoutInput>(BOUT_INPUT_CAP);
         let tx_a = app.clients[&opp].tx.clone();
         let tx_b = app.clients[&id].tx.clone();
         if let Some(c) = app.clients.get_mut(&opp) {
@@ -308,7 +320,19 @@ fn try_match(app: &mut App, id: u64) -> Option<PendingBout> {
         send(app, opp, &json!({"type":"matchStart","side":"A","seed":seed_a,"opponent":b_name,"quality":quality}));
         send(app, id, &json!({"type":"matchStart","side":"B","seed":seed_b,"opponent":a_name,"quality":quality}));
         println!("authoritative match {opp} <-> {id} (quality {quality:.3})");
-        Some(PendingBout { id_a: opp, id_b: id, seed_a, seed_b, tx_a, tx_b, input_rx })
+        Some(PendingBout {
+            id_a: opp,
+            id_b: id,
+            seed_a,
+            seed_b,
+            name_a: a_name,
+            name_b: b_name,
+            state_a: a_state,
+            state_b: b_state,
+            tx_a,
+            tx_b,
+            input_rx,
+        })
     } else {
         // Legacy WebRTC handshake (unchanged): one offer side, one answer side.
         let matched = |role: &str, you: &PlayerState, opp_name: &str, opp_s: &PlayerState| {
@@ -326,34 +350,90 @@ fn try_match(app: &mut App, id: u64) -> Option<PendingBout> {
     }
 }
 
+/// Settle an authoritative match from the bout's OWN captured player identities
+/// (not live `app.clients`, which may have lost the loser on a forfeit
+/// disconnect). Idempotent per pair; rating messages go to whoever is still
+/// connected.
+fn settle_bout(
+    app: &mut App,
+    id_a: u64,
+    name_a: &str,
+    state_a: PlayerState,
+    id_b: u64,
+    name_b: &str,
+    state_b: PlayerState,
+    a_won: bool,
+    a_lines: u32,
+    b_lines: u32,
+) {
+    if !app.settled.insert(id_a.min(id_b)) {
+        return; // already rated
+    }
+    let outcome = MatchOutcome {
+        winner: if a_won { Winner::A } else { Winner::B },
+        a_lines,
+        b_lines,
+        a_quit: false,
+        b_quit: false,
+    };
+    let (na, nb) = rate_match(state_a, state_b, &outcome, &app.params);
+    app.store_rating(name_a, na);
+    app.store_rating(name_b, nb);
+    if let Some(c) = app.clients.get_mut(&id_a) {
+        c.state = na;
+    }
+    if let Some(c) = app.clients.get_mut(&id_b) {
+        c.state = nb;
+    }
+    save_ratings(&app.ratings);
+    send(app, id_a, &rating_msg(&na, a_won));
+    send(app, id_b, &rating_msg(&nb, !a_won));
+    println!(
+        "authoritative result: {name_a} {} {name_b}",
+        if a_won { "beat" } else { "lost to" }
+    );
+}
+
 /// The per-match authoritative tick loop. Advances the deterministic engine on
-/// the server's clock, broadcasts a snapshot to each client every tick, and
-/// settles on the natural end (or by forfeit if a client drops).
+/// the server's clock, broadcasts a snapshot to each client (~30Hz), and settles
+/// on the natural end (or by forfeit if a client drops).
 async fn run_bout(state: Shared, pb: PendingBout) {
-    let PendingBout { id_a, id_b, seed_a, seed_b, tx_a, tx_b, mut input_rx } = pb;
+    let PendingBout {
+        id_a, id_b, seed_a, seed_b, name_a, name_b, state_a, state_b, tx_a, tx_b, mut input_rx,
+    } = pb;
     let mut bout = Bout::new(seed_a, seed_b);
     let mut ticker = tokio::time::interval(Duration::from_millis(bout::TICK_MS as u64));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     // `Some(a_won)` = settle with A as winner/loser; `None` = both gone, nothing to rate.
+    let mut frame: u64 = 0;
     let outcome: Option<bool> = loop {
         ticker.tick().await;
+        // Drain queued inputs (the channel is bounded, so this is O(cap)).
         while let Ok((side, input, seq)) = input_rx.try_recv() {
             bout.apply_input(side, &input, seq);
         }
         bout.tick(bout::TICK_MS);
-        let a_ok = tx_a.send(Message::Text(bout.snapshot_message(Side::A))).is_ok();
-        let b_ok = tx_b.send(Message::Text(bout.snapshot_message(Side::B))).is_ok();
 
         if bout.is_over() {
+            // Final authoritative snapshot so both clients see the end state.
+            let _ = tx_a.send(Message::Text(bout.snapshot_message(Side::A)));
+            let _ = tx_b.send(Message::Text(bout.snapshot_message(Side::B)));
             break Some(bout.result() == 1); // 1 = A won
         }
-        match (a_ok, b_ok) {
-            (false, false) => break None,    // both disconnected
-            (true, false) => break Some(true),  // B dropped -> A wins by forfeit
-            (false, true) => break Some(false), // A dropped -> B wins by forfeit
-            (true, true) => {}
+        // Throttle snapshots to ~30Hz (every other 16ms tick); this is also where
+        // a client disconnect is detected (the send fails).
+        if frame % 2 == 0 {
+            let a_ok = tx_a.send(Message::Text(bout.snapshot_message(Side::A))).is_ok();
+            let b_ok = tx_b.send(Message::Text(bout.snapshot_message(Side::B))).is_ok();
+            match (a_ok, b_ok) {
+                (false, false) => break None,       // both disconnected
+                (true, false) => break Some(true),  // B dropped -> A wins by forfeit
+                (false, true) => break Some(false), // A dropped -> B wins by forfeit
+                (true, true) => {}
+            }
         }
+        frame += 1;
     };
 
     let mut app = state.lock().await;
@@ -364,7 +444,10 @@ async fn run_bout(state: Shared, pb: PendingBout) {
         c.bout = None;
     }
     if let Some(a_won) = outcome {
-        settle_result(&mut app, id_a, a_won, bout.lines(Side::A), bout.lines(Side::B));
+        settle_bout(
+            &mut app, id_a, &name_a, state_a, id_b, &name_b, state_b,
+            a_won, bout.lines(Side::A), bout.lines(Side::B),
+        );
     }
 }
 
@@ -459,13 +542,20 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
             let authoritative = v.get("authoritative").and_then(|b| b.as_bool()).unwrap_or(false);
             let pending = {
                 let mut app = state.lock().await;
-                let st = app.rating_for(&name);
-                if let Some(c) = app.clients.get_mut(&id) {
-                    c.name = name;
-                    c.state = st;
-                    c.authoritative = authoritative;
+                // Ignore a re-queue from a client already in an authoritative
+                // match (it would otherwise be matched into a second bout that
+                // could clobber this one's binding / settle the wrong pairing).
+                if app.clients.get(&id).is_some_and(|c| c.bout.is_some()) {
+                    None
+                } else {
+                    let st = app.rating_for(&name);
+                    if let Some(c) = app.clients.get_mut(&id) {
+                        c.name = name;
+                        c.state = st;
+                        c.authoritative = authoritative;
+                    }
+                    try_match(&mut app, id)
                 }
-                try_match(&mut app, id)
             };
             // Spawn the match's tick loop outside the lock (it locks again only to settle).
             if let Some(pb) = pending {
@@ -482,7 +572,8 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
             if let Some(input) = input {
                 let app = state.lock().await;
                 if let Some((tx, side)) = app.clients.get(&id).and_then(|c| c.bout.as_ref()) {
-                    let _ = tx.send((*side, input, seq));
+                    // try_send: drop under flood rather than grow memory (bounded channel).
+                    let _ = tx.try_send((*side, input, seq));
                 }
             }
         }
@@ -498,7 +589,11 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
             let lines = v.get("lines").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
             let op_lines = v.get("opLines").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
             let mut app = state.lock().await;
-            settle_result(&mut app, id, won, lines, op_lines);
+            // Authoritative matches are settled server-side by run_bout; ignore a
+            // client-reported result while it's in a bout (untrusted + double-settle).
+            if app.clients.get(&id).is_none_or(|c| c.bout.is_none()) {
+                settle_result(&mut app, id, won, lines, op_lines);
+            }
         }
         _ => {}
     }
@@ -1030,13 +1125,19 @@ mod tests {
         use std::sync::Arc;
         let (tx_a, mut rx_a) = mpsc::unbounded_channel::<Message>();
         let (tx_b, mut rx_b) = mpsc::unbounded_channel::<Message>();
-        let (input_tx, input_rx) = mpsc::unbounded_channel::<BoutInput>();
-        let pb = PendingBout { id_a: 1, id_b: 2, seed_a: 11, seed_b: 22, tx_a, tx_b, input_rx };
+        let (input_tx, input_rx) = mpsc::channel::<BoutInput>(BOUT_INPUT_CAP);
+        let app0 = test_app();
+        let (state_a, state_b) = (app0.rating_for("alice"), app0.rating_for("bob"));
+        let pb = PendingBout {
+            id_a: 1, id_b: 2, seed_a: 11, seed_b: 22,
+            name_a: "alice".into(), name_b: "bob".into(), state_a, state_b,
+            tx_a, tx_b, input_rx,
+        };
         let shared: Shared = Arc::new(Mutex::new(test_app()));
         let handle = tokio::spawn(run_bout(shared, pb));
 
         // A legal input is accepted by the loop (no panic).
-        let _ = input_tx.send((Side::A, Input::MoveLeft, 1));
+        let _ = input_tx.try_send((Side::A, Input::MoveLeft, 1));
         // Let several 16ms ticks elapse, then confirm snapshots reached both sides.
         tokio::time::sleep(Duration::from_millis(80)).await;
         assert!(drained_types(&mut rx_a).iter().any(|t| t == "snapshot"), "A got snapshots");
@@ -1046,6 +1147,27 @@ mod tests {
         drop(rx_a);
         drop(rx_b);
         let _ = tokio::time::timeout(Duration::from_millis(300), handle).await;
+    }
+
+    #[test]
+    fn settle_bout_rates_from_captured_identities_even_if_the_loser_left() {
+        let mut app = test_app();
+        // Only the winner is still connected; the loser already disconnected.
+        let mut rx_win = add_client(&mut app, 1, "alice");
+        let state_a = app.clients[&1].state;
+        let state_b = app.rating_for("bob"); // bob is gone from app.clients
+
+        settle_bout(&mut app, 1, "alice", state_a, 2, "bob", state_b, true, 30, 12);
+
+        assert!(drained_types(&mut rx_win).contains(&"rating".to_string()), "winner got a rating");
+        assert!(
+            app.ratings.contains_key("alice") && app.ratings.contains_key("bob"),
+            "both ratings persisted by name despite the loser being gone"
+        );
+        // Idempotent per pair: a duplicate settle is a no-op.
+        let before = app.ratings.get("alice").copied();
+        settle_bout(&mut app, 1, "alice", state_a, 2, "bob", state_b, true, 30, 12);
+        assert_eq!(app.ratings.get("alice").copied(), before, "settle is idempotent");
     }
 
     #[test]
