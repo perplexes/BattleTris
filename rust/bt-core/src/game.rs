@@ -468,6 +468,14 @@ impl Game {
     pub fn is_in_bazaar(&self) -> bool {
         self.in_bazaar
     }
+    /// Whether `token`'s effect is currently active on this game.
+    pub fn weapon_active(&self, token: WeaponToken) -> bool {
+        self.weapons.is_active(token)
+    }
+    /// Lines of duration left for `token` (0 = inactive, expired, or instant).
+    pub fn weapon_remaining(&self, token: WeaponToken) -> i32 {
+        self.remaining[token.index()]
+    }
     pub fn lines_til_bazaar(&self) -> i32 {
         self.lines_til_baz
     }

@@ -171,7 +171,7 @@ function setupDataChannel(channel) {
     channel.onmessage = (ev) => {
         const m = JSON.parse(ev.data);
         if (m.kind === 'weapon') {
-            game.receive_weapon(m.token);
+            receiveWeaponFromOpponent(m.token, m.reflected);
         } else if (m.kind === 'score') {
             game.receive_op_score(m.score, m.lines, m.funds);
         } else if (m.kind === 'dead') {
@@ -683,6 +683,32 @@ function updateBazaarOverlay() {
     }
 }
 
+// Mirror Mirror is defensive: while you hold it, the opponent's weapons reflect
+// back to them, except these nine which simply fizzle (the original's
+// BTWeaponManager nullify list). Token indices from WeaponToken.
+const MIRROR_TOKEN = 28;
+const MIRROR_NULLIFY = new Set([5, 13, 14, 17, 18, 19, 20, 26, 28]);
+// Swap, Mondale, Keating, Ames, Ace, Condor, NiceDay, Susan, Mirror.
+
+function sendWeaponToOpponent(token, reflected) {
+    if (gameEnded) return;
+    const msg = { kind: 'weapon', token, reflected: !!reflected };
+    if (mode === 'vsplayer' && broadcastChannel) broadcastChannel.postMessage(msg);
+    else if (mode === 'online') dcSend(msg);
+}
+
+// An incoming weapon from the opponent, honoring our Mirror (online/2-tab; in
+// vs-Computer the engine relay does this instead). A reflected weapon is never
+// reflected again, so two Mirrors can't ping-pong forever.
+function receiveWeaponFromOpponent(token, reflected) {
+    if (!reflected && game.weapon_active && game.weapon_active(MIRROR_TOKEN)) {
+        if (MIRROR_NULLIFY.has(token)) return; // fizzles against the mirror
+        sendWeaponToOpponent(token, true);      // bounce it back at the attacker
+        return;
+    }
+    game.receive_weapon(token);
+}
+
 function processEvents() {
     const events = game.drain_events();
 
@@ -709,11 +735,15 @@ function processEvents() {
         }
 
         if (tag === 1) {
-            // WeaponLaunched: relay to opponent
+            // WeaponLaunched. Mirror is a defensive self-buff: arm it locally
+            // instead of sending it across. (vs-Computer routes weapons through
+            // the engine relay, so this block only fires for vsplayer/online.)
             if (mode === 'vsplayer' && broadcastChannel && !gameEnded) {
-                broadcastChannel.postMessage({ kind: 'weapon', token: a });
+                if (a === MIRROR_TOKEN) game.receive_weapon(MIRROR_TOKEN);
+                else broadcastChannel.postMessage({ kind: 'weapon', token: a });
             } else if (mode === 'online' && !gameEnded) {
-                dcSend({ kind: 'weapon', token: a });
+                if (a === MIRROR_TOKEN) game.receive_weapon(MIRROR_TOKEN);
+                else dcSend({ kind: 'weapon', token: a });
             }
         } else if (tag === 2) {
             // Scored: relay score update
@@ -818,8 +848,8 @@ function handleBroadcastMessage(ev) {
     const m = ev.data;
 
     if (m.kind === 'weapon') {
-        // Opponent launched a weapon at us
-        game.receive_weapon(m.token);
+        // Opponent launched a weapon at us (honor our Mirror).
+        receiveWeaponFromOpponent(m.token, m.reflected);
     } else if (m.kind === 'score') {
         // Opponent score update
         game.receive_op_score(m.score, m.lines, m.funds);

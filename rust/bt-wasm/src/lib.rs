@@ -155,6 +155,11 @@ impl WasmGame {
     pub fn lines_til_bazaar(&self) -> i32 {
         self.inner.lines_til_bazaar()
     }
+    /// Whether weapon `token` is currently active on this game (drives the
+    /// online Mirror reflect/nullify check).
+    pub fn weapon_active(&self, token: i32) -> bool {
+        WeaponToken::from_index(token).map_or(false, |t| self.inner.weapon_active(t))
+    }
     /// Buy a weapon by token index; returns true on success.
     pub fn buy_weapon(&mut self, token: i32) -> bool {
         match WeaponToken::from_index(token) {

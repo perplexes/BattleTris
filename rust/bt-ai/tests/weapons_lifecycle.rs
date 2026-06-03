@@ -101,6 +101,35 @@ fn timed_weapons_expire_after_their_duration_in_lines() {
     }
 }
 
+/// For a timed weapon, `active` and `remaining > 0` must agree at every step —
+/// the active flag is exactly "duration left". (Instant weapons are exempt:
+/// they apply once and never tick down.)
+#[test]
+fn timed_weapon_active_flag_tracks_remaining_duration() {
+    let weapon = WeaponToken::Speedy; // 10 lines
+    let mut g = Game::new(2024);
+    let mut d = Driver::new();
+    land_weapon(&mut g, &mut d, weapon);
+
+    let mut saw_remaining = false;
+    let mut saw_zero = false;
+    for _ in 0..60_000 {
+        if g.is_game_over() {
+            break;
+        }
+        let active = g.weapon_active(weapon);
+        let remaining = g.weapon_remaining(weapon);
+        assert_eq!(active, remaining > 0, "active={active} but remaining={remaining}");
+        saw_remaining |= remaining > 0;
+        if remaining == 0 {
+            saw_zero = true;
+            break;
+        }
+        d.step(&mut g);
+    }
+    assert!(saw_remaining && saw_zero, "should observe a positive duration counting to zero");
+}
+
 /// Revert check: Carter doubles bazaar prices while active and the price snaps
 /// back the instant it expires (the active flag drives `bazaar_price`).
 #[test]
