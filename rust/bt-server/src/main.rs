@@ -232,6 +232,10 @@ const BOUT_INPUT_CAP: usize = 256;
 /// if a client has disconnected (and been removed from `app.clients`) by the
 /// time the match ends.
 struct PendingBout {
+    /// Globally-unique match id (from `NEXT_ID`, the same counter as connection
+    /// ids, so it's disjoint from every connection id and every legacy min-id
+    /// settle key). Keys this match's settlement.
+    match_id: u64,
     id_a: u64,
     id_b: u64,
     seed_a: u64,
@@ -321,6 +325,7 @@ fn try_match(app: &mut App, id: u64) -> Option<PendingBout> {
         send(app, id, &json!({"type":"matchStart","side":"B","seed":seed_b,"opponent":a_name,"quality":quality}));
         println!("authoritative match {opp} <-> {id} (quality {quality:.3})");
         Some(PendingBout {
+            match_id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             id_a: opp,
             id_b: id,
             seed_a,
@@ -354,8 +359,10 @@ fn try_match(app: &mut App, id: u64) -> Option<PendingBout> {
 /// (not live `app.clients`, which may have lost the loser on a forfeit
 /// disconnect). Idempotent per pair; rating messages go to whoever is still
 /// connected.
+#[allow(clippy::too_many_arguments)]
 fn settle_bout(
     app: &mut App,
+    match_id: u64,
     id_a: u64,
     name_a: &str,
     state_a: PlayerState,
@@ -366,8 +373,11 @@ fn settle_bout(
     a_lines: u32,
     b_lines: u32,
 ) {
-    if !app.settled.insert(id_a.min(id_b)) {
-        return; // already rated
+    // Key on the unique match id, not min(id), so a connection's later match
+    // (same min-id) isn't wrongly skipped. run_bout calls this once per match,
+    // so the guard is purely defensive.
+    if !app.settled.insert(match_id) {
+        return;
     }
     let outcome = MatchOutcome {
         winner: if a_won { Winner::A } else { Winner::B },
@@ -399,7 +409,8 @@ fn settle_bout(
 /// on the natural end (or by forfeit if a client drops).
 async fn run_bout(state: Shared, pb: PendingBout) {
     let PendingBout {
-        id_a, id_b, seed_a, seed_b, name_a, name_b, state_a, state_b, tx_a, tx_b, mut input_rx,
+        match_id, id_a, id_b, seed_a, seed_b, name_a, name_b, state_a, state_b, tx_a, tx_b,
+        mut input_rx,
     } = pb;
     let mut bout = Bout::new(seed_a, seed_b);
     let mut ticker = tokio::time::interval(Duration::from_millis(bout::TICK_MS as u64));
@@ -445,7 +456,7 @@ async fn run_bout(state: Shared, pb: PendingBout) {
     }
     if let Some(a_won) = outcome {
         settle_bout(
-            &mut app, id_a, &name_a, state_a, id_b, &name_b, state_b,
+            &mut app, match_id, id_a, &name_a, state_a, id_b, &name_b, state_b,
             a_won, bout.lines(Side::A), bout.lines(Side::B),
         );
     }
@@ -1129,7 +1140,7 @@ mod tests {
         let app0 = test_app();
         let (state_a, state_b) = (app0.rating_for("alice"), app0.rating_for("bob"));
         let pb = PendingBout {
-            id_a: 1, id_b: 2, seed_a: 11, seed_b: 22,
+            match_id: 99, id_a: 1, id_b: 2, seed_a: 11, seed_b: 22,
             name_a: "alice".into(), name_b: "bob".into(), state_a, state_b,
             tx_a, tx_b, input_rx,
         };
@@ -1157,7 +1168,7 @@ mod tests {
         let state_a = app.clients[&1].state;
         let state_b = app.rating_for("bob"); // bob is gone from app.clients
 
-        settle_bout(&mut app, 1, "alice", state_a, 2, "bob", state_b, true, 30, 12);
+        settle_bout(&mut app, 100, 1, "alice", state_a, 2, "bob", state_b, true, 30, 12);
 
         assert!(drained_types(&mut rx_win).contains(&"rating".to_string()), "winner got a rating");
         assert!(
@@ -1166,7 +1177,7 @@ mod tests {
         );
         // Idempotent per pair: a duplicate settle is a no-op.
         let before = app.ratings.get("alice").copied();
-        settle_bout(&mut app, 1, "alice", state_a, 2, "bob", state_b, true, 30, 12);
+        settle_bout(&mut app, 100, 1, "alice", state_a, 2, "bob", state_b, true, 30, 12);
         assert_eq!(app.ratings.get("alice").copied(), before, "settle is idempotent");
     }
 
