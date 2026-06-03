@@ -388,6 +388,10 @@ body {
     color: #333;
 }
 
+/* Legacy compat label (main.js toggles it); the ai-board panel has its own
+   "Ernie (computer)" label, so keep this one hidden to avoid a duplicate. */
+#aiLabel { display: none !important; }
+
 .ai-board-panel {
     background-color: #cccccc;
     border: 3px solid #808080;
@@ -734,9 +738,33 @@ body {
     /* Lobby stacks into one column on narrow screens */
     .lobby-card { flex-direction: column; }
 
-    /* Hide the desktop score/arsenal column (mobile uses the compact bars) */
+    /* The compact bars replace the desktop score/arsenal column — but keep
+       Ernie's board visible (vs-Computer) below the player's board. */
     .game-right {
+        width: 100%;
+        align-items: center;
+        margin-top: 6px;
+        max-height: none;
+        overflow: visible;
+    }
+    .game-right > .score-box,
+    .game-right > .arsenal-box,
+    .game-right > .playing-status,
+    .game-right > .game-buttons {
         display: none;
+    }
+    /* Ernie's board: a smaller secondary view under the player's. */
+    #aiGridCanvas {
+        width: auto !important;
+        height: 28vh !important;
+        max-width: 60vw;
+    }
+    .ai-board-panel {
+        width: auto;
+        margin-top: 0;
+    }
+    .ai-label {
+        font-size: 12px;
     }
 
     /* Center panel: full width, centered */
