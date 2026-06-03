@@ -110,9 +110,10 @@ pub struct Versus {
     /// entry. The host reads it via [`Versus::take_dirty`] to push a prompt
     /// reconciliation keyframe instead of waiting for the periodic heartbeat.
     dirty: bool,
-    /// A spy launched THIS tick by each side (A = [0], B = [1]), for the host to
-    /// pick up (the spy reveal is a host concern, not a board effect).
-    spy_launch: [Option<WeaponToken>; 2],
+    /// Spies launched THIS tick by each side (A = [0], B = [1]), for the host to
+    /// pick up (the spy reveal is a host concern, not a board effect). A Vec so
+    /// several launches drained in one server tick all accumulate.
+    spy_launch: [Vec<WeaponToken>; 2],
 }
 
 impl Versus {
@@ -124,7 +125,7 @@ impl Versus {
             b: Game::new(seed_b),
             result: 0,
             dirty: false,
-            spy_launch: [None, None],
+            spy_launch: [Vec::new(), Vec::new()],
         }
     }
 
@@ -135,14 +136,13 @@ impl Versus {
         std::mem::take(&mut self.dirty)
     }
 
-    /// Take (and clear) a spy `side` launched on the last tick (the host then
-    /// tracks the spy's line-based duration and reveals the opponent's board).
-    pub fn take_spy_launch(&mut self, side: Side) -> Option<WeaponToken> {
-        self.spy_launch[match side {
+    /// Take (and clear) the spies `side` launched on the last tick, in order (the
+    /// host tracks each spy's line-based duration and reveals the opponent board).
+    pub fn take_spy_launches(&mut self, side: Side) -> Vec<WeaponToken> {
+        std::mem::take(&mut self.spy_launch[match side {
             Side::A => 0,
             Side::B => 1,
-        }]
-        .take()
+        }])
     }
 
     pub fn game(&self, side: Side) -> &Game {
@@ -200,7 +200,7 @@ impl Versus {
                         // it is NOT delivered to the opponent — unless the launcher
                         // is mirror-cursed, in which case it fizzles (D6).
                         if !self.a.weapon_active(WeaponToken::Mirror) {
-                            self.spy_launch[0] = Some(t);
+                            self.spy_launch[0].push(t);
                         }
                     } else {
                         deliver_weapon(&mut self.a, &mut self.b, t);
@@ -227,7 +227,7 @@ impl Versus {
                 GameEvent::WeaponLaunched(t) => {
                     if is_spy(t) {
                         if !self.b.weapon_active(WeaponToken::Mirror) {
-                            self.spy_launch[1] = Some(t);
+                            self.spy_launch[1].push(t);
                         }
                     } else {
                         deliver_weapon(&mut self.b, &mut self.a, t);
@@ -368,8 +368,8 @@ mod tests {
         v.game_mut(Side::A).grant_weapon(WeaponToken::Ames);
         v.game_mut(Side::A).launch_weapon(0);
         v.tick(16); // the relay records the spy launch for the host
-        assert_eq!(v.take_spy_launch(Side::A), Some(WeaponToken::Ames), "launcher's spy recorded");
-        assert_eq!(v.take_spy_launch(Side::B), None);
+        assert_eq!(v.take_spy_launches(Side::A), vec![WeaponToken::Ames], "launcher's spy recorded");
+        assert!(v.take_spy_launches(Side::B).is_empty());
         // The opponent must NOT receive the spy as a weapon (it's info-only).
         lock(v.game_mut(Side::B));
         assert!(

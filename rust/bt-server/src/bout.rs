@@ -140,26 +140,24 @@ fn spy_hide_pct(token: WeaponToken) -> u32 {
     }
 }
 
-/// Degrade a flat board export ([tag,a,b,hidden] per cell) to a spy's accuracy by
-/// HIDING a deterministic ~hide% of non-empty cells (server-side, so a modified
-/// client can't read the cells the spy didn't reveal — this is what makes the old
-/// unauthenticated spy request, D4, moot). Stable per position (no flicker).
-fn degrade_board(mut board: Vec<i32>, token: WeaponToken) -> Vec<i32> {
+/// Degrade a render-id grid (`Game::render_ids`, empty = -2) to a spy's accuracy
+/// by HIDING a deterministic ~hide% of non-empty cells (server-side, so a
+/// modified client can't read the cells the spy didn't reveal — this is what
+/// makes the old unauthenticated spy request, D4, moot). Stable per position.
+fn degrade_board(mut grid: Vec<i32>, token: WeaponToken) -> Vec<i32> {
     let hide = spy_hide_pct(token);
     if hide == 0 {
-        return board;
+        return grid;
     }
-    let cells = board.len() / 4;
-    for i in 0..cells {
-        let base = i * 4;
-        if board[base] != 0 {
+    for (i, cell) in grid.iter_mut().enumerate() {
+        if *cell != -2 {
             let h = (i.wrapping_mul(2_654_435_761) >> 8) % 100;
             if (h as u32) < hide {
-                board[base..base + 4].copy_from_slice(&[0, 0, 0, 0]); // hide -> empty
+                *cell = -2; // hide -> empty
             }
         }
     }
-    board
+    grid
 }
 
 /// A server-hosted authoritative match between two clients.
@@ -220,18 +218,21 @@ impl Bout {
         self.versus.tick(dt_ms);
         self.tick += 1;
         for (i, side) in [Side::A, Side::B].into_iter().enumerate() {
-            if let Some(tok) = self.versus.take_spy_launch(side) {
-                let add = weapon_table()[tok.index()].duration as i32;
-                let cur = self.spy[i].map_or(0, |(_, r)| r);
-                self.spy[i] = Some((tok, cur + add)); // newest token, accumulated budget
-                self.opp_lines_seen[i] = self.versus.game(side.other()).score().lines;
-            }
+            let opp_lines = self.versus.game(side.other()).score().lines;
+            // 1. Charge the ACTIVE spy first, for the opponent's clears since last
+            //    seen (before any relaunch resets the baseline).
             if let Some((tok, rem)) = self.spy[i] {
-                let opp_lines = self.versus.game(side.other()).score().lines;
                 let delta = (opp_lines - self.opp_lines_seen[i]).max(0) as i32;
-                self.opp_lines_seen[i] = opp_lines;
                 let left = rem - delta;
                 self.spy[i] = if left > 0 { Some((tok, left)) } else { None };
+            }
+            self.opp_lines_seen[i] = opp_lines;
+            // 2. Then apply any new launches (each accumulates the budget; the
+            //    newest token sets the accuracy), counting from `opp_lines`.
+            for tok in self.versus.take_spy_launches(side) {
+                let add = weapon_table()[tok.index()].duration as i32;
+                let cur = self.spy[i].map_or(0, |(_, r)| r);
+                self.spy[i] = Some((tok, cur + add));
             }
         }
     }
@@ -277,7 +278,7 @@ impl Bout {
         let spy = self.spy[side_idx(side)];
         // The (degraded) opponent board rides the keyframe frames while spying.
         let spy_board = match (spy, include_keyframe) {
-            (Some((tok, _)), true) => Some(degrade_board(them.export_board(), tok)),
+            (Some((tok, _)), true) => Some(degrade_board(them.render_ids(), tok)),
             _ => None,
         };
 
@@ -431,7 +432,8 @@ mod tests {
         assert!(sa.spying, "A is spying after launching Ames");
         let board = sa.spy_board.expect("A gets the opponent board on a keyframe frame");
         let (w, h) = (b.versus.game(Side::B).board().width, b.versus.game(Side::B).board().height);
-        assert_eq!(board.len() as i32, w * h * 4, "a full (degraded) board grid");
+        assert_eq!(board.len() as i32, w * h, "a full (degraded) render-id grid (not quads)");
+        assert!(board.iter().any(|&id| id != -2), "and it shows some of the opponent's cells");
 
         // B is not spying and gets nothing; and a light frame carries no spy board.
         let sb = b.snapshot_for(Side::B, true);

@@ -640,6 +640,36 @@ impl Game {
     // The online layer has no shared engine, so these ship a board grid or
     // arsenal over the data channel. Each round-trips its export/import.
 
+    /// The playfield as a flat `width*height` grid of render ids (row-major),
+    /// with the falling piece overlaid; empty squares are `-2` (matching the
+    /// front-end's `EMPTY` sentinel / `WasmGame::render_grid`). This is the form
+    /// the canvas draws — used by the server's spy reveal (a degraded copy).
+    pub fn render_ids(&self) -> Vec<i32> {
+        let (w, h) = (self.board.width, self.board.height);
+        let mut grid = vec![-2i32; (w * h) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                if let Some(c) = self.board.get(x, y) {
+                    grid[(y * w + x) as usize] = c.id();
+                }
+            }
+        }
+        if let Some(p) = self.current.as_ref() {
+            for i in 0..BT_PIECE_WIDTH {
+                for j in 0..BT_PIECE_HEIGHT {
+                    if let Some(c) = p.cells[i][j] {
+                        let gx = p.x + i as i32;
+                        let gy = p.y + j as i32;
+                        if gx >= 0 && gx < w && gy >= 0 && gy < h {
+                            grid[(gy * w + gx) as usize] = c.id();
+                        }
+                    }
+                }
+            }
+        }
+        grid
+    }
+
     /// Encode the board grid as a flat `[tag,a,b,hidden]` quad per cell,
     /// row-major (`Cell::encode`). Used to send a board to the opponent for
     /// Swap (exchange) or a spy (display).
