@@ -774,6 +774,16 @@ impl Game {
         for v in self.export_board() {
             o.push(v as i64);
         }
+        // Board-level state beyond the cells: its own BTActive[] (consulted by
+        // FallOut/Bottle/Force/Upbyside mechanics in board.rs), the Upbyside flip,
+        // the computer-board flag, and the idiot bad-move latch.
+        for cnt in self.board.active.raw() {
+            o.push(cnt as i64);
+        }
+        o.push(self.board.upside as i64);
+        o.push(self.board.computer as i64);
+        o.push(self.board.idiot as i64);
+        o.push(self.board.reason as i64);
         o
     }
 
@@ -853,6 +863,16 @@ impl Game {
             let orientation = c.next() as i32;
             let orientations = c.next() as i32;
             let state = c.next() as i32;
+            // Reject implausible piece geometry before it can panic a later rotate
+            // (a corrupt keyframe; the server never produces these). rot is the
+            // rotation sub-square side: 0 (no rotate), 3, 4, or 8.
+            if !matches!(rot, 0 | 3 | 4 | 8)
+                || orientations <= 0
+                || orientation < 0
+                || orientation >= orientations
+            {
+                return false;
+            }
             let mut cells: [[Option<Cell>; BT_PIECE_HEIGHT]; BT_PIECE_WIDTH] =
                 [[None; BT_PIECE_HEIGHT]; BT_PIECE_WIDTH];
             for col in 0..BT_PIECE_WIDTH {
@@ -881,6 +901,14 @@ impl Game {
         for _ in 0..board_len {
             board_flat.push(c.next() as i32);
         }
+        let mut board_active = [0i32; BT_MAX_WEAPONS];
+        for a in board_active.iter_mut() {
+            *a = c.next() as i32;
+        }
+        let board_upside = c.next() != 0;
+        let board_computer = c.next() != 0;
+        let board_idiot = c.next() != 0;
+        let board_reason = c.next() as i16;
         // Reject a malformed (short) or trailing-garbage keyframe before committing.
         if !c.ok || c.i != data.len() {
             return false;
@@ -916,6 +944,11 @@ impl Game {
         self.remaining = remaining;
         self.import_arsenal(&arsenal_flat);
         self.import_board(&board_flat);
+        self.board.active.set_raw(board_active);
+        self.board.upside = board_upside;
+        self.board.computer = board_computer;
+        self.board.idiot = board_idiot;
+        self.board.reason = board_reason;
         self.current = current;
         self.pending = pending;
         self.events.clear();
@@ -1183,11 +1216,16 @@ mod tests {
         // engine and the two must stay bit-identical when driven the same way —
         // including the RNG-advancing weapon that naive board-snapping can't track.
         let mut a = Game::new(0x1234);
-        for i in 0..150 {
+        for i in 0..200 {
             match i {
-                40 => a.move_right(),
+                // Upbyside is a PERSISTENT board-active weapon: it flips the board
+                // (board.upside) and sets board.active[Upbyside]. If the keyframe
+                // omitted those, the restored game would fall the wrong way and
+                // diverge here. RiseUp adds a garbage row (RNG-advancing).
+                40 => a.receive_weapon(WeaponToken::Upbyside),
                 80 => a.begin_drop(),
                 110 => a.receive_weapon(WeaponToken::RiseUp),
+                150 => a.begin_drop(),
                 _ => {}
             }
             a.tick(16);
