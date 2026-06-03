@@ -738,12 +738,13 @@ body {
     /* Lobby stacks into one column on narrow screens */
     .lobby-card { flex-direction: column; }
 
-    /* The compact bars replace the desktop score/arsenal column — but keep
-       Ernie's board visible (vs-Computer) below the player's board. */
+    /* The compact bars replace the desktop score/arsenal column. Keep Ernie's
+       (vs-Computer) or the spy board visible — laid out SIDE BY SIDE with the
+       player's board (.two-boards below), so it doesn't push the weapon buttons
+       off-screen the way a stacked board did. */
     .game-right {
-        width: 100%;
+        width: auto;
         align-items: center;
-        margin-top: 6px;
         max-height: none;
         overflow: visible;
     }
@@ -753,18 +754,23 @@ body {
     .game-right > .game-buttons {
         display: none;
     }
-    /* Ernie's board: a smaller secondary view under the player's. */
-    #aiGridCanvas {
+    .ai-board-panel { width: auto; margin-top: 0; padding: 6px; }
+    .ai-board-wrapper { padding: 3px; }
+    .ai-label { font-size: 11px; margin-top: 0; margin-bottom: 4px; }
+
+    /* Two boards (vs-Computer / spy): side by side, both sized by height to fit. */
+    .game-area.two-boards {
+        flex-direction: row;
+        align-items: flex-start;
+        justify-content: center;
+        gap: 6px;
+    }
+    .game-area.two-boards .center-panel { width: auto; }
+    .game-area.two-boards #gameCanvas,
+    .game-area.two-boards #aiGridCanvas {
+        height: 46vh !important;
         width: auto !important;
-        height: 28vh !important;
-        max-width: 60vw;
-    }
-    .ai-board-panel {
-        width: auto;
-        margin-top: 0;
-    }
-    .ai-label {
-        font-size: 12px;
+        max-width: 47vw;
     }
 
     /* Center panel: full width, centered */

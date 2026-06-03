@@ -68,6 +68,7 @@ const modePracticeBtn = document.getElementById('modePractice');
 const playComputerBtn = document.getElementById('playComputerBtn');
 const findMatchBtn = document.getElementById('findMatchBtn');
 const aiBoard = document.getElementById('aiBoard');
+const gameAreaEl = document.querySelector('.game-area');
 const aiLabel = document.getElementById('aiLabel');
 const onlineStatus = document.getElementById('onlineStatus');
 
@@ -1135,6 +1136,11 @@ function gameLoop(now) {
     updateArsenalPanel();
     updateBazaarOverlay();
 
+    // When an opponent board is visible (vs-Computer Ernie, or an online spy),
+    // mark the game-area so the mobile layout puts the two boards side by side
+    // (instead of stacked, which buried the weapon buttons).
+    if (gameAreaEl) gameAreaEl.classList.toggle('two-boards', aiBoard.style.display === 'block');
+
     requestAnimationFrame(gameLoop);
 }
 
@@ -1323,6 +1329,8 @@ function setupTouchControls() {
     setupTouchButton('touchRotate', () => predict('Rotate'),    null);
     // Soft drop: tap = one cell; hold = fast controlled descent (35ms/cell).
     setupTouchButton('touchDrop',   () => predict('SoftDrop'),  35);
+    // Hard drop: slam to the bottom (the touch equivalent of Space). One-shot.
+    setupTouchButton('touchHardDrop', () => predict('BeginDrop'), null);
 }
 
 // Input handling
