@@ -64,6 +64,22 @@ impl Arsenal {
         }
     }
 
+    /// Set slot `index` directly to `token` × `qty`, preserving the exact slot
+    /// layout (used by Lazy Susan's restore, where rebuilding via `buy` would
+    /// compact holes and shift positions). `None`/`0` empties the slot.
+    pub fn set_slot(&mut self, index: usize, token: Option<WeaponToken>, qty: u16) {
+        if index >= BT_ARSENAL_SIZE {
+            return;
+        }
+        if token.is_none() || qty == 0 {
+            self.rep[index] = None;
+            self.quantity[index] = 0;
+        } else {
+            self.rep[index] = token;
+            self.quantity[index] = qty;
+        }
+    }
+
     pub fn token(&self, index: usize) -> Option<WeaponToken> {
         self.rep.get(index).copied().flatten()
     }

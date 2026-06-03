@@ -1,14 +1,11 @@
 //! Weapons layer 2 — interactions.
 //!
-//! The original's weapon "interaction matrix" (Swap clearing Bottle/Upbyside,
-//! Mirror nullifying nine weapons, Lazy Susan swapping arsenals) mostly hinges
-//! on Swap / Susan / Mirror — and those are NOT implemented in this port: the
-//! tokens are recognized and their active flag is set, but there is no
-//! board-swap, arsenal-swap, or reflect logic. That's a faithfulness gap, not
-//! something to pin as correct, so it's reported rather than tested here.
-//!
-//! What IS implemented and interacts is Lawyers' Delite, which keys off the
-//! opponent's line clears. This pins that.
+//! NOTE: Swap / Susan / Mirror ARE now implemented (engine + VsComputer relay
+//! in bt-ai/src/vs.rs, online in bt-wasm/www/main.js). Their interaction tests
+//! live with the relay logic (bt-ai/src/vs.rs `cross_player_tests`:
+//! swap-clears-Bottle/Upbyside, Mirror nullify-set/reflect). This file pins the
+//! one cross-player interaction that lives purely in bt-core: Lawyers' Delite,
+//! which keys off the opponent's line clears.
 
 use bt_core::game::GameEvent;
 use bt_core::weapons::WeaponToken;

@@ -647,19 +647,18 @@ impl Game {
         out
     }
 
-    /// Rebuild the arsenal from an `export_arsenal` encoding.
+    /// Rebuild the arsenal from an `export_arsenal` encoding. Sets each slot
+    /// directly so the exact layout (including holes) is preserved, and clamps
+    /// quantities so a malformed/hostile peer message can't hang or overflow.
     pub fn import_arsenal(&mut self, data: &[i32]) {
         if data.len() != 20 {
             return;
         }
         let mut a = Arsenal::new();
         for slot in 0..10 {
-            let qty = data[slot * 2 + 1];
-            if let Some(t) = WeaponToken::from_index(data[slot * 2]) {
-                for _ in 0..qty {
-                    a.buy(t);
-                }
-            }
+            let token = WeaponToken::from_index(data[slot * 2]);
+            let qty = data[slot * 2 + 1].clamp(0, u16::MAX as i32) as u16;
+            a.set_slot(slot, token, qty);
         }
         self.arsenal = a;
     }

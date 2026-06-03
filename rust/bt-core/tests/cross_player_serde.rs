@@ -53,3 +53,44 @@ fn arsenal_round_trips_through_export_import() {
     assert_eq!(b.arsenal_token(1), WeaponToken::Blind.index() as i32);
     assert_eq!(b.arsenal_quantity(1), 1);
 }
+
+/// Slot positions (including a hole) are preserved across import — rebuilding
+/// via `buy` used to compact holes and shift later weapons up a slot.
+#[test]
+fn arsenal_import_preserves_slot_positions() {
+    let mut data = vec![0i32; 20];
+    for i in 0..10 {
+        data[i * 2] = -1; // empty
+    }
+    data[0] = WeaponToken::RiseUp.index() as i32; // slot 0
+    data[1] = 2;
+    // slot 1 is a hole
+    data[4] = WeaponToken::Gimp.index() as i32; // slot 2
+    data[5] = 3;
+
+    let mut g = Game::new(1);
+    g.import_arsenal(&data);
+
+    assert_eq!(g.arsenal_token(0), WeaponToken::RiseUp.index() as i32);
+    assert_eq!(g.arsenal_quantity(0), 2);
+    assert_eq!(g.arsenal_token(1), -1, "the hole at slot 1 is preserved");
+    assert_eq!(g.arsenal_token(2), WeaponToken::Gimp.index() as i32, "Gimp stays at slot 2");
+    assert_eq!(g.arsenal_quantity(2), 3);
+}
+
+/// A hostile peer quantity is clamped, not looped — no hang, no overflow.
+#[test]
+fn arsenal_import_clamps_hostile_quantity() {
+    let mut data = vec![0i32; 20];
+    for i in 0..10 {
+        data[i * 2] = -1;
+    }
+    data[0] = WeaponToken::RiseUp.index() as i32;
+    data[1] = i32::MAX;
+
+    let mut g = Game::new(1);
+    g.import_arsenal(&data); // must return promptly
+
+    assert_eq!(g.arsenal_token(0), WeaponToken::RiseUp.index() as i32);
+    assert_eq!(g.arsenal_quantity(0), u16::MAX, "clamped to u16::MAX");
+}
