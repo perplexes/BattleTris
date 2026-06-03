@@ -1,5 +1,6 @@
 import init, { WasmGame, WasmVsComputer, fixed_dt, max_weapons, weapon_name, weapon_description, weapon_price, weapon_duration } from '../pkg/bt_wasm.js';
 import { CELL_SIZE, drawBoard } from './render.js';
+import { Sound } from './sound.js';
 
 // Game state
 let game = null;
@@ -691,6 +692,22 @@ function processEvents() {
         const b = events[i + 2];
         const c = events[i + 3];
 
+        // Audio for the local player's events (synthesized in sound.js).
+        if (tag === 0) {
+            // Locked: a = lines cleared (0 = just a lock).
+            if (a > 0) Sound.clear(a); else Sound.lock();
+        } else if (tag === 1) {
+            Sound.weapon();
+        } else if (tag === 3) {
+            Sound.bazaar();
+        } else if (tag === 5) {
+            Sound.gameOver();
+        } else if (tag === 6) {
+            // Idiot: a = reason (1 = near death, 2 = missed smiley).
+            if (a === 1) Sound.nearDeath();
+            else if (a === 2) Sound.missedSmiley();
+        }
+
         if (tag === 1) {
             // WeaponLaunched: relay to opponent
             if (mode === 'vsplayer' && broadcastChannel && !gameEnded) {
@@ -944,6 +961,7 @@ function setupTouchButton(btnId, action, repeatInterval) {
     function fireAction() {
         if (!game || gameEnded || game.is_game_over() || game.is_in_bazaar()) return;
         if (mode === 'online' && onlinePaused) return;
+        Sound.resume(); // touch is the gesture that unlocks Web Audio
         markActive();
         action();
     }
@@ -1002,6 +1020,9 @@ function setupTouchControls() {
 // Input handling
 function handleKeyDown(e) {
     if (!game) return;
+
+    // First keypress is the user gesture that unlocks Web Audio.
+    Sound.resume();
 
     // In online mode, don't accept input until connected
     if (mode === 'online' && onlinePaused) return;
@@ -1117,6 +1138,21 @@ const bugStatus = document.getElementById('bugStatus');
 const bugSubmit = document.getElementById('bugSubmit');
 const bugCancel = document.getElementById('bugCancel');
 const reportBugBtn = document.getElementById('reportBug');
+
+// Sound on/off toggle (persisted). Default on.
+const soundToggleBtn = document.getElementById('soundToggle');
+if (soundToggleBtn) {
+    const savedMute = localStorage.getItem('bt_muted') === '1';
+    Sound.setMuted(savedMute);
+    soundToggleBtn.textContent = savedMute ? 'Sound: Off' : 'Sound: On';
+    soundToggleBtn.addEventListener('click', () => {
+        const muted = !Sound.isMuted();
+        Sound.setMuted(muted);
+        Sound.resume();
+        localStorage.setItem('bt_muted', muted ? '1' : '0');
+        soundToggleBtn.textContent = muted ? 'Sound: Off' : 'Sound: On';
+    });
+}
 
 // Replay snapshot taken when the modal opens - the "bug moment" - so it isn't
 // affected by play continuing while the user types.
