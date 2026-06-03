@@ -963,6 +963,19 @@ impl Game {
         self.snapshot().iter().flat_map(|v| v.to_le_bytes()).collect()
     }
 
+    /// The keyframe as a CLIENT is allowed to see it: identical to
+    /// [`Self::snapshot_bytes`] except `op_funds` (this player's mirror of the
+    /// opponent's funds) is zeroed. Funds are spy-revealed in the original, so
+    /// the authoritative server must not leak the opponent's funds to a client
+    /// through the reconciliation keyframe. `op_funds` is display-only — the
+    /// client's simulation never reads it — so zeroing it is harmless to
+    /// reconciliation (a restored client just shows 0 until a spy reveals it).
+    pub fn client_keyframe_bytes(&self) -> Vec<u8> {
+        let mut g = self.clone();
+        g.score.op_funds = 0;
+        g.snapshot_bytes()
+    }
+
     /// Restore from a [`Self::snapshot_bytes`] buffer. False if the length isn't
     /// a multiple of 8 or the keyframe is malformed (see [`Self::restore`]).
     pub fn restore_bytes(&mut self, bytes: &[u8]) -> bool {

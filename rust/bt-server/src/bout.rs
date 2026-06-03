@@ -76,6 +76,18 @@ fn is_bazaar_input(input: &Input) -> bool {
     )
 }
 
+/// The slim per-frame view of a player's OWN status that local prediction can't
+/// derive between keyframes: `funds` (changed by an opponent's Mondale/Keating)
+/// and the bazaar barrier (entry depends on COMBINED lines, so a client can't
+/// foresee it). The board/score/lines come from local prediction + the periodic
+/// keyframe; these three keep the HUD and the bazaar overlay prompt.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct SelfStatus {
+    pub funds: i64,
+    pub in_bazaar: bool,
+    pub lines_til_bazaar: i32,
+}
+
 /// What a player is allowed to see about their OPPONENT by default — only
 /// score/lines for the opponent panel. NOT the board and NOT funds: in the
 /// original those are revealed only by a spy (Ames "displays your opponent's
@@ -100,9 +112,11 @@ pub struct Snapshot {
     pub ack: u64,
     /// 0 = ongoing, 1 = this client won, 2 = this client lost.
     pub result: i32,
+    /// Prompt own-state the client can't predict between keyframes.
+    pub you: SelfStatus,
     pub opp: OppView,
-    /// Full-state reconciliation keyframe (bytes), present only on the throttled
-    /// keyframe frames; omitted from the JSON otherwise.
+    /// Full-state reconciliation keyframe (bytes, op_funds redacted), present
+    /// only on the throttled keyframe frames; omitted from the JSON otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keyframe: Option<Vec<u8>>,
 }
@@ -198,12 +212,18 @@ impl Bout {
             tick: self.tick,
             ack: self.ack[side_idx(side)],
             result,
+            you: SelfStatus {
+                funds: me.score().funds,
+                in_bazaar: me.is_in_bazaar(),
+                lines_til_bazaar: me.lines_til_bazaar(),
+            },
             opp: OppView {
                 score: them.score().score,
                 lines: them.score().lines,
                 game_over: them.is_game_over(),
             },
-            keyframe: include_keyframe.then(|| me.snapshot_bytes()),
+            // op_funds-redacted: a client must not learn the opponent's funds.
+            keyframe: include_keyframe.then(|| me.client_keyframe_bytes()),
         }
     }
 }
@@ -264,6 +284,8 @@ mod tests {
         assert!(light.keyframe.is_none(), "the default frame is light (no keyframe)");
         assert_eq!(light.result, 0, "ongoing");
         assert_eq!(light.opp.score, 0, "opponent starts at 0");
+        assert_eq!(light.you.funds, 0, "own status present every frame");
+        assert!(!light.you.in_bazaar);
 
         let full = b.snapshot_for(Side::A, true);
         let kf = full.keyframe.expect("keyframe present on request");
@@ -271,6 +293,20 @@ mod tests {
         // It's a real full-state keyframe: it restores into a fresh engine.
         let mut g = bt_core::Game::new(999);
         assert!(g.restore_bytes(&kf), "the keyframe restores a full game");
+    }
+
+    #[test]
+    fn client_keyframe_redacts_opponent_funds_but_keeps_op_lines() {
+        let mut b = Bout::new(1, 2);
+        // The server forwards B's score into A's mirror (op_score/op_lines/op_funds).
+        b.versus.game_mut(Side::A).receive_op_score(50, 3, 777);
+        assert_eq!(b.versus.game(Side::A).score().op_funds, 777, "mirrored internally");
+
+        let kf = b.snapshot_for(Side::A, true).keyframe.unwrap();
+        let mut g = bt_core::Game::new(0);
+        assert!(g.restore_bytes(&kf));
+        assert_eq!(g.score().op_funds, 0, "the client keyframe must NOT leak opponent funds");
+        assert_eq!(g.score().op_lines, 3, "but op_lines (drives the bazaar) is preserved");
     }
 
     #[test]
