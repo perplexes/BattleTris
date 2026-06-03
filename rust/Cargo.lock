@@ -136,10 +136,12 @@ name = "bt-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "bt-core",
  "bt-replay",
  "bt-trueskill",
  "futures-util",
  "rusqlite",
+ "serde",
  "serde_json",
  "tokio",
  "tower-http",

@@ -43,6 +43,9 @@ use serde_json::{json, Value};
 use tokio::sync::{mpsc, Mutex};
 use tower_http::services::ServeDir;
 
+/// Server-authoritative online match engine (the client-server migration).
+mod bout;
+
 /// Matchmaking/relay state (tokio mutex — held across `.await`).
 type Shared = Arc<Mutex<App>>;
 /// The replay index/store. `rusqlite::Connection` is `Send` but not `Sync`, so a
