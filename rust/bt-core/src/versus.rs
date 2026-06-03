@@ -164,7 +164,10 @@ impl Versus {
                     self.b.receive_op_score(score, lines, funds)
                 }
                 GameEvent::FundsStolen(amount) => self.b.add_funds(amount),
-                GameEvent::GameOver => self.result = 2, // A topped out → B wins
+                // A topped out → B wins. Latch: a simultaneous double-KO keeps the
+                // first result (whoever's GameOver this relay pass saw first),
+                // rather than letting the second event overwrite it.
+                GameEvent::GameOver if self.result == 0 => self.result = 2,
                 _ => {}
             }
         }
@@ -175,7 +178,7 @@ impl Versus {
                     self.a.receive_op_score(score, lines, funds)
                 }
                 GameEvent::FundsStolen(amount) => self.a.add_funds(amount),
-                GameEvent::GameOver => self.result = 1, // B topped out → A wins
+                GameEvent::GameOver if self.result == 0 => self.result = 1, // B topped out → A wins
                 _ => {}
             }
         }

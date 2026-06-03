@@ -45,6 +45,11 @@ fn side_idx(side: Side) -> usize {
 /// applies cross-player effects, and letting a client send them would let it
 /// grant itself weapons or funds. Rejecting them is the heart of the
 /// authoritative model's anti-cheat.
+///
+/// `SetPaused` is also rejected: a client-controlled pause would freeze only
+/// that side's authoritative board while the opponent keeps ticking (a grief /
+/// stall exploit). A faithful *synchronized* match-pause (the original's
+/// `BT_PAUSE`) is server-owned and a later feature, not a client input.
 pub fn is_legal_client_input(input: &Input) -> bool {
     matches!(
         input,
@@ -57,14 +62,30 @@ pub fn is_legal_client_input(input: &Input) -> bool {
             | Input::BuyWeapon(_)
             | Input::SellWeapon(_)
             | Input::LeaveBazaar
-            | Input::SetPaused(_)
     )
 }
 
-/// The authoritative view of one player's own board — everything they're allowed
-/// to see about themselves, enough for the client to reconcile its prediction.
-/// `board`/`arsenal` use the engine's flat i32 codec (`export_board`/
-/// `export_arsenal`), the same one the old P2P Swap/Susan relay used.
+/// Inputs allowed while a side is in the weapons bazaar. The match is frozen for
+/// the synchronized bazaar (neither board ticks), so only shopping actions are
+/// permitted — movement/rotate/drop/launch are inert until the player leaves.
+/// `Game` already blocks drops in the bazaar, but not movement/rotate/launch, so
+/// the server gates them here (otherwise a direct client could nudge its frozen
+/// piece or fire weapons mid-shop).
+fn is_bazaar_input(input: &Input) -> bool {
+    matches!(
+        input,
+        Input::BuyWeapon(_) | Input::SellWeapon(_) | Input::LeaveBazaar
+    )
+}
+
+/// The authoritative RENDER view of a player's own board: enough to draw their
+/// side and show a divergence, using the engine's flat i32 codec
+/// (`export_board`/`export_arsenal`, the same one the old P2P Swap/Susan relay
+/// used). NOTE: this is NOT a full reconciliation keyframe — `export_board`
+/// omits the falling piece, phase/timers, RNG + piece-manager state, and the
+/// active-weapon flags/durations + pending queue. Phase 4 (client prediction)
+/// needs a complete `Game` keyframe (a serialize/restore of the whole engine
+/// state) to re-sim unacked inputs on top of; this struct is the display view.
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct SelfView {
     pub board: Vec<i32>,
@@ -77,15 +98,16 @@ pub struct SelfView {
     pub game_over: bool,
 }
 
-/// What a player is allowed to see about their OPPONENT — score/lines/funds for
-/// the opponent panel, but NOT the board (that's only revealed by a spy, which
-/// the server will enforce as an authorized field — making the old
-/// unauthenticated spyRequest, D4, moot).
+/// What a player is allowed to see about their OPPONENT by default — only
+/// score/lines for the opponent panel. NOT the board and NOT funds: in the
+/// original those are revealed only by a spy (Ames "displays your opponent's
+/// screen and your opponent's funds"). The spy will be a server-authorized
+/// extension to this view — which is what makes the old unauthenticated
+/// spyRequest (D4) moot.
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct OppView {
     pub score: i64,
     pub lines: i64,
-    pub funds: i64,
     pub game_over: bool,
 }
 
@@ -122,15 +144,24 @@ impl Bout {
     }
 
     /// Apply a client's input to its side of the authoritative match. Returns
-    /// false (and does nothing) if the input is illegal for a client to send —
-    /// the caller should treat that as a protocol violation. `seq` is recorded
-    /// as the client's latest acknowledged input for reconciliation.
+    /// false (and does nothing) if the input is rejected:
+    ///   * not a legal client action ([`is_legal_client_input`] — anti-cheat),
+    ///   * stale / replayed (`seq` not strictly greater than the last applied —
+    ///     so a malicious/buggy client can't re-apply old inputs or rewind `ack`),
+    ///   * a non-shopping action while this side is in the bazaar (the match is
+    ///     frozen — only [`is_bazaar_input`] is allowed).
+    /// On success `seq` becomes this side's `ack` for client reconciliation.
     pub fn apply_input(&mut self, side: Side, input: &Input, seq: u64) -> bool {
-        if !is_legal_client_input(input) {
+        let idx = side_idx(side);
+        if !is_legal_client_input(input) || seq <= self.ack[idx] {
             return false;
         }
-        input.apply_to_game(self.versus.game_mut(side));
-        self.ack[side_idx(side)] = seq;
+        let g = self.versus.game_mut(side);
+        if g.is_in_bazaar() && !is_bazaar_input(input) {
+            return false;
+        }
+        input.apply_to_game(g);
+        self.ack[idx] = seq;
         true
     }
 
@@ -184,7 +215,6 @@ impl Bout {
             opp: OppView {
                 score: them.score().score,
                 lines: them.score().lines,
-                funds: them.score().funds,
                 game_over: them.is_game_over(),
             },
         }
@@ -203,11 +233,18 @@ mod tests {
         assert!(!is_legal_client_input(&Input::AddFunds(9999)));
         assert!(!is_legal_client_input(&Input::AiDrop));
         assert!(!is_legal_client_input(&Input::ReceiveOpScore { score: 1, lines: 1, funds: 1 }));
+        // A client-controlled pause is rejected (it would freeze only one board).
+        assert!(!is_legal_client_input(&Input::SetPaused(true)));
         // Legal player actions pass.
         assert!(is_legal_client_input(&Input::MoveLeft));
         assert!(is_legal_client_input(&Input::LaunchWeapon(3)));
         assert!(is_legal_client_input(&Input::BuyWeapon(7)));
         assert!(is_legal_client_input(&Input::LeaveBazaar));
+        // Only shopping actions are bazaar-legal.
+        assert!(is_bazaar_input(&Input::BuyWeapon(0)));
+        assert!(is_bazaar_input(&Input::LeaveBazaar));
+        assert!(!is_bazaar_input(&Input::MoveLeft));
+        assert!(!is_bazaar_input(&Input::LaunchWeapon(0)));
     }
 
     #[test]
@@ -219,6 +256,18 @@ mod tests {
         assert!(b.apply_input(Side::A, &Input::MoveLeft, 5), "legal move accepted");
         assert_eq!(b.snapshot_for(Side::A).ack, 5, "ack advanced to the applied seq");
         assert_eq!(b.snapshot_for(Side::B).ack, 0, "the other side's ack is independent");
+    }
+
+    #[test]
+    fn apply_input_rejects_stale_and_out_of_order_seqs() {
+        let mut b = Bout::new(1, 2);
+        assert!(b.apply_input(Side::A, &Input::MoveLeft, 5));
+        // A replay of the same seq, or any seq <= ack, is rejected and ack holds.
+        assert!(!b.apply_input(Side::A, &Input::MoveRight, 5), "duplicate seq rejected");
+        assert!(!b.apply_input(Side::A, &Input::MoveRight, 3), "older seq rejected");
+        assert_eq!(b.snapshot_for(Side::A).ack, 5, "ack never moves backward");
+        assert!(b.apply_input(Side::A, &Input::MoveRight, 6), "the next seq advances");
+        assert_eq!(b.snapshot_for(Side::A).ack, 6);
     }
 
     #[test]
@@ -243,9 +292,12 @@ mod tests {
         b.versus.game_mut(Side::A).grant_weapon(bt_core::WeaponToken::RiseUp);
         assert!(b.apply_input(Side::A, &Input::LaunchWeapon(0), 1));
         // Tick the authoritative match; then drive B down to flush the weapon.
+        // Each input needs a strictly-increasing seq (the monotonicity gate).
         b.tick(16);
+        let mut seq = 0u64;
         for _ in 0..400 {
-            b.apply_input(Side::B, &Input::BeginDrop, 1);
+            seq += 1;
+            b.apply_input(Side::B, &Input::BeginDrop, seq);
             b.tick(16);
             let board = b.snapshot_for(Side::B).you.board;
             // Count non-empty cells (tag != 0 in each quad).
