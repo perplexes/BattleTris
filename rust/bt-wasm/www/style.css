@@ -23,7 +23,7 @@
 }
 
 body {
-    font-family: Helvetica, 'Helvetica Neue', Arial, sans-serif;
+    font-family: Helvetica;
     background-color: #bfbfbf;
     padding: 12px 20px;
 }
@@ -178,7 +178,7 @@ body {
     display: flex;
     justify-content: space-between;
     align-items: baseline;
-    font-family: 'lucidatypewriter', 'Luxi Mono', Menlo, monospace;
+    font-family: 'lucidatypewriter';
     font-weight: bold;
     color: #0000ff;                            /* blue */
     font-size: 17px;
@@ -189,7 +189,7 @@ body {
 .score-gap { height: 12px; }
 
 .playing-status {
-    font-family: 'lucidatypewriter', 'Luxi Mono', Menlo, monospace;
+    font-family: 'lucidatypewriter';
     font-weight: bold;
     font-size: 14px;
     color: #222;
@@ -345,7 +345,7 @@ body {
     width: 100%;
     text-align: left;
     padding: 4px 8px;
-    font-family: 'lucidatypewriter', 'Luxi Mono', Menlo, monospace;
+    font-family: 'lucidatypewriter';
     font-size: 11px;
     color: #000000;
     background-color: #cfcfcf;
@@ -492,7 +492,7 @@ body {
 }
 
 .bazaar-col-header {
-    font-family: 'lucidatypewriter', 'Luxi Mono', Menlo, monospace;
+    font-family: 'lucidatypewriter';
     font-weight: bold;
     font-size: 11px;
     color: #000;
@@ -516,7 +516,7 @@ body {
 
 .bazaar-weapon-row {
     padding: 7px 8px;
-    font-family: 'lucidatypewriter', 'Luxi Mono', Menlo, monospace;
+    font-family: 'lucidatypewriter';
     font-size: 12px;
     color: #000;
     cursor: pointer;
@@ -540,7 +540,7 @@ body {
 
 /* Middle column elements */
 .bazaar-funds-display {
-    font-family: 'lucidatypewriter', 'Luxi Mono', Menlo, monospace;
+    font-family: 'lucidatypewriter';
     font-weight: bold;
     color: #0000ff;
     font-size: 14px;
@@ -624,7 +624,7 @@ body {
     border: 2px solid #808080;
     border-top-color: #000000; border-left-color: #000000;
     border-bottom-color: #ffffff; border-right-color: #ffffff;
-    font-family: 'lucidatypewriter', 'Luxi Mono', Menlo, monospace;
+    font-family: 'lucidatypewriter';
     font-size: 13px;
     min-height: 62px;
     flex-shrink: 0;
@@ -653,7 +653,7 @@ body {
 .bazaar-arsenal-list {
     flex: 1;
     overflow-y: auto;
-    font-family: 'lucidatypewriter', 'Luxi Mono', Menlo, monospace;
+    font-family: 'lucidatypewriter';
     font-size: 11px;
     background-color: #e8e8e8;
     border: 2px inset #808080;
@@ -814,7 +814,7 @@ body {
         border-left-color: #fff;
         border-top-color: #fff;
         font-size: 11px;
-        font-family: monospace;
+        font-family: 'lucidatypewriter';
         text-align: center;
         line-height: 1.3;
         color: #333;
@@ -1164,7 +1164,7 @@ body {
 }
 
 .replay-tick {
-    font-family: monospace;
+    font-family: 'lucidatypewriter';
     font-size: 13px;
     color: #222;
     min-width: 90px;
@@ -1178,7 +1178,7 @@ body {
 }
 
 .replay-meta {
-    font-family: monospace;
+    font-family: 'lucidatypewriter';
     font-size: 12px;
     color: #444;
     text-align: center;
@@ -1267,7 +1267,7 @@ body {
 }
 
 .library-stat {
-    font-family: monospace;
+    font-family: 'lucidatypewriter';
     font-size: 12px;
     color: #555;
 }
@@ -1325,14 +1325,14 @@ body {
 
 .leaderboard-elo {
     margin-left: auto;
-    font-family: monospace;
+    font-family: 'lucidatypewriter';
     font-size: 16px;
     font-weight: bold;
     color: #044;
 }
 
 .leaderboard-stat {
-    font-family: monospace;
+    font-family: 'lucidatypewriter';
     font-size: 12px;
     color: #555;
 }
@@ -1394,7 +1394,7 @@ body {
     display: inline-block;
     min-width: 14px;
     padding: 1px 0;
-    font-family: 'lucidatypewriter', 'Luxi Mono', Menlo, monospace;
+    font-family: 'lucidatypewriter';
     font-size: 18px;
     font-weight: bold;
     text-align: center;
@@ -1455,7 +1455,7 @@ body {
 }
 .lobby-list {
     flex: 1; overflow-y: auto;
-    font-family: 'lucidatypewriter', 'Luxi Mono', Menlo, monospace; font-size: 13px;
+    font-family: 'lucidatypewriter'; font-size: 13px;
     color: #cd0000;                            /* red3 */
 }
 .lobby-list-row {
@@ -1503,7 +1503,7 @@ body {
 }
 .lobby-stats {
     margin: 0;
-    font-family: 'lucidatypewriter', 'Luxi Mono', Menlo, monospace;
+    font-family: 'lucidatypewriter';
     font-size: 13px;
     color: #cd0000;                            /* red3 */
     white-space: pre-wrap;
