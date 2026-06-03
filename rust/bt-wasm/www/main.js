@@ -64,18 +64,227 @@ const bazaarInfoDesc = document.getElementById('bazaarInfoDesc');
 const arsenalList = document.getElementById('arsenalList');
 const opponentScore = document.getElementById('opponentScore');
 const opponentLines = document.getElementById('opponentLines');
-// Legacy element reference kept for backward compat (element hidden in HTML)
-const bazaarList = document.getElementById('bazaarList');
 const modePracticeBtn = document.getElementById('modePractice');
-const modeVsComputerBtn = document.getElementById('modeVsComputer');
-const modeOnlineBtn = document.getElementById('modeOnline');
+const playComputerBtn = document.getElementById('playComputerBtn');
+const findMatchBtn = document.getElementById('findMatchBtn');
 const aiBoard = document.getElementById('aiBoard');
 const aiLabel = document.getElementById('aiLabel');
 const onlineStatus = document.getElementById('onlineStatus');
+
+// Two-screen views (lobby <-> playfield) — like the original window swapping the
+// BTChallenge and BTGame forms (BTStartup.C). Only one is visible at a time.
+const lobbyScreen = document.getElementById('lobbyScreen');
+const gameScreen = document.getElementById('gameScreen');
+const onlineListEl = document.getElementById('onlineList');
+const challengeBtn = document.getElementById('challengeBtn');
+const updateBtn = document.getElementById('updateBtn');
+const availableToggle = document.getElementById('availableToggle');
+const statsPanelEl = document.getElementById('statsPanel');
+const playingStatusEl = document.getElementById('playingStatus');
+const ernieSlider = document.getElementById('ernieSlider');
+
+// Ernie difficulty names (the original slider's labels), index = level 0..14.
+const ERNIE_NAMES = ['Comatose', 'Somnambulant', 'Lethargic', 'Pensive', 'Able',
+    'Willing', 'Focused', 'Lively', 'Energetic', 'Pepped-up', 'Caffeinated',
+    'Bug-eyed', 'Supercharged', 'Hell-Bent', 'Bionic'];
+
+// lobbyActive gates the game loop: while the lobby is showing there is no game to
+// tick or render. Starts true (the app opens on the lobby, like BTStartup).
+let lobbyActive = true;
+
+function showGame() {
+    lobbyActive = false;
+    lobbyScreen.style.display = 'none';
+    gameScreen.style.display = '';
+    applyBoardScale();
+}
+
+function showLobby() {
+    lobbyActive = true;
+    gameScreen.style.display = 'none';
+    lobbyScreen.style.display = '';
+}
+
+// The Play Computer button reads "Play <Level> Ernie" off the difficulty slider
+// (BTChallenge.C: "Play %s Ernie").
+function updatePlayComputerLabel() {
+    if (!playComputerBtn || !ernieSlider) return;
+    const lvl = parseInt(ernieSlider.value, 10) || 0;
+    playComputerBtn.textContent = `Play ${ERNIE_NAMES[lvl] || lvl} Ernie`;
+}
+
+// "Playing X" status line under the score box (BTGame shows the opponent name).
+function setPlayingStatus() {
+    if (!playingStatusEl) return;
+    if (mode === 'vscomputer') {
+        const lvl = ernieSlider ? (parseInt(ernieSlider.value, 10) || 0) : 5;
+        playingStatusEl.textContent = `Playing Ernie (${ERNIE_NAMES[lvl] || lvl})`;
+    } else if (mode === 'online' && onlineOpponentName) {
+        playingStatusEl.textContent = `Playing ${onlineOpponentName}`;
+    } else {
+        playingStatusEl.textContent = 'Practice';
+    }
+}
+
+// ─── Lobby presence + challenge (server wiring lands in Phases 3-4) ──────────
+// Selected player in the online list (null = none). Drives the Challenge button
+// and the stats panel.
+let selectedPlayer = null;
+let lobbyPlayers = [];
+
+// Render the online players list. Each row selects the player (loads their stats
+// + enables Challenge). Populated from the server's `players` push; empty until
+// presence tracking lands.
+function renderOnlineList(players) {
+    lobbyPlayers = players || [];
+    if (!onlineListEl) return;
+    if (!lobbyPlayers.length) {
+        onlineListEl.innerHTML = '<div class="lobby-list-empty">No one\'s around. Go "Open to matches" and wait, or Play Computer.</div>';
+        return;
+    }
+    onlineListEl.innerHTML = '';
+    for (const p of lobbyPlayers) {
+        const row = document.createElement('div');
+        row.className = 'lobby-list-row' + (p.name === selectedPlayer ? ' selected' : '');
+        row.innerHTML = `<span class="ll-name">${escapeHtml(p.name)}</span><span class="ll-status">${escapeHtml(p.status || '')}</span>`;
+        row.addEventListener('click', () => selectPlayer(p.name));
+        onlineListEl.appendChild(row);
+    }
+}
+
+function selectPlayer(name) {
+    selectedPlayer = name;
+    if (challengeBtn) challengeBtn.disabled = !name;
+    renderOnlineList(lobbyPlayers);
+    loadPlayerStats(name);
+}
+
+// The roster is pushed by the server whenever it changes, so "Update" just
+// re-renders the latest list (and reconnects if the socket dropped). It must NOT
+// re-send `watch` — that bumps the visitor counter.
+function requestPlayerList() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) { connectLobby(); return; }
+    renderOnlineList(lobbyPlayers);
+}
+
+// Challenge the selected player (directed). Needs a signed identity first.
+async function challengeSelected() {
+    if (!selectedPlayer) return;
+    await ensureIdentity();
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'challenge', target: selectedPlayer, name: playerName, token: identityToken }));
+        setOnlineStatus(`Challenging ${selectedPlayer}…`);
+        if (onlineStatus) onlineStatus.style.display = 'block';
+    }
+}
+
+// Open-to-matches: become challengeable AND eligible for auto-pairing.
+async function setAvailable(v) {
+    if (v) await ensureIdentity();
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'available', value: v, name: playerName, token: identityToken }));
+    }
+}
+
+// An incoming challenge invite (server -> us).
+let pendingChallenger = null;
+const challengeOverlay = document.getElementById('challengeOverlay');
+function onChallenged(from) {
+    pendingChallenger = from;
+    const t = document.getElementById('challengeText');
+    if (t) t.textContent = `${from} challenges you!`;
+    if (challengeOverlay) challengeOverlay.classList.add('open');
+}
+function respondChallenge(accept) {
+    if (challengeOverlay) challengeOverlay.classList.remove('open');
+    if (!pendingChallenger) return;
+    const from = pendingChallenger;
+    pendingChallenger = null;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: accept ? 'challengeAccept' : 'challengeDecline', from }));
+    }
+    if (accept) { setOnlineStatus(`Accepting ${from}…`); if (onlineStatus) onlineStatus.style.display = 'block'; }
+}
+async function loadPlayerStats(name) {
+    if (!statsPanelEl || !name) return;
+    statsPanelEl.textContent = 'Loading ' + name + '…';
+    try {
+        const res = await fetch('/api/player/' + encodeURIComponent(name));
+        if (!res.ok) throw new Error(String(res.status));
+        statsPanelEl.textContent = formatPlayerStats(await res.json());
+    } catch (_) {
+        // /api/player lands in Phase 4; until then show what we know.
+        statsPanelEl.textContent = `      Name: ${name}\n      Rank: —\n      Wins: —\n    Losses: —`;
+    }
+}
+
+// Render the stats panel in the original's right-aligned-label monospace style
+// (BTPlayer::formatInfo).
+function formatPlayerStats(p) {
+    const row = (label, val) => label.padStart(14) + ': ' + val;
+    return [
+        row('Name', p.name ?? '—'),
+        row('Rank', p.elo ?? '—'),
+        row('Wins', p.wins ?? '—'),
+        row('Losses', p.losses ?? '—'),
+        row('Highest score', p.high_score ?? '—'),
+        row('Highest lines', p.high_lines ?? '—'),
+        row('Highest funds', p.high_funds ?? '—'),
+        row('Streak', (p.streak ?? '—') + (p.streak_type ? ' ' + p.streak_type : '')),
+        row('Fastest kill', p.fastest_kill ?? 'None'),
+        row('Quickest death', p.quickest_death ?? 'None'),
+        row('Longest game', p.longest_game ?? 'None'),
+        '',
+        'Nickname: ' + (p.name ?? 'none'),
+    ].join('\n');
+}
+
+function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// ─── Board display scale ──────────────────────────────────────────────────
+// On the playfield the board dominates the window height — in the original the
+// board drawing area fills the 670x700 window (BTGame.C). We scale the native
+// 230x644 well UP to fill the available viewport height, capped so it never gets
+// absurd on huge displays. Recomputed on resize. (The lobby owns the page chrome
+// and the visitor counter now, so the board no longer has to share that space.)
+const BOARD_MAX_SCALE = 2.2;        // generous cap for big displays
+const BOARD_MIN_SCALE = 0.6;        // keep it playable on short viewports
+const BOARD_MARGIN_Y = 28;          // breathing room above + below the board
+const AI_SCALE_RATIO = 0.55;        // vs-Computer side board, a smaller secondary view
+
+// Scale that makes the board fill the viewport height (minus margins + the
+// wrapper's own chrome). Uses innerHeight, not a live rect, so it's correct even
+// while the game screen is momentarily hidden.
+function boardDisplayScale(bufHeightPx) {
+    const wrapChromeY = 26;            // wrapper padding (10*2) + border (3*2)
+    const avail = window.innerHeight - BOARD_MARGIN_Y * 2 - wrapChromeY;
+    const scale = avail / bufHeightPx;
+    return Math.max(BOARD_MIN_SCALE, Math.min(BOARD_MAX_SCALE, scale));
+}
+
+// Apply the fitted scale to the board (and the vs-Computer side board). Touches
+// only CSS size, not the backing buffer, so it's cheap to call on every resize.
+function applyBoardScale() {
+    if (!game) return;
+    const width = game.width();
+    const height = game.height();
+    const scale = boardDisplayScale(height * CELL_SIZE);
+    canvas.style.width = (width * CELL_SIZE * scale) + 'px';
+    canvas.style.height = (height * CELL_SIZE * scale) + 'px';
+    if (aiBoard.style.display !== 'none') {
+        const aiScale = scale * AI_SCALE_RATIO;
+        aiGridCanvas.style.width = (width * CELL_SIZE * aiScale) + 'px';
+        aiGridCanvas.style.height = (height * CELL_SIZE * aiScale) + 'px';
+    }
+}
+
+window.addEventListener('resize', applyBoardScale);
+
 const cancelSearchBtn = document.getElementById('cancelSearch');
 const playersCountEl = document.getElementById('playersCount');
 const hitCounterEl = document.getElementById('hitCounter');
-const ernieLevelSelect = document.getElementById('ernieLevel');
 // Default Ernie difficulty: "Willing" (index 5 -> 1000ms/move). The original
 // defaults to the slider minimum (Comatose); 1000ms is a fairer modern default.
 const DEFAULT_ERNIE_LEVEL = 5;
@@ -109,20 +318,83 @@ function setOnlineStatus(msg) {
 // a live player; the server then pushes {players, hits} to everyone whenever the
 // numbers change. Kept separate from the matchmaking socket so it stays open the
 // whole visit and never interferes with a match.
-let statsWs = null;
+// A single persistent websocket carries everything: the lobby (watch/stats/
+// players/presence/challenge) AND the authoritative match (matchStart/snapshot/
+// input). One connection per client = the server's model; it also means a
+// challenge accepted in the lobby flows straight into a match on the same socket.
+let lobbyReconnectTimer = null;
+let pendingQueue = false; // queue for a match as soon as the socket (re)opens
 
-function connectStats() {
+function connectLobby() {
+    // Never open a second socket on top of a live one.
+    if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
     const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-    statsWs = new WebSocket(`${wsProto}://${location.host}/ws`);
-    statsWs.onopen = () => statsWs.send(JSON.stringify({ type: 'watch' }));
-    statsWs.onmessage = (ev) => {
-        let m;
-        try { m = JSON.parse(ev.data); } catch (_) { return; }
-        if (m.type === 'stats') updateLiveStats(m);
+    const sock = new WebSocket(`${wsProto}://${location.host}/ws`);
+    ws = sock;
+    sock.onopen = () => {
+        if (ws !== sock) return; // superseded before it opened
+        sock.send(JSON.stringify({ type: 'watch' }));
+        // Re-assert "Open to matches" across a reconnect (else the server forgets).
+        if (availableToggle && availableToggle.checked) {
+            sock.send(JSON.stringify({ type: 'available', value: true, name: playerName, token: identityToken }));
+        }
+        // A Find Match requested while the socket was down (e.g. just after a
+        // forfeit-leave): send the queue now that we're connected.
+        if (pendingQueue) {
+            pendingQueue = false;
+            sock.send(JSON.stringify({ type: 'queue', name: playerName, token: identityToken, authoritative: true }));
+        }
     };
-    // Keep the counters live across a server restart / dropped connection.
-    statsWs.onclose = () => { statsWs = null; setTimeout(connectStats, 3000); };
-    statsWs.onerror = () => {};
+    sock.onmessage = onSignalMessage;
+    sock.onclose = () => {
+        if (ws !== sock) return; // a newer socket already replaced this one
+        // A dropped socket during a match ends it (the server is the only source
+        // of truth — don't keep predicting a zombie game).
+        if (authoritative && !gameEnded) {
+            gameEnded = true;
+            gameOverText.textContent = 'Disconnected from server.';
+            gameOverOverlay.style.display = 'flex';
+        }
+        unackedInputs = [];
+        if (searching) {
+            searching = false;
+            findMatchBtn.classList.remove('searching');
+            cancelSearchBtn.style.display = 'none';
+        }
+        ws = null;
+        renderOnlineList([]); // clear the roster while disconnected
+        clearTimeout(lobbyReconnectTimer);
+        lobbyReconnectTimer = setTimeout(connectLobby, 3000);
+    };
+    sock.onerror = () => {};
+}
+
+// ─── Identity (a signed name token, requested lazily) ────────────────────────
+// Anonymous until the player goes Open-to-matches or challenges someone; then we
+// mint a signed JWT from the server (cached in localStorage) so the name is
+// tamper-evident while held.
+let identityToken = null;
+function loadIdentity() {
+    try {
+        identityToken = localStorage.getItem('bt_token');
+        playerName = localStorage.getItem('bt_player_name') || playerName;
+    } catch (_) {}
+}
+async function ensureIdentity() {
+    if (identityToken && playerName) return identityToken;
+    const name = getPlayerName(); // prompts once, stores bt_player_name
+    try {
+        const res = await fetch('/api/identity', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name }),
+        });
+        if (res.ok) {
+            identityToken = (await res.json()).token;
+            try { localStorage.setItem('bt_token', identityToken); } catch (_) {}
+        }
+    } catch (_) {}
+    return identityToken;
 }
 
 function updateLiveStats(m) {
@@ -147,14 +419,15 @@ function markActive() {
     const now = performance.now();
     if (now - lastActiveSent < 5000) return;
     lastActiveSent = now;
-    if (statsWs && statsWs.readyState === WebSocket.OPEN) {
-        statsWs.send(JSON.stringify({ type: 'active' }));
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'active' }));
     }
 }
 
-
+// Reset match/search state. Does NOT close the socket — it's the persistent
+// lobby connection. (Leaving a match resets here; the server ends the bout when
+// the player tops out, the opponent wins, or the socket actually drops.)
 function cleanupOnline() {
-    if (ws) { try { ws.close(); } catch (_) {} ws = null; }
     onlinePaused = true;
     onlineOpponentName = '';
     authoritative = false;
@@ -277,12 +550,13 @@ function applySnapshot(msg) {
 // so we're in lockstep with the server until a cross-player event arrives).
 function enterAuthoritativeGame(msg) {
     searching = false;
-    modeOnlineBtn.classList.remove('searching');
+    findMatchBtn.classList.remove('searching');
     cancelSearchBtn.style.display = 'none';
     mode = 'online';
     authoritative = true;
     onlineOpponentName = msg.opponent || 'Opponent';
     updateModeButtons();
+    showGame();
 
     game = new WasmGame((msg.seed >>> 0));
     resetMatchState();
@@ -297,18 +571,16 @@ function enterAuthoritativeGame(msg) {
     const height = game.height();
     canvas.width = width * CELL_SIZE;
     canvas.height = height * CELL_SIZE;
-    canvas.style.width = (width * CELL_SIZE * 1.6) + 'px';
-    canvas.style.height = (height * CELL_SIZE * 1.6) + 'px';
     aiBoard.style.display = 'none';
     aiLabel.style.display = 'none';
+    applyBoardScale();
 
     paused = false;
     gameEnded = false;
     onlinePaused = false; // server is ticking; predict immediately from the shared seed
     gameOverOverlay.style.display = 'none';
     bazaarOverlay.style.display = 'none';
-    onlineStatus.style.display = 'block';
-    setOnlineStatus(`Matched vs ${onlineOpponentName} - fight!`);
+    setPlayingStatus();
     lastFrameTime = performance.now();
     tickAccumulator = 0;
 }
@@ -334,63 +606,34 @@ function getPlayerName() {
     return playerName;
 }
 
-// Background matchmaking: open the matchmaking socket and queue WITHOUT
-// interrupting your current local game. You keep playing practice / vs Computer
-// while the search runs; `enterAuthoritativeGame` swaps you in when matched.
-// Switching between local modes leaves the search running (see startGame); only
-// an explicit Cancel or tearing down an established online game stops it.
-function findMatch() {
+// Auto-queue for a match over the persistent lobby socket. Requires a signed
+// identity first (so the server knows who you are). `enterAuthoritativeGame`
+// drops you into the playfield when matched.
+async function findMatch() {
     if (searching || mode === 'online') return; // already queued, or already playing online
-    const name = getPlayerName();
-
-    cleanupOnline(); // drop any stale socket/peer from a previous session
+    await ensureIdentity();
     searching = true;
-    modeOnlineBtn.classList.add('searching');
+    findMatchBtn.classList.add('searching');
     onlineStatus.style.display = 'block';
     cancelSearchBtn.style.display = 'inline-block';
-    setOnlineStatus('Searching for an opponent... keep playing - you\'ll drop in when matched.');
-
-    // Same-origin WebSocket: the bt-server serves both the page and /ws on one
-    // port (ws on localhost/LAN, wss behind TLS, e.g. on fly.io).
-    const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const wsUrl = `${wsProto}://${location.host}/ws`;
-    ws = new WebSocket(wsUrl);
-
-    // Announce the server-authoritative protocol (the client-server migration).
-    ws.onopen = () => ws.send(JSON.stringify({ type: 'queue', name, authoritative: true }));
-
-    ws.onerror = (err) => {
-        console.warn('WebSocket error', err);
-        setOnlineStatus(`Connection error - is the server reachable at ${wsUrl}?`);
-    };
-
-    ws.onclose = () => {
-        if (!gameEnded) setOnlineStatus('Disconnected from server.');
-        // A dropped socket during an authoritative match ends it (the server is
-        // the only source of truth) — don't keep predicting a zombie game.
-        if (authoritative && !gameEnded) {
-            gameEnded = true;
-            gameOverText.textContent = 'Disconnected from server.';
-            gameOverOverlay.style.display = 'flex';
-        }
-        unackedInputs = [];
-        if (searching) {
-            searching = false;
-            modeOnlineBtn.classList.remove('searching');
-            cancelSearchBtn.style.display = 'none';
-        }
-    };
-
-    ws.onmessage = onSignalMessage;
+    setOnlineStatus('Searching for an opponent…');
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'queue', name: playerName, token: identityToken, authoritative: true }));
+    } else {
+        // Socket down (e.g. just after a forfeit-leave) — reconnect and queue on open.
+        pendingQueue = true;
+        connectLobby();
+    }
 }
 
-// Stop a background search and hide its UI. Leaves your local game untouched.
+// Stop a background search and hide its UI (dequeues server-side via available:false).
 function cancelSearch() {
     searching = false;
-    modeOnlineBtn.classList.remove('searching');
+    pendingQueue = false;
+    findMatchBtn.classList.remove('searching');
     cancelSearchBtn.style.display = 'none';
     onlineStatus.style.display = 'none';
-    cleanupOnline();
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'available', value: false }));
 }
 
 // Drop into a fresh online match. Online boards are independent (each player has
@@ -404,6 +647,20 @@ function cancelSearch() {
 async function onSignalMessage(ev) {
     const msg = JSON.parse(ev.data);
 
+    // ── Lobby channel (live on the same socket) ──────────────────────────────
+    if (msg.type === 'stats') { updateLiveStats(msg); return; }
+    if (msg.type === 'players') { renderOnlineList(msg.players); return; }
+    if (msg.type === 'challenged') { onChallenged(msg.from); return; }
+    if (msg.type === 'challengeDeclined') {
+        searching = false;
+        findMatchBtn.classList.remove('searching');
+        cancelSearchBtn.style.display = 'none';
+        setOnlineStatus(`${msg.by} declined.`);
+        if (onlineStatus) onlineStatus.style.display = 'block';
+        return;
+    }
+
+    // ── Match channel ────────────────────────────────────────────────────────
     // Server-authoritative match handoff + per-frame authoritative state.
     if (msg.type === 'matchStart') {
         enterAuthoritativeGame(msg);
@@ -437,7 +694,10 @@ async function onSignalMessage(ev) {
 async function initGame() {
     await init();
     FIXED_DT = fixed_dt(); // canonical timestep from the engine
-    startGame('practice');
+    // Open on the lobby (like BTStartup), not in a game. A game starts when the
+    // player picks Practice / Play Computer / Find Match / accepts a challenge.
+    updatePlayComputerLabel();
+    showLobby();
 }
 
 function startGame(newMode) {
@@ -453,7 +713,7 @@ function startGame(newMode) {
     if (mode === 'online') {
         cleanupOnline();
         searching = false;
-        modeOnlineBtn.classList.remove('searching');
+        findMatchBtn.classList.remove('searching');
         cancelSearchBtn.style.display = 'none';
         onlineStatus.style.display = 'none';
     }
@@ -464,7 +724,7 @@ function startGame(newMode) {
 
     // Create game instance based on mode
     if (mode === 'vscomputer') {
-        const level = ernieLevelSelect ? (parseInt(ernieLevelSelect.value, 10) || 0) : DEFAULT_ERNIE_LEVEL;
+        const level = ernieSlider ? (parseInt(ernieSlider.value, 10) || 0) : DEFAULT_ERNIE_LEVEL;
         game = new WasmVsComputer(seed, level);
     } else {
         game = new WasmGame(seed);
@@ -476,23 +736,20 @@ function startGame(newMode) {
     canvas.width = width * CELL_SIZE;
     canvas.height = height * CELL_SIZE;
 
-    // Set CSS for scaling (1.6x)
-    canvas.style.width = (width * CELL_SIZE * 1.6) + 'px';
-    canvas.style.height = (height * CELL_SIZE * 1.6) + 'px';
-
     // Set up AI canvas in vscomputer mode
     if (mode === 'vscomputer') {
         aiGridCanvas.width = width * CELL_SIZE;
         aiGridCanvas.height = height * CELL_SIZE;
-        // Scale AI canvas smaller (1.0x)
-        aiGridCanvas.style.width = (width * CELL_SIZE * 1.0) + 'px';
-        aiGridCanvas.style.height = (height * CELL_SIZE * 1.0) + 'px';
         aiBoard.style.display = 'block';
         aiLabel.style.display = 'block';
     } else {
         aiBoard.style.display = 'none';
         aiLabel.style.display = 'none';
     }
+
+    // Fit the board (and side board) to the viewport so the hit counter below
+    // stays above the fold. Must run after aiBoard's display is set.
+    applyBoardScale();
 
     // Update UI
     updateModeButtons();
@@ -502,31 +759,31 @@ function startGame(newMode) {
     resetMatchState();
     gameOverOverlay.style.display = 'none';
     bazaarOverlay.style.display = 'none';
+    setPlayingStatus();
+    showGame();
     lastFrameTime = performance.now();
     tickAccumulator = 0;
 }
 
 function updateModeButtons() {
     modePracticeBtn.classList.remove('active');
-    modeVsComputerBtn.classList.remove('active');
-    modeOnlineBtn.classList.remove('active');
+    playComputerBtn.classList.remove('active');
+    findMatchBtn.classList.remove('active');
 
     if (mode === 'practice') {
         modePracticeBtn.classList.add('active');
     } else if (mode === 'vscomputer') {
-        modeVsComputerBtn.classList.add('active');
+        playComputerBtn.classList.add('active');
     } else if (mode === 'online') {
-        modeOnlineBtn.classList.add('active');
+        findMatchBtn.classList.add('active');
     }
 }
 
 function newGame() {
     if (mode === 'online') {
-        // A P2P match can't be unilaterally restarted - drop back to a local
-        // board and queue for a fresh opponent. (startGame sees mode==='online'
-        // here, so it tears the connection down first.)
-        startGame('practice');
-        findMatch();
+        // An online match can't be unilaterally restarted — return to the lobby,
+        // where the player can Find Match or challenge someone again.
+        leaveToLobby();
         return;
     }
     startGame(mode);
@@ -802,7 +1059,8 @@ function processEvents() {
 }
 
 function gameLoop(now) {
-    if (!game) {
+    // While the lobby is showing there is nothing to tick or render.
+    if (lobbyActive || !game) {
         requestAnimationFrame(gameLoop);
         return;
     }
@@ -1158,19 +1416,52 @@ bazaarRemoveBtn.addEventListener('click', () => {
     }
 });
 
-// Mode selector buttons
+// ─── Lobby actions ──────────────────────────────────────────────────────────
 modePracticeBtn.addEventListener('click', () => startGame('practice'));
-modeVsComputerBtn.addEventListener('click', () => startGame('vscomputer'));
-modeOnlineBtn.addEventListener('click', () => startGame('online'));
+playComputerBtn.addEventListener('click', () => startGame('vscomputer'));
+findMatchBtn.addEventListener('click', () => startGame('online'));
 if (cancelSearchBtn) cancelSearchBtn.addEventListener('click', cancelSearch);
 
-// Changing Ernie's difficulty restarts the current vs-computer game so it
-// takes effect immediately (it's read at WasmVsComputer construction).
-if (ernieLevelSelect) {
-    ernieLevelSelect.addEventListener('change', () => {
-        if (mode === 'vscomputer') startGame('vscomputer');
+// Ernie difficulty slider: update the button label live, and (if a vs-Computer
+// game is in progress) restart it so the new level takes effect immediately.
+if (ernieSlider) {
+    ernieSlider.addEventListener('input', () => {
+        updatePlayComputerLabel();
+        if (mode === 'vscomputer' && !lobbyActive) startGame('vscomputer');
     });
 }
+
+// Lobby presence/challenge controls. The list, challenge and stats are populated
+// by the presence/identity server work (Phases 3-4); wired here so the buttons
+// exist and degrade gracefully until then.
+if (updateBtn) updateBtn.addEventListener('click', () => requestPlayerList());
+if (challengeBtn) challengeBtn.addEventListener('click', () => challengeSelected());
+if (availableToggle) availableToggle.addEventListener('change', () => setAvailable(availableToggle.checked));
+const challengeAcceptBtn = document.getElementById('challengeAccept');
+const challengeDeclineBtn = document.getElementById('challengeDecline');
+if (challengeAcceptBtn) challengeAcceptBtn.addEventListener('click', () => respondChallenge(true));
+if (challengeDeclineBtn) challengeDeclineBtn.addEventListener('click', () => respondChallenge(false));
+
+// Leaving a game returns to the lobby (BTGame -> BTChallenge). Back-to-lobby on
+// the game-over overlay, and an explicit Leave button.
+const backToLobbyBtn = document.getElementById('backToLobbyBtn');
+const leaveGameBtn = document.getElementById('leaveGameBtn');
+function leaveToLobby() {
+    // Forfeit only if leaving a still-live online match (a finished match has
+    // already settled server-side). Dropping the socket makes the server end the
+    // bout via disconnect; it reconnects for the lobby.
+    const forfeiting = (mode === 'online' && !gameEnded);
+    cleanupOnline();
+    mode = 'practice';           // back to a local/lobby mode so Find Match works again
+    gameEnded = true;
+    game = null;
+    gameOverOverlay.style.display = 'none';
+    bazaarOverlay.style.display = 'none';
+    showLobby();
+    if (forfeiting && ws) { try { ws.close(); } catch (_) {} }
+}
+if (backToLobbyBtn) backToLobbyBtn.addEventListener('click', leaveToLobby);
+if (leaveGameBtn) leaveGameBtn.addEventListener('click', leaveToLobby);
 
 // ─── Bug report ─────────────────────────────────────────────────────────────
 // Capture a deterministic replay of the current game, upload it for a shareable
@@ -1333,8 +1624,9 @@ if (openLeaderboardBtn) openLeaderboardBtn.addEventListener('click', () => { loc
     // Wire up on-screen touch control buttons
     setupTouchControls();
 
-    // Open the live-stats channel (players online + visitor hit counter).
-    connectStats();
+    // One persistent socket for the lobby (presence/stats/challenge) + matches.
+    loadIdentity();
+    connectLobby();
 
     requestAnimationFrame(gameLoop);
 })();

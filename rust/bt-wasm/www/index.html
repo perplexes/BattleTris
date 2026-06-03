@@ -8,50 +8,72 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div class="container">
-        <div class="title-wrap">
-            <img src="assets/bttitle.png" alt="BattleTris" class="title-img">
+
+    <!-- ════════════════════ LOBBY SCREEN (BTChallenge.C) ════════════════════ -->
+    <div id="lobbyScreen" class="screen lobby-screen">
+        <div class="lobby-card">
+            <!-- LEFT: player list (top) + Play Computer frame (bottom) -->
+            <div class="lobby-left">
+                <div class="lobby-listbox">
+                    <div class="lobby-listbox-head">Players online</div>
+                    <div id="onlineList" class="lobby-list">
+                        <div class="lobby-list-empty">No one's around. Go "Open to matches" and wait, or Play Computer.</div>
+                    </div>
+                </div>
+
+                <fieldset class="lobby-frame">
+                    <legend>Play Computer</legend>
+                    <button id="playComputerBtn" class="lobby-btn">Play Willing Ernie</button>
+                    <input id="ernieSlider" class="lobby-slider" type="range" min="0" max="14" value="5"
+                           title="Ernie's difficulty">
+                    <label class="lobby-toggle">
+                        <input id="availableToggle" type="checkbox"> Open to matches
+                    </label>
+                </fieldset>
+            </div>
+
+            <!-- RIGHT: shield, actions, stats -->
+            <div class="lobby-right">
+                <div class="lobby-logo-row">
+                    <img src="assets/btbiff1.png" alt="BattleTris" class="lobby-shield">
+                </div>
+
+                <div class="lobby-actions">
+                    <button id="challengeBtn" class="lobby-btn" disabled>Challenge</button>
+                    <button id="findMatchBtn" class="lobby-btn">Find Match</button>
+                    <button id="updateBtn" class="lobby-btn">Update</button>
+                    <button id="cancelSearch" class="lobby-btn" style="display:none;">Cancel</button>
+                </div>
+
+                <div id="onlineStatus" class="online-status" style="display:none;"></div>
+
+                <div class="lobby-statsbox">
+                    <pre id="statsPanel" class="lobby-stats">Select a player.</pre>
+                </div>
+            </div>
         </div>
 
-        <div class="live-bar">
-            <span class="players-online" title="Players who pressed a gameplay button in the last 30 seconds">Players online: <span id="playersCount">--</span></span>
-        </div>
-
-        <div class="mode-selector">
-            <button id="modePractice" class="mode-btn active">Practice</button>
-            <button id="modeVsComputer" class="mode-btn">vs Computer</button>
-            <button id="modeOnline" class="mode-btn" title="Queue for an online match in the background - keep playing while you wait, and drop in when matched">Find Match</button>
-            <button id="reportBug" class="mode-btn bug-trigger" title="Report a bug - attaches a faithful replay of your game">Bug</button>
-            <button id="shareReplay" class="mode-btn" title="Save this game and copy a shareable replay link">Share</button>
+        <!-- Secondary actions (maps the old BTStartup menu + our extras) -->
+        <div class="lobby-extras">
+            <button id="modePractice" class="mode-btn">Practice</button>
             <button id="openLibrary" class="mode-btn" title="Browse and watch saved replays">Library</button>
             <button id="openLeaderboard" class="mode-btn" title="Ranked online players (Elo-styled TrueSkill)">Leaderboard</button>
+            <button id="reportBug" class="mode-btn bug-trigger" title="Report a bug - attaches a faithful replay">Bug</button>
+            <button id="shareReplay" class="mode-btn" title="Save this game and copy a shareable replay link">Share</button>
             <button id="soundToggle" class="mode-btn" title="Toggle sound effects">Sound: On</button>
-            <label class="ernie-level" title="Ernie's difficulty (start a vs Computer game to apply)">
-                Ernie:
-                <select id="ernieLevel">
-                    <option value="0">Comatose</option>
-                    <option value="1">Somnambulant</option>
-                    <option value="2">Lethargic</option>
-                    <option value="3">Pensive</option>
-                    <option value="4">Able</option>
-                    <option value="5" selected>Willing</option>
-                    <option value="6">Focused</option>
-                    <option value="7">Lively</option>
-                    <option value="8">Energetic</option>
-                    <option value="9">Pepped-up</option>
-                    <option value="10">Caffeinated</option>
-                    <option value="11">Bug-eyed</option>
-                    <option value="12">Supercharged</option>
-                    <option value="13">Hell-Bent</option>
-                    <option value="14">Bionic</option>
-                </select>
-            </label>
         </div>
 
-        <div class="online-bar">
-            <div id="onlineStatus" class="online-status" style="display:none;"></div>
-            <button id="cancelSearch" class="cancel-search-btn" style="display:none;">Cancel search</button>
+        <div class="lobby-footer">
+            <span class="players-online" title="Players active in the last 30 seconds">Players online: <span id="playersCount">--</span></span>
+            <div class="hit-counter">
+                <span class="hit-label">You are visitor number</span>
+                <span id="hitCounter" class="odometer"></span>
+            </div>
         </div>
+    </div>
+
+    <!-- ════════════════════ GAME SCREEN (BTGame.C) ════════════════════ -->
+    <div id="gameScreen" class="screen game-screen" style="display:none;">
 
         <!-- Mobile-only compact stats bar (shown above board on small screens) -->
         <div id="mobileStats" class="mobile-stats">
@@ -63,139 +85,95 @@
         </div>
 
         <div class="game-area">
-            <div class="left-panel">
-                <!-- Combined stats panel: your stats + opponent stats interleaved -->
-                <div class="stats-panel">
-                    <div class="stat-row">
-                        <span class="stat-label">Your score:</span>
-                        <span id="scoreValue" class="stat-value">0</span>
-                    </div>
-                    <div class="stat-row">
-                        <span class="stat-label">Opponent's score:</span>
-                        <span id="opponentScore" class="stat-value">-</span>
-                    </div>
-                    <div class="stat-gap"></div>
-                    <div class="stat-row">
-                        <span class="stat-label">Your lines:</span>
-                        <span id="linesValue" class="stat-value">0</span>
-                    </div>
-                    <div class="stat-row">
-                        <span class="stat-label">Opponent's lines:</span>
-                        <span id="opponentLines" class="stat-value">-</span>
-                    </div>
-                    <div class="stat-gap"></div>
-                    <div class="stat-row">
-                        <span class="stat-label">Your funds:</span>
-                        <span id="fundsValue" class="stat-value">0</span>
-                    </div>
-                    <div class="stat-row">
-                        <span class="stat-label">Lines 'til bazaar:</span>
-                        <span id="linesToBazaarValue" class="stat-value">20</span>
-                    </div>
-
-                    <button id="newGameBtn" class="new-game-btn">New Game</button>
-
-                    <div class="controls-box">
-                        <h3>Controls</h3>
-                        <ul>
-                            <li><strong>Left/Right</strong> - Move</li>
-                            <li><strong>Up</strong> - Rotate</li>
-                            <li><strong>Down</strong> - Soft drop (hold = fast)</li>
-                            <li><strong>Space</strong> - Hard drop</li>
-                            <li><strong>P</strong> - Pause/Resume</li>
-                            <li><strong>1-0</strong> - Launch weapons</li>
-                        </ul>
-                        <p style="margin-top: 10px; font-size: 10px; color: #666;">Open a second tab to battle.</p>
-                    </div>
-                </div>
-                <!-- Opponent panel hidden on desktop (data is in combined stats panel above) -->
-                <div class="opponent-panel" style="display:none;">
-                    <h3>Opponent</h3>
-                    <div class="opponent-stat">
-                        <span>Score:</span>
-                        <span id="opponentScoreHidden">-</span>
-                    </div>
-                    <div class="opponent-stat">
-                        <span>Lines:</span>
-                        <span id="opponentLinesHidden">-</span>
-                    </div>
-                </div>
-            </div>
-
+            <!-- Board: left, fills the height (dominant element) -->
             <div class="center-panel">
                 <div class="board-wrapper">
                     <canvas id="gameCanvas"></canvas>
                     <canvas id="aiCanvas" style="display: none;"></canvas>
                     <div id="gameOverOverlay" class="game-over-overlay">
                         <div class="game-over-text" id="gameOverText">GAME OVER</div>
+                        <button id="backToLobbyBtn" class="lobby-btn">Back to lobby</button>
                     </div>
                     <div id="bazaarOverlay" class="bazaar-overlay">
                         <div class="bazaar-panel">
-                            <!-- Banner image replaces the plain h2 title -->
                             <img src="assets/btbazaar.png" alt="Weapons Bazaar" class="bazaar-banner">
 
-                            <!-- Three-column shop layout -->
+                            <!-- Top band: weapon list (left) · funds+buttons (center) · arsenal (right) -->
                             <div class="bazaar-body">
-                                <!-- LEFT: scrollable weapon list -->
                                 <div class="bazaar-col bazaar-col-left">
                                     <div class="bazaar-col-header">Weapons</div>
                                     <div id="bazaarWeaponList" class="bazaar-weapon-list"></div>
                                 </div>
 
-                                <!-- MIDDLE: funds + add/remove/done -->
                                 <div class="bazaar-col bazaar-col-mid">
                                     <div id="bazaarFundsDisplay" class="bazaar-funds-display">Funds: $<span id="bazaarFunds">0</span></div>
                                     <button id="bazaarAddBtn" class="bazaar-action-btn">Add &#9658;</button>
                                     <button id="bazaarRemoveBtn" class="bazaar-action-btn">&#9668; Remove</button>
                                     <button id="bazaarDoneBtn" class="bazaar-done-btn">DONE</button>
-                                    <!-- Selected weapon info -->
-                                    <div id="bazaarInfo" class="bazaar-info">
-                                        <div id="bazaarInfoPrice" class="bazaar-info-price"></div>
-                                        <div id="bazaarInfoDuration" class="bazaar-info-duration"></div>
-                                        <div id="bazaarInfoDesc" class="bazaar-info-desc"></div>
-                                    </div>
                                 </div>
 
-                                <!-- RIGHT: current arsenal -->
                                 <div class="bazaar-col bazaar-col-right">
                                     <div class="bazaar-col-header">Your Arsenal</div>
                                     <div id="bazaarArsenalList" class="bazaar-arsenal-list"></div>
                                 </div>
                             </div>
+
+                            <!-- Bottom band: weapon description (spans the width), as BTBazaar.C -->
+                            <div id="bazaarInfo" class="bazaar-info">
+                                <span id="bazaarInfoPrice" class="bazaar-info-price"></span>
+                                <span id="bazaarInfoDuration" class="bazaar-info-duration"></span>
+                                <div id="bazaarInfoDesc" class="bazaar-info-desc"></div>
+                            </div>
                         </div>
                     </div>
                 </div>
-                <div id="aiLabel" class="ai-label" style="display: none;">Ernie (computer)</div>
             </div>
 
-            <!-- Mobile-only arsenal strip shown below board -->
-            <div id="mobileArsenal" class="mobile-arsenal">
-                <div id="mobileArsenalList" class="mobile-arsenal-list"></div>
-            </div>
+            <!-- Right column: score box (top) + arsenal (below) + status -->
+            <div class="game-right">
+                <div class="score-box">
+                    <div class="score-row"><span class="score-label">Your score:</span><span id="scoreValue" class="score-value">0</span></div>
+                    <div class="score-row"><span class="score-label">Opponent's score:</span><span id="opponentScore" class="score-value">0</span></div>
+                    <div class="score-gap"></div>
+                    <div class="score-row"><span class="score-label">Your lines:</span><span id="linesValue" class="score-value">0</span></div>
+                    <div class="score-row"><span class="score-label">Opponent's lines:</span><span id="opponentLines" class="score-value">0</span></div>
+                    <div class="score-gap"></div>
+                    <div class="score-row"><span class="score-label">Your funds:</span><span id="fundsValue" class="score-value">0</span></div>
+                    <div class="score-gap"></div>
+                    <div class="score-row"><span class="score-label">Lines 'til bazaar:</span><span id="linesToBazaarValue" class="score-value">20</span></div>
+                </div>
 
-            <div class="right-panel">
-                <div class="arsenal-panel">
-                    <h3>Arsenal</h3>
+                <div class="arsenal-box">
                     <div id="arsenalList" class="arsenal-list"></div>
                 </div>
+
+                <div id="playingStatus" class="playing-status"></div>
+
+                <!-- Opponent (Ernie) board, vs-Computer only -->
                 <div id="aiBoard" class="ai-board-panel" style="display: none;">
-                    <h3 id="aiBoardLabel">Ernie (computer)</h3>
+                    <div id="aiBoardLabel" class="ai-label">Ernie (computer)</div>
                     <div class="ai-board-wrapper">
                         <canvas id="aiGridCanvas"></canvas>
                     </div>
                 </div>
+
+                <div class="game-buttons">
+                    <button id="newGameBtn" class="lobby-btn">New Game</button>
+                    <button id="leaveGameBtn" class="lobby-btn">Leave</button>
+                </div>
             </div>
         </div>
 
-        <!-- 90s-style visitor hit counter (persistent total, served from SQLite,
-             pushed live over the stats websocket). -->
-        <div class="site-footer">
-            <div class="hit-counter">
-                <span class="hit-label">You are visitor number</span>
-                <span id="hitCounter" class="odometer"></span>
-            </div>
+        <!-- Mobile-only arsenal strip shown below board -->
+        <div id="mobileArsenal" class="mobile-arsenal">
+            <div id="mobileArsenalList" class="mobile-arsenal-list"></div>
         </div>
+
+        <!-- Hidden label kept for main.js compat (legacy center-panel Ernie label) -->
+        <div id="aiLabel" class="ai-label" style="display: none;">Ernie (computer)</div>
     </div>
+
+    <!-- ════════════════════ SHARED OVERLAYS ════════════════════ -->
 
     <!-- Touch control bar: only visible on touch/small screens via CSS -->
     <div id="touchControls" class="touch-controls" aria-label="Game controls">
@@ -207,8 +185,7 @@
         <button class="touch-btn" id="touchDrop" aria-label="Soft drop">&#10507;</button>
     </div>
 
-    <!-- Bug report modal: attaches a deterministic replay so the bug can be
-         reproduced exactly, then opens a prefilled GitHub issue. -->
+    <!-- Bug report modal -->
     <div id="bugOverlay" class="bug-overlay">
         <div class="bug-panel">
             <h2>Report a bug</h2>
@@ -226,6 +203,17 @@
             <div class="bug-actions">
                 <button id="bugCancel" class="bug-btn">Cancel</button>
                 <button id="bugSubmit" class="bug-btn bug-btn-primary">Open GitHub issue</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Challenge invite modal (incoming directed challenge) -->
+    <div id="challengeOverlay" class="bug-overlay">
+        <div class="bug-panel challenge-panel">
+            <h2 id="challengeText">alice challenges you!</h2>
+            <div class="bug-actions">
+                <button id="challengeDecline" class="bug-btn">Decline</button>
+                <button id="challengeAccept" class="bug-btn bug-btn-primary">Accept</button>
             </div>
         </div>
     </div>

@@ -52,6 +52,9 @@ use tower_http::services::ServeDir;
 mod bout;
 use bout::Bout;
 
+/// Player identity (HS256 JWT) + the `/api/identity` endpoint.
+mod identity;
+
 /// One queued input headed for an authoritative [`Bout`]: (side, action, seq).
 type BoutInput = (Side, Input, u64);
 
@@ -89,6 +92,42 @@ impl FromRef<AppState> for Db {
     }
 }
 
+/// Lobby presence for a named client. An UN-named connection has no status and
+/// never appears in the `players` roster (the implicit 4th "anonymous" state).
+///
+/// A client is *Available* iff it's both challengeable (a directed challenge can
+/// reach it) AND eligible for auto-pairing — "open to matches" is one switch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Status {
+    /// Open to matches: challengeable and auto-pairable.
+    Available,
+    /// Pressed "Find Match" — actively looking (still pairable + challengeable).
+    Searching,
+    /// In an authoritative bout.
+    InGame,
+}
+
+impl Status {
+    /// The lowercase wire string the frontend expects in the `players` frame.
+    fn as_str(self) -> &'static str {
+        match self {
+            Status::Available => "available",
+            Status::Searching => "searching",
+            Status::InGame => "ingame",
+        }
+    }
+
+    /// "Most-engaged" ordering for de-duping a name that has multiple
+    /// connections: InGame > Searching > Available (show the busiest).
+    fn rank(self) -> u8 {
+        match self {
+            Status::Available => 0,
+            Status::Searching => 1,
+            Status::InGame => 2,
+        }
+    }
+}
+
 /// Per-connected-client state.
 struct Client {
     name: String,
@@ -102,6 +141,9 @@ struct Client {
     /// While in an authoritative match: the channel to the match's tick loop and
     /// which side this client plays. `input` messages are forwarded here.
     bout: Option<(mpsc::Sender<BoutInput>, Side)>,
+    /// Lobby presence. `None` until the client establishes a name (anonymous
+    /// connections don't appear in the roster). See [`Status`].
+    status: Option<Status>,
 }
 
 /// Shared server state.
@@ -120,21 +162,39 @@ struct App {
     /// Pairings already rated (keyed by min(id_a, id_b)).
     settled: HashSet<u64>,
     params: Ts2Params,
-    /// Replay/counters DB (shared with the HTTP handlers) — backs the hit counter.
+    /// Replay/counters DB (shared with the HTTP handlers) — backs the hit counter
+    /// and the per-player stats (`players`) table.
     db: Db,
+    /// Outstanding directed challenges: challenger id -> (target id, expires_at).
+    /// One in-flight challenge per challenger; superseded/cleared on
+    /// accept/decline/timeout/disconnect.
+    challenges: HashMap<u64, (u64, Instant)>,
+    /// Last `players` roster we broadcast (the de-duped name->status list), so the
+    /// presence push only re-sends on a real change.
+    last_players: Vec<(String, Status)>,
 }
 
 impl App {
     fn new(db: Db) -> App {
+        let ratings = {
+            // Seed the players table from ratings.json on first boot (idempotent),
+            // then load ratings from disk as the working rating source-of-truth.
+            if let Ok(conn) = db.lock() {
+                migrate_ratings_into_players(&conn, &load_ratings());
+            }
+            load_ratings()
+        };
         App {
             clients: HashMap::new(),
             waiting: Vec::new(),
             last_active: HashMap::new(),
             last_broadcast_players: 0,
-            ratings: load_ratings(),
+            ratings,
             settled: HashSet::new(),
             params: Ts2Params::default(),
             db,
+            challenges: HashMap::new(),
+            last_players: Vec::new(),
         }
     }
 
@@ -204,6 +264,50 @@ fn maybe_broadcast_stats(app: &mut App) {
     }
 }
 
+/// The de-duped lobby roster: one entry per *named* client, keeping the
+/// most-engaged status when a name has several connections (e.g. two tabs).
+/// Sorted by name so the broadcast-on-change comparison is order-stable.
+fn roster(app: &App) -> Vec<(String, Status)> {
+    let mut by_name: HashMap<String, Status> = HashMap::new();
+    for c in app.clients.values() {
+        let (name, status) = match (c.name.as_str(), c.status) {
+            (n, Some(s)) if !n.is_empty() => (n.to_string(), s),
+            _ => continue, // anonymous / un-named connections aren't listed
+        };
+        by_name
+            .entry(name)
+            .and_modify(|cur| {
+                if status.rank() > cur.rank() {
+                    *cur = status;
+                }
+            })
+            .or_insert(status);
+    }
+    let mut out: Vec<(String, Status)> = by_name.into_iter().collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// The `players` presence frame the lobby renders.
+fn players_msg(roster: &[(String, Status)]) -> Value {
+    let players: Vec<Value> = roster
+        .iter()
+        .map(|(name, status)| json!({ "name": name, "status": status.as_str() }))
+        .collect();
+    json!({ "type": "players", "players": players })
+}
+
+/// Recompute the lobby roster and, if it changed since the last push, broadcast
+/// it to everyone. Mirrors [`maybe_broadcast_stats`]: collect first, then send.
+fn maybe_broadcast_players(app: &mut App) {
+    let next = roster(app);
+    if next != app.last_players {
+        app.last_players = next.clone();
+        let msg = players_msg(&next);
+        broadcast(app, &msg);
+    }
+}
+
 fn load_ratings() -> HashMap<String, (f64, f64, u32)> {
     let mut out = HashMap::new();
     if let Ok(txt) = std::fs::read_to_string(ratings_file()) {
@@ -268,23 +372,79 @@ fn derive_seed(id: u64) -> u64 {
     (id.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 16) & 0xFFFF_FFFF
 }
 
-/// Match `id` against the best-quality waiting opponent; otherwise queue.
+/// How long a directed challenge stays open before the challenger is told the
+/// target declined (no response in time).
+const CHALLENGE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Find the connected client whose name == `name`, preferring one currently
+/// Available (the challengeable connection) over any other tab. Returns its id.
+fn find_named_available(app: &App, name: &str) -> Option<u64> {
+    // First pass: an Available named connection (the one a challenge can land on).
+    if let Some((&id, _)) = app
+        .clients
+        .iter()
+        .find(|(_, c)| c.name == name && c.status == Some(Status::Available))
+    {
+        return Some(id);
+    }
+    None
+}
+
+/// Drop a challenger's pending challenge (if any). Returns the target id it was
+/// pointed at, so the caller can decide whether to notify.
+fn clear_challenge(app: &mut App, challenger: u64) -> Option<u64> {
+    app.challenges.remove(&challenger).map(|(target, _)| target)
+}
+
+/// Is `cid` a candidate the matcher may pair `id` with right now? Not `id`
+/// itself, not already in a bout, and "open to matches" — either explicitly
+/// queued (in `waiting`, the legacy Find-Match path) OR lobby-Available /
+/// -Searching (the unified presence switch: Available = challengeable AND
+/// auto-pairable). A queued client stays a candidate even if it never announced
+/// `authoritative` (legacy peer-link path); a presence candidate is by
+/// definition an authoritative lobby client.
+fn is_match_candidate(app: &App, id: u64, cid: u64) -> bool {
+    if cid == id {
+        return false;
+    }
+    match app.clients.get(&cid) {
+        Some(c) => {
+            c.bout.is_none()
+                && (app.waiting.contains(&cid)
+                    || matches!(c.status, Some(Status::Available) | Some(Status::Searching)))
+        }
+        None => false,
+    }
+}
+
+/// Match `id` against the best-quality open opponent; otherwise leave it queued.
 ///
-/// Returns `Some(PendingBout)` only when it pairs two server-authoritative
-/// clients — the async caller then spawns the match's tick loop. A client that
-/// didn't announce `authoritative` (none ship now) just gets `None`.
+/// The candidate pool is everyone "open to matches" — explicitly queued
+/// (`waiting`) AND lobby-Available clients — so going Available auto-pairs you
+/// just like pressing Find Match. Peers are linked for whatever pair it picks
+/// (the legacy result/`opponentLeft` path needs that); it returns
+/// `Some(PendingBout)` only when BOTH sides are server-authoritative, which every
+/// shipped client is.
 fn try_match(app: &mut App, id: u64) -> Option<PendingBout> {
     let my_rating = app.clients.get(&id).map(|c| c.state.rating)?;
+    // Already in a bout? Don't re-match (would clobber the live binding).
+    if app.clients.get(&id).is_some_and(|c| c.bout.is_some()) {
+        return None;
+    }
 
+    // Scan all open candidates (queued or Available/Searching), de-duped.
+    let candidates: Vec<u64> = app
+        .clients
+        .keys()
+        .copied()
+        .filter(|&cid| is_match_candidate(app, id, cid))
+        .collect();
     let mut best: Option<(u64, f64)> = None;
-    for &wid in &app.waiting {
-        if wid == id {
-            continue;
-        }
-        if let Some(other) = app.clients.get(&wid) {
+    for cid in candidates {
+        if let Some(other) = app.clients.get(&cid) {
             let q = quality_1v1(my_rating, other.state.rating, &app.params.base);
             if best.map(|(_, bq)| q > bq).unwrap_or(true) {
-                best = Some((wid, q));
+                best = Some((cid, q));
             }
         }
     }
@@ -299,8 +459,8 @@ fn try_match(app: &mut App, id: u64) -> Option<PendingBout> {
         }
     };
 
+    // Link peers for whatever we picked (legacy result + opponentLeft path).
     app.waiting.retain(|&w| w != opp && w != id);
-    // Link peers (used by settle + the legacy `opponentLeft` path either way).
     if let Some(c) = app.clients.get_mut(&opp) {
         c.peer = Some(id);
     }
@@ -308,54 +468,83 @@ fn try_match(app: &mut App, id: u64) -> Option<PendingBout> {
         c.peer = Some(opp);
     }
 
-    let both_authoritative = app.clients.get(&opp).is_some_and(|c| c.authoritative)
-        && app.clients.get(&id).is_some_and(|c| c.authoritative);
+    // opp = side A (first queued/available), id = side B. start_bout returns None
+    // (no handoff) unless both sides are authoritative — the peer link stands
+    // either way for the legacy client-reported-result path.
+    start_bout(app, opp, id, Some(quality))
+}
 
-    let (a_name, a_state) = match app.clients.get(&opp) {
-        Some(c) => (c.name.clone(), c.state),
-        None => return None,
-    };
-    let (b_name, b_state) = match app.clients.get(&id) {
-        Some(c) => (c.name.clone(), c.state),
-        None => return None,
-    };
-
-    if both_authoritative {
-        // Server-authoritative match. opp = side A (first queued), id = side B.
-        let (seed_a, seed_b) = (derive_seed(opp), derive_seed(id));
-        let (input_tx, input_rx) = mpsc::channel::<BoutInput>(BOUT_INPUT_CAP);
-        let tx_a = app.clients[&opp].tx.clone();
-        let tx_b = app.clients[&id].tx.clone();
-        if let Some(c) = app.clients.get_mut(&opp) {
-            c.bout = Some((input_tx.clone(), Side::A));
-        }
-        if let Some(c) = app.clients.get_mut(&id) {
-            c.bout = Some((input_tx, Side::B));
-        }
-        send(app, opp, &json!({"type":"matchStart","side":"A","seed":seed_a,"opponent":b_name,"quality":quality}));
-        send(app, id, &json!({"type":"matchStart","side":"B","seed":seed_b,"opponent":a_name,"quality":quality}));
-        println!("authoritative match {opp} <-> {id} (quality {quality:.3})");
-        Some(PendingBout {
-            match_id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
-            id_a: opp,
-            id_b: id,
-            seed_a,
-            seed_b,
-            name_a: a_name,
-            name_b: b_name,
-            state_a: a_state,
-            state_b: b_state,
-            tx_a,
-            tx_b,
-            input_rx,
-        })
-    } else {
-        // Every shipped client is authoritative (the WebRTC P2P handoff was
-        // removed with the client-server migration), so this is unreachable in
-        // practice — a client that doesn't announce `authoritative` simply gets
-        // no match handoff rather than a dead WebRTC bootstrap.
-        None
+/// Build a server-authoritative bout between two connected, authoritative
+/// clients: drop them from the queue, link peers, set both `InGame`, bind the
+/// input channel, send `matchStart`, and return the [`PendingBout`] the caller
+/// spawns. Shared by the auto-matcher ([`try_match`]) and the directed-challenge
+/// path. `quality` is the matchmaking quality if known (auto-match) else `None`
+/// (a hand-picked challenge has no quality figure). Returns `None` if either
+/// side vanished or isn't authoritative.
+fn start_bout(app: &mut App, a: u64, b: u64, quality: Option<f64>) -> Option<PendingBout> {
+    let both_authoritative = app.clients.get(&a).is_some_and(|c| c.authoritative)
+        && app.clients.get(&b).is_some_and(|c| c.authoritative);
+    if !both_authoritative {
+        return None;
     }
+
+    app.waiting.retain(|&w| w != a && w != b);
+    // Drop any pending challenges involving either player — they're now in a
+    // match, so a stale accept must not later kick off a second, unwanted bout.
+    app.challenges
+        .retain(|&cid, &mut (tid, _)| cid != a && cid != b && tid != a && tid != b);
+    if let Some(c) = app.clients.get_mut(&a) {
+        c.peer = Some(b);
+    }
+    if let Some(c) = app.clients.get_mut(&b) {
+        c.peer = Some(a);
+    }
+
+    let (a_name, a_state) = match app.clients.get(&a) {
+        Some(c) => (c.name.clone(), c.state),
+        None => return None,
+    };
+    let (b_name, b_state) = match app.clients.get(&b) {
+        Some(c) => (c.name.clone(), c.state),
+        None => return None,
+    };
+
+    let (seed_a, seed_b) = (derive_seed(a), derive_seed(b));
+    let (input_tx, input_rx) = mpsc::channel::<BoutInput>(BOUT_INPUT_CAP);
+    let tx_a = app.clients[&a].tx.clone();
+    let tx_b = app.clients[&b].tx.clone();
+    if let Some(c) = app.clients.get_mut(&a) {
+        c.bout = Some((input_tx.clone(), Side::A));
+        c.status = Some(Status::InGame);
+    }
+    if let Some(c) = app.clients.get_mut(&b) {
+        c.bout = Some((input_tx, Side::B));
+        c.status = Some(Status::InGame);
+    }
+    // quality is optional in the wire frame; a directed challenge omits it.
+    let qv = quality.map(|q| json!(q)).unwrap_or(Value::Null);
+    send(app, a, &json!({"type":"matchStart","side":"A","seed":seed_a,"opponent":b_name,"quality":qv}));
+    send(app, b, &json!({"type":"matchStart","side":"B","seed":seed_b,"opponent":a_name,"quality":qv}));
+    match quality {
+        Some(q) => println!("authoritative match {a} <-> {b} (quality {q:.3})"),
+        None => println!("authoritative challenge match {a} <-> {b}"),
+    }
+    // Roster changed (both went InGame) — let the lobby reflect it.
+    maybe_broadcast_players(app);
+    Some(PendingBout {
+        match_id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+        id_a: a,
+        id_b: b,
+        seed_a,
+        seed_b,
+        name_a: a_name,
+        name_b: b_name,
+        state_a: a_state,
+        state_b: b_state,
+        tx_a,
+        tx_b,
+        input_rx,
+    })
 }
 
 /// Settle an authoritative match from the bout's OWN captured player identities
@@ -405,6 +594,41 @@ fn settle_bout(
         "authoritative result: {name_a} {} {name_b}",
         if a_won { "beat" } else { "lost to" }
     );
+}
+
+/// Fold a finished bout into both players' rows in the `players` table:
+/// record/streak/personal-bests/time figures. Run AFTER [`settle_bout`] so the
+/// post-match mu/sigma are already in `app.ratings`. Best-effort: a DB hiccup is
+/// logged-skipped rather than failing the bout. `final_a`/`final_b` are each
+/// side's `(score, lines, funds)` at game-over; `ticks` is the match length.
+#[allow(clippy::too_many_arguments)]
+fn record_bout_player_stats(
+    app: &App,
+    name_a: &str,
+    name_b: &str,
+    a_won: bool,
+    final_a: (i64, i64, i64),
+    final_b: (i64, i64, i64),
+    ticks: u64,
+    natural: bool,
+) {
+    let conn = match app.db.lock() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let rating_of = |name: &str| {
+        let base = app.params.base.new_rating();
+        app.ratings.get(name).map(|&(mu, s, _)| (mu, s)).unwrap_or((base.mu, base.sigma))
+    };
+    for (name, won, (score, lines, funds)) in
+        [(name_a, a_won, final_a), (name_b, !a_won, final_b)]
+    {
+        let (mu, sigma) = rating_of(name);
+        let m = MatchStats { won, score, lines, funds, ticks: ticks as i64, natural };
+        if let Err(e) = db_record_player_stats(&conn, name, mu, sigma, &m) {
+            eprintln!("player stats write failed for {name}: {e}");
+        }
+    }
 }
 
 /// The per-match authoritative tick loop. Advances the deterministic engine on
@@ -463,16 +687,30 @@ async fn run_bout(state: Shared, pb: PendingBout) {
     };
 
     let mut app = state.lock().await;
-    if let Some(c) = app.clients.get_mut(&id_a) {
-        c.bout = None;
-    }
-    if let Some(c) = app.clients.get_mut(&id_b) {
-        c.bout = None;
+    // Match over: both sides leave the bout and (if still connected + named) go
+    // back to Available so the lobby shows them open to a new match.
+    for cid in [id_a, id_b] {
+        if let Some(c) = app.clients.get_mut(&cid) {
+            c.bout = None;
+            c.peer = None;
+            if !c.name.is_empty() {
+                c.status = Some(Status::Available);
+            }
+        }
     }
     if let Some(a_won) = outcome {
         settle_bout(
             &mut app, match_id, id_a, &name_a, state_a, id_b, &name_b, state_b,
             a_won, bout.lines(Side::A), bout.lines(Side::B),
+        );
+        // Real per-player stats (the `players` table) — record/streak/bests/time.
+        // settle_bout has updated app.ratings; read each side's post-match rating.
+        record_bout_player_stats(
+            &app, &name_a, &name_b, a_won,
+            (bout.score(Side::A), bout.lines(Side::A) as i64, bout.funds(Side::A)),
+            (bout.score(Side::B), bout.lines(Side::B) as i64, bout.funds(Side::B)),
+            bout.tick_count(),
+            bout.is_over(), // natural finish only — a forfeit isn't a real top-out
         );
         // Persist the match as a deterministic, replayable VersusReplay (closes
         // D5) — but ONLY for a natural finish (a real top-out the board reaches).
@@ -493,6 +731,8 @@ async fn run_bout(state: Shared, pb: PendingBout) {
             }
         }
     }
+    // Both players went back to Available (or left) — refresh the lobby roster.
+    maybe_broadcast_players(&mut app);
 }
 
 /// Settle a match result and update both players' ratings (idempotent per pair).
@@ -552,6 +792,33 @@ fn rating_msg(s: &PlayerState, won: bool) -> Value {
     })
 }
 
+/// Resolve the name a message establishes, preferring a valid `token`'s signed
+/// name over a bare `name`. A present-but-invalid token is ignored (we keep the
+/// `prior` name rather than trust a forged one). With no token and no name, the
+/// prior name stands. Used by `queue`/`available`/`challenge`.
+fn resolve_name(app: &App, v: &Value, prior: &str) -> String {
+    if let Some(tok) = v.get("token").and_then(|t| t.as_str()) {
+        if let Some(signed) = identity::verify_token(tok) {
+            return signed; // a validly-signed name always wins
+        }
+        // Bad/forged token: ignore it (don't trust the rest of this message's name).
+    }
+    if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
+        if let Some(clean) = identity::sanitize_name(name) {
+            // A bare (untokened) name is only honored for a NEW identity. Claiming
+            // an already-rated name requires a valid token, so a one-line `name`
+            // message can't hijack an established player's stats/rating. (Anyone
+            // can still mint a token for any name via /api/identity — identity is
+            // deliberately lightweight, not account-grade — but that's a step up
+            // from trivially spoofing a bare name.)
+            if !app.ratings.contains_key(&clean) || clean == prior {
+                return clean;
+            }
+        }
+    }
+    prior.to_string()
+}
+
 async fn handle_message(state: &Shared, id: u64, text: &str) {
     let v: Value = match serde_json::from_str(text) {
         Ok(v) => v,
@@ -571,6 +838,11 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
             app.last_broadcast_players = players;
             let msg = stats_msg(players, current_hits(&app));
             broadcast(&app, &msg);
+            // Send the CURRENT lobby roster to this just-connected client — the
+            // periodic `players` push only fires on change, so without this a
+            // client that connects after others are already online sees nobody.
+            let r = roster(&app);
+            send(&app, id, &players_msg(&r));
         }
         // A gameplay button was pressed: this connection is an active player for
         // the next `ACTIVE_WINDOW`. Re-broadcast if the live count went up.
@@ -580,7 +852,8 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
             maybe_broadcast_stats(&mut app);
         }
         Some("queue") => {
-            let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("anon").to_string();
+            // Identity: prefer the token's signed name; a bare `name` is still
+            // accepted (back-compat) but the token wins when both are present.
             // New clients announce the authoritative protocol; old ones omit it
             // and keep the WebRTC handoff untouched.
             let authoritative = v.get("authoritative").and_then(|b| b.as_bool()).unwrap_or(false);
@@ -592,18 +865,151 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
                 if app.clients.get(&id).is_some_and(|c| c.bout.is_some()) {
                     None
                 } else {
+                    let prior = app.clients.get(&id).map(|c| c.name.clone()).unwrap_or_default();
+                    let name = resolve_name(&app, &v, &prior);
+                    let name = if name.is_empty() { "anon".to_string() } else { name };
                     let st = app.rating_for(&name);
                     if let Some(c) = app.clients.get_mut(&id) {
                         c.name = name;
                         c.state = st;
                         c.authoritative = authoritative;
+                        c.status = Some(Status::Searching); // Find Match -> Searching
                     }
-                    try_match(&mut app, id)
+                    let pb = try_match(&mut app, id);
+                    // Roster changed (this client is now Searching); push it. If a
+                    // bout started, start_bout already broadcast InGame.
+                    maybe_broadcast_players(&mut app);
+                    pb
                 }
             };
             // Spawn the match's tick loop outside the lock (it locks again only to settle).
             if let Some(pb) = pending {
                 tokio::spawn(run_bout(state.clone(), pb));
+            }
+        }
+        // Lobby presence toggle. `{"value":true}` (with an optional identity
+        // `token`/`name`) marks this client "open to matches" — both
+        // challengeable AND auto-pairable. `{"value":false}` leaves the roster.
+        // Going Available also attempts an immediate auto-pair (a directed
+        // challenge isn't required to get into a game).
+        Some("available") => {
+            let value = v.get("value").and_then(|b| b.as_bool()).unwrap_or(true);
+            let pending = {
+                let mut app = state.lock().await;
+                if app.clients.get(&id).is_some_and(|c| c.bout.is_some()) {
+                    None // already in a match — ignore
+                } else {
+                    let prior = app.clients.get(&id).map(|c| c.name.clone()).unwrap_or_default();
+                    let name = resolve_name(&app, &v, &prior);
+                    let go_available = value && !name.is_empty();
+                    let st = app.rating_for(&name);
+                    if !go_available {
+                        // Going unavailable / un-named -> leave the roster + queue.
+                        app.waiting.retain(|&w| w != id);
+                    }
+                    if let Some(c) = app.clients.get_mut(&id) {
+                        c.name = name;
+                        c.state = st;
+                        // `available` is the shipped lobby's authoritative client.
+                        c.authoritative = true;
+                        c.status = go_available.then_some(Status::Available);
+                    }
+                    // An Available, named client is eligible for auto-pairing.
+                    let pb = if go_available { try_match(&mut app, id) } else { None };
+                    maybe_broadcast_players(&mut app);
+                    pb
+                }
+            };
+            if let Some(pb) = pending {
+                tokio::spawn(run_bout(state.clone(), pb));
+            }
+        }
+        // Directed challenge: alice -> "I want to play <target>". Find that
+        // player's Available connection and ping it with `challenged`; track the
+        // pending challenge (challenger -> target) with a 30s timeout.
+        Some("challenge") => {
+            let mut app = state.lock().await;
+            // Resolve/refresh the challenger's identity from any token/name.
+            let prior = app.clients.get(&id).map(|c| c.name.clone()).unwrap_or_default();
+            let from = resolve_name(&app, &v, &prior);
+            if let Some(c) = app.clients.get_mut(&id) {
+                c.name = from.clone();
+                c.authoritative = true;
+            }
+            let target = v.get("target").and_then(|t| t.as_str()).unwrap_or("").to_string();
+            match find_named_available(&app, &target) {
+                Some(tid) if tid != id => {
+                    let deadline = Instant::now() + CHALLENGE_TIMEOUT;
+                    app.challenges.insert(id, (tid, deadline));
+                    send(&app, tid, &json!({"type":"challenged","from":from}));
+                    // Schedule the timeout: if still pending after the window, tell
+                    // the challenger the target "declined" (no answer). Compare the
+                    // exact deadline so an earlier timer can't clear a *re-issued*
+                    // challenge to the same target.
+                    let state2 = state.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(CHALLENGE_TIMEOUT).await;
+                        let mut app = state2.lock().await;
+                        if let Some((t, d)) = app.challenges.get(&id).copied() {
+                            if t == tid && d == deadline {
+                                clear_challenge(&mut app, id);
+                                let by = app.clients.get(&tid).map(|c| c.name.clone()).unwrap_or(target);
+                                send(&app, id, &json!({"type":"challengeDeclined","by":by}));
+                            }
+                        }
+                    });
+                }
+                // Target offline / busy / self — decline immediately.
+                _ => {
+                    send(&app, id, &json!({"type":"challengeDeclined","by":target}));
+                }
+            }
+        }
+        // bob accepts alice's challenge. If a matching pending challenge exists,
+        // build a directed bout for (challenger, accepter) and start it.
+        Some("challengeAccept") => {
+            let from = v.get("from").and_then(|t| t.as_str()).unwrap_or("").to_string();
+            let pending = {
+                let mut app = state.lock().await;
+                // Find the challenger by name whose pending challenge targets THIS id.
+                let challenger = app
+                    .challenges
+                    .iter()
+                    .find(|(&cid, &(tid, _))| {
+                        tid == id && app.clients.get(&cid).is_some_and(|c| c.name == from)
+                    })
+                    .map(|(&cid, _)| cid);
+                match challenger {
+                    Some(cid)
+                        if app.clients.get(&cid).is_some_and(|c| c.bout.is_none())
+                            && app.clients.get(&id).is_some_and(|c| c.bout.is_none()) =>
+                    {
+                        clear_challenge(&mut app, cid);
+                        // Challenger = side A, accepter = side B (no quality figure).
+                        start_bout(&mut app, cid, id, None)
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(pb) = pending {
+                tokio::spawn(run_bout(state.clone(), pb));
+            }
+        }
+        // bob declines alice's challenge -> tell alice, clear the pending challenge.
+        Some("challengeDecline") => {
+            let from = v.get("from").and_then(|t| t.as_str()).unwrap_or("").to_string();
+            let mut app = state.lock().await;
+            let challenger = app
+                .challenges
+                .iter()
+                .find(|(&cid, &(tid, _))| {
+                    tid == id && app.clients.get(&cid).is_some_and(|c| c.name == from)
+                })
+                .map(|(&cid, _)| cid);
+            if let Some(cid) = challenger {
+                clear_challenge(&mut app, cid);
+                let by = app.clients.get(&id).map(|c| c.name.clone()).unwrap_or_default();
+                send(&app, cid, &json!({"type":"challengeDeclined","by":by}));
             }
         }
         // A gameplay action in a server-authoritative match — forward it to that
@@ -652,7 +1058,7 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
         let st = a.rating_for("");
         a.clients.insert(
             id,
-            Client { name: String::new(), tx, peer: None, state: st, authoritative: false, bout: None },
+            Client { name: String::new(), tx, peer: None, state: st, authoritative: false, bout: None, status: None },
         );
     }
 
@@ -677,6 +1083,21 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
     {
         let mut a = state.lock().await;
         a.waiting.retain(|&w| w != id);
+        // This connection's own pending challenge (as challenger) is cancelled.
+        clear_challenge(&mut a, id);
+        // Any pending challenge TARGETING this connection: the target left, so the
+        // challenger should be told it was declined and the challenge cleared.
+        let aimed_here: Vec<u64> = a
+            .challenges
+            .iter()
+            .filter(|(_, &(tid, _))| tid == id)
+            .map(|(&cid, _)| cid)
+            .collect();
+        let by = a.clients.get(&id).map(|c| c.name.clone()).unwrap_or_default();
+        for cid in aimed_here {
+            clear_challenge(&mut a, cid);
+            send(&a, cid, &json!({"type":"challengeDeclined","by":by}));
+        }
         let peer = a.clients.get(&id).and_then(|c| c.peer);
         if let Some(p) = peer {
             send(&a, p, &json!({"type": "opponentLeft"}));
@@ -684,7 +1105,12 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
                 c.peer = None;
             }
         }
+        let was_listed = a.clients.get(&id).is_some_and(|c| c.status.is_some());
         a.clients.remove(&id);
+        // If a named/listed client left, the lobby roster changed — push it.
+        if was_listed {
+            maybe_broadcast_players(&mut a);
+        }
         // If an active player's page closed, the live count may drop — recompute
         // and push it to everyone still here.
         if a.last_active.remove(&id).is_some() {
@@ -756,6 +1182,22 @@ CREATE INDEX IF NOT EXISTS idx_replays_created ON replays(created_at);
 CREATE TABLE IF NOT EXISTS counters (
     name   TEXT PRIMARY KEY,
     value  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS players (
+    name           TEXT PRIMARY KEY,
+    mu             REAL    NOT NULL,
+    sigma          REAL    NOT NULL,
+    games          INTEGER NOT NULL DEFAULT 0,
+    wins           INTEGER NOT NULL DEFAULT 0,
+    losses         INTEGER NOT NULL DEFAULT 0,
+    streak         INTEGER NOT NULL DEFAULT 0,
+    streak_type    TEXT,
+    high_score     INTEGER,
+    high_lines     INTEGER,
+    high_funds     INTEGER,
+    fastest_kill   INTEGER,
+    quickest_death INTEGER,
+    longest_game   INTEGER
 );";
 
 fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
@@ -859,6 +1301,214 @@ fn db_hits(conn: &Connection) -> i64 {
         .ok()
         .flatten()
         .unwrap_or(0)
+}
+
+// --- per-player stats (the `players` table) -----------------------------
+//
+// One row per named player, accumulated at each settled bout: rating
+// (mu/sigma), record (games/wins/losses), a running win/loss streak, the
+// player's personal bests (high score/lines/funds), and three match-tick figures
+// (fastest_kill / quickest_death / longest_game). `ratings.json` stays the
+// rating source-of-truth for matchmaking; this table mirrors mu/sigma so the
+// per-player profile endpoint is one indexed lookup.
+
+/// A player's stored stats. `None` figures are "never recorded yet".
+#[derive(Debug, Clone, PartialEq)]
+struct PlayerStats {
+    name: String,
+    mu: f64,
+    sigma: f64,
+    games: i64,
+    wins: i64,
+    losses: i64,
+    streak: i64,
+    streak_type: Option<String>,
+    high_score: Option<i64>,
+    high_lines: Option<i64>,
+    high_funds: Option<i64>,
+    fastest_kill: Option<i64>,
+    quickest_death: Option<i64>,
+    longest_game: Option<i64>,
+}
+
+impl PlayerStats {
+    /// A fresh, never-played record for `name` at the new-player rating.
+    fn fresh(name: &str) -> PlayerStats {
+        let base = Ts2Params::default().base.new_rating();
+        PlayerStats {
+            name: name.to_string(),
+            mu: base.mu,
+            sigma: base.sigma,
+            games: 0,
+            wins: 0,
+            losses: 0,
+            streak: 0,
+            streak_type: None,
+            high_score: None,
+            high_lines: None,
+            high_funds: None,
+            fastest_kill: None,
+            quickest_death: None,
+            longest_game: None,
+        }
+    }
+}
+
+/// The per-match figures a settlement feeds into a player's row.
+struct MatchStats {
+    won: bool,
+    score: i64,
+    lines: i64,
+    funds: i64,
+    /// Match length in ticks (drives longest_game / fastest_kill / quickest_death).
+    ticks: i64,
+    /// True only for a natural finish (a real top-out). A forfeit/disconnect must
+    /// not pollute the kill/death *timing* records with its arbitrary length.
+    natural: bool,
+}
+
+/// `max(existing, v)` where an absent existing value takes `v`.
+fn opt_max(existing: Option<i64>, v: i64) -> Option<i64> {
+    Some(existing.map_or(v, |e| e.max(v)))
+}
+
+/// `min(existing, v)` where an absent existing value takes `v`.
+fn opt_min(existing: Option<i64>, v: i64) -> Option<i64> {
+    Some(existing.map_or(v, |e| e.min(v)))
+}
+
+/// Fetch a player's row, or `None` if they've never been recorded.
+fn db_get_player(conn: &Connection, name: &str) -> rusqlite::Result<Option<PlayerStats>> {
+    conn.query_row(
+        "SELECT name, mu, sigma, games, wins, losses, streak, streak_type,
+                high_score, high_lines, high_funds, fastest_kill, quickest_death, longest_game
+         FROM players WHERE name = ?1",
+        [name],
+        |row| {
+            Ok(PlayerStats {
+                name: row.get(0)?,
+                mu: row.get(1)?,
+                sigma: row.get(2)?,
+                games: row.get(3)?,
+                wins: row.get(4)?,
+                losses: row.get(5)?,
+                streak: row.get(6)?,
+                streak_type: row.get(7)?,
+                high_score: row.get(8)?,
+                high_lines: row.get(9)?,
+                high_funds: row.get(10)?,
+                fastest_kill: row.get(11)?,
+                quickest_death: row.get(12)?,
+                longest_game: row.get(13)?,
+            })
+        },
+    )
+    .optional()
+}
+
+/// Upsert a whole player row.
+fn db_put_player(conn: &Connection, p: &PlayerStats) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO players
+            (name, mu, sigma, games, wins, losses, streak, streak_type,
+             high_score, high_lines, high_funds, fastest_kill, quickest_death, longest_game)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+         ON CONFLICT(name) DO UPDATE SET
+            mu=?2, sigma=?3, games=?4, wins=?5, losses=?6, streak=?7, streak_type=?8,
+            high_score=?9, high_lines=?10, high_funds=?11,
+            fastest_kill=?12, quickest_death=?13, longest_game=?14",
+        rusqlite::params![
+            p.name, p.mu, p.sigma, p.games, p.wins, p.losses, p.streak, p.streak_type,
+            p.high_score, p.high_lines, p.high_funds, p.fastest_kill, p.quickest_death, p.longest_game,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Fold one settled match into a player's row (loading the prior row or starting
+/// fresh), updating record / streak / personal-bests / time figures, and persist.
+/// `mu`/`sigma` are the player's POST-match rating (kept in sync with ratings.json).
+fn db_record_player_stats(
+    conn: &Connection,
+    name: &str,
+    mu: f64,
+    sigma: f64,
+    m: &MatchStats,
+) -> rusqlite::Result<()> {
+    let mut p = db_get_player(conn, name)?.unwrap_or_else(|| PlayerStats::fresh(name));
+    p.mu = mu;
+    p.sigma = sigma;
+    p.games += 1;
+    if m.won {
+        p.wins += 1;
+    } else {
+        p.losses += 1;
+    }
+    // Streak: extend a same-result run, else start a new one of length 1.
+    let this_type = if m.won { "wins" } else { "losses" };
+    if p.streak_type.as_deref() == Some(this_type) {
+        p.streak += 1;
+    } else {
+        p.streak = 1;
+        p.streak_type = Some(this_type.to_string());
+    }
+    p.high_score = opt_max(p.high_score, m.score);
+    p.high_lines = opt_max(p.high_lines, m.lines);
+    p.high_funds = opt_max(p.high_funds, m.funds);
+    p.longest_game = opt_max(p.longest_game, m.ticks);
+    // Kill/death *timing* records only count real top-outs — a forfeit's length is
+    // arbitrary and would otherwise log a bogus "fastest kill" / "quickest death".
+    if m.natural {
+        if m.won {
+            p.fastest_kill = opt_min(p.fastest_kill, m.ticks);
+        } else {
+            p.quickest_death = opt_min(p.quickest_death, m.ticks);
+        }
+    }
+    db_put_player(conn, &p)
+}
+
+/// One-time seed of the `players` table from `ratings.json` — only when the table
+/// is empty, so it never clobbers accumulated stats. mu/sigma/experience map to
+/// mu/sigma/games (the rating's experience IS its games-played count).
+fn migrate_ratings_into_players(conn: &Connection, ratings: &HashMap<String, (f64, f64, u32)>) {
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM players", [], |r| r.get(0))
+        .unwrap_or(0);
+    if count > 0 || ratings.is_empty() {
+        return;
+    }
+    for (name, &(mu, sigma, exp)) in ratings {
+        let mut p = PlayerStats::fresh(name);
+        p.mu = mu;
+        p.sigma = sigma;
+        p.games = exp as i64;
+        let _ = db_put_player(conn, &p);
+    }
+    println!("seeded players table from {} rating(s)", ratings.len());
+}
+
+/// The `GET /api/player/:name` JSON: stats + an Elo-styled figure from the
+/// conservative rating (μ−3σ). An unknown player yields a fresh, zeroed record.
+fn player_record_json(p: &PlayerStats) -> Value {
+    let conservative = p.mu - 3.0 * p.sigma;
+    json!({
+        "name": p.name,
+        "elo": elo_styled(conservative),
+        "mu": p.mu,
+        "sigma": p.sigma,
+        "games": p.games,
+        "wins": p.wins,
+        "losses": p.losses,
+        "streak": p.streak,
+        "streak_type": p.streak_type,
+        "high_score": p.high_score,
+        "high_lines": p.high_lines,
+        "high_funds": p.high_funds,
+        "fastest_kill": p.fastest_kill,
+        "quickest_death": p.quickest_death,
+        "longest_game": p.longest_game,
+    })
 }
 
 /// List recordings newest-first (capped) with just the metadata the library
@@ -1021,6 +1671,32 @@ async fn leaderboard(State(state): State<Shared>) -> impl IntoResponse {
     Json(json!({ "players": players })).into_response()
 }
 
+/// `POST /api/identity` with `{"name":"<str>"}` — mints an HS256 identity token
+/// `{"token":"<jwt>"}` carrying the sanitized name. Empty/whitespace names are
+/// rejected; over-long names are capped to [`identity::MAX_NAME_LEN`].
+async fn post_identity(body: String) -> impl IntoResponse {
+    let name = serde_json::from_str::<Value>(&body)
+        .ok()
+        .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(str::to_string));
+    let name = match name.as_deref().and_then(identity::sanitize_name) {
+        Some(n) => n,
+        None => return (StatusCode::BAD_REQUEST, "name required").into_response(),
+    };
+    let token = identity::issue_token(&name);
+    Json(json!({ "token": token })).into_response()
+}
+
+/// `GET /api/player/:name` — a player's stats. An unknown player returns a fresh,
+/// zeroed record (200, not 404) so the lobby can show a brand-new player.
+async fn player_profile(State(db): State<Db>, Path(name): Path<String>) -> impl IntoResponse {
+    let stats = {
+        let conn = db.lock().unwrap();
+        db_get_player(&conn, &name).ok().flatten()
+    }
+    .unwrap_or_else(|| PlayerStats::fresh(&name));
+    Json(player_record_json(&stats)).into_response()
+}
+
 #[tokio::main]
 async fn main() {
     let conn = open_db();
@@ -1035,6 +1711,13 @@ async fn main() {
         app: Arc::new(Mutex::new(App::new(db.clone()))),
         db,
     };
+
+    // Materialize the identity-token secret once now (so the per-process-random
+    // fallback is fixed for the run, and a missing BT_JWT_SECRET is logged).
+    let _ = identity::secret();
+    if std::env::var("BT_JWT_SECRET").is_err() {
+        println!("BT_JWT_SECRET unset — using a per-process-random token secret");
+    }
 
     // Decay tick: re-broadcast the "players online" count as players go idle past
     // the 30s window (no client message triggers that, so the server must).
@@ -1057,6 +1740,8 @@ async fn main() {
         .route("/api/replays", post(post_replay).get(list_replays))
         .route("/api/replays/:id", get(get_replay))
         .route("/api/leaderboard", get(leaderboard))
+        .route("/api/identity", post(post_identity))
+        .route("/api/player/:name", get(player_profile))
         .route("/replay/:id", get(replay_page))
         .route("/", get(|| async { Redirect::permanent("/www/") }))
         .fallback_service(ServeDir::new(&static_dir))
@@ -1098,15 +1783,21 @@ mod tests {
             settled: HashSet::new(),
             params: Ts2Params::default(),
             db: std::sync::Arc::new(std::sync::Mutex::new(mem_db())),
+            challenges: HashMap::new(),
+            last_players: Vec::new(),
         }
     }
 
+    /// Add a named client with NO lobby status (the pre-presence default): it
+    /// only becomes a match candidate via the explicit `waiting` queue, so the
+    /// `queue`-based matchmaking tests keep their old semantics. New presence
+    /// tests set `status` explicitly.
     fn add_client(app: &mut App, id: u64, name: &str) -> mpsc::UnboundedReceiver<Message> {
         let (tx, rx) = mpsc::unbounded_channel();
         let state = app.rating_for(name);
         app.clients.insert(
             id,
-            Client { name: name.to_string(), tx, peer: None, state, authoritative: false, bout: None },
+            Client { name: name.to_string(), tx, peer: None, state, authoritative: false, bout: None, status: None },
         );
         rx
     }
@@ -1391,5 +2082,223 @@ mod tests {
         let list = db_list(&conn, 200).unwrap();
         let seeds: Vec<i64> = list.iter().map(|v| v["seed"].as_i64().unwrap()).collect();
         assert_eq!(seeds, vec![2, 3, 1], "ordered by created_at descending");
+    }
+
+    // --- presence / roster ---------------------------------------------------
+
+    /// Mark a client authoritative + give it a lobby status (the presence path).
+    fn set_present(app: &mut App, id: u64, status: Status) {
+        let c = app.clients.get_mut(&id).unwrap();
+        c.authoritative = true;
+        c.status = Some(status);
+    }
+
+    #[test]
+    fn roster_lists_only_named_clients_lowercase_and_sorted() {
+        let mut app = test_app();
+        let _r1 = add_client(&mut app, 1, "bob");
+        let _r2 = add_client(&mut app, 2, "alice");
+        let _r3 = add_client(&mut app, 3, ""); // anonymous -> never listed
+        set_present(&mut app, 1, Status::Searching);
+        set_present(&mut app, 2, Status::Available);
+
+        let frame = players_msg(&roster(&app));
+        let players = frame["players"].as_array().unwrap();
+        assert_eq!(players.len(), 2, "the anonymous connection isn't listed");
+        // Sorted by name -> alice before bob; statuses are lowercase wire strings.
+        assert_eq!(players[0]["name"], "alice");
+        assert_eq!(players[0]["status"], "available");
+        assert_eq!(players[1]["name"], "bob");
+        assert_eq!(players[1]["status"], "searching");
+    }
+
+    #[test]
+    fn roster_dedupes_a_name_keeping_the_most_engaged_status() {
+        let mut app = test_app();
+        // Same name on two connections: one Available, one InGame -> show InGame.
+        let _r1 = add_client(&mut app, 1, "dup");
+        let _r2 = add_client(&mut app, 2, "dup");
+        set_present(&mut app, 1, Status::Available);
+        set_present(&mut app, 2, Status::InGame);
+        let r = roster(&app);
+        assert_eq!(r.len(), 1, "de-duped by name");
+        assert_eq!(r[0], ("dup".to_string(), Status::InGame), "the busiest status wins");
+    }
+
+    #[test]
+    fn maybe_broadcast_players_only_pushes_on_a_real_change() {
+        let mut app = test_app();
+        let mut rx = add_client(&mut app, 1, "alice");
+        set_present(&mut app, 1, Status::Available);
+        maybe_broadcast_players(&mut app);
+        assert!(drained_types(&mut rx).contains(&"players".to_string()), "first roster pushed");
+        // No change -> no re-broadcast.
+        maybe_broadcast_players(&mut app);
+        assert!(!drained_types(&mut rx).contains(&"players".to_string()), "no spurious re-push");
+        // A status change -> pushed again.
+        set_present(&mut app, 1, Status::Searching);
+        maybe_broadcast_players(&mut app);
+        assert!(drained_types(&mut rx).contains(&"players".to_string()), "change re-pushed");
+    }
+
+    // --- unified auto-pairing (Available is challengeable AND auto-pairable) ---
+
+    #[test]
+    fn two_available_clients_auto_pair_without_an_explicit_queue() {
+        let mut app = test_app();
+        let mut rx_a = add_client(&mut app, 1, "alice");
+        let mut rx_b = add_client(&mut app, 2, "bob");
+        set_present(&mut app, 1, Status::Available);
+        set_present(&mut app, 2, Status::Available);
+
+        // alice goes through the matcher with NO one queued — bob is Available, so
+        // they pair purely on presence.
+        let pending = try_match(&mut app, 1).expect("two Available clients pair");
+        assert_eq!((pending.id_a, pending.id_b), (2, 1), "bob (the candidate) is side A");
+        assert_eq!(app.clients[&1].status, Some(Status::InGame));
+        assert_eq!(app.clients[&2].status, Some(Status::InGame));
+        assert!(drained_types(&mut rx_a).contains(&"matchStart".to_string()));
+        assert!(drained_types(&mut rx_b).contains(&"matchStart".to_string()));
+    }
+
+    // --- directed challenge --------------------------------------------------
+
+    #[test]
+    fn challenge_accept_builds_a_directed_bout_and_sets_both_ingame() {
+        let mut app = test_app();
+        let mut rx_a = add_client(&mut app, 1, "alice");
+        let mut rx_b = add_client(&mut app, 2, "bob");
+        set_present(&mut app, 1, Status::Available);
+        set_present(&mut app, 2, Status::Available);
+
+        // alice challenges bob (record the pending challenge as the handler would).
+        let tid = find_named_available(&app, "bob").expect("bob is challengeable");
+        assert_eq!(tid, 2);
+        app.challenges.insert(1, (2, Instant::now() + CHALLENGE_TIMEOUT));
+
+        // bob accepts -> a directed bout for (alice=A, bob=B); challenge cleared.
+        let pending = start_bout(&mut app, 1, 2, None).expect("directed bout built");
+        clear_challenge(&mut app, 1);
+        assert_eq!((pending.id_a, pending.id_b), (1, 2), "challenger is side A");
+        assert!(app.challenges.is_empty(), "pending challenge cleared on accept");
+        assert_eq!(app.clients[&1].status, Some(Status::InGame));
+        assert_eq!(app.clients[&2].status, Some(Status::InGame));
+        // No quality figure for a hand-picked challenge.
+        let ma: Vec<Value> = std::iter::from_fn(|| rx_a.try_recv().ok())
+            .filter_map(|m| match m {
+                Message::Text(t) => serde_json::from_str(&t).ok(),
+                _ => None,
+            })
+            .collect();
+        let start = ma.iter().find(|v| v["type"] == "matchStart").expect("matchStart");
+        assert!(start["quality"].is_null(), "a challenge match carries no quality");
+        let _ = &mut rx_b;
+    }
+
+    #[test]
+    fn find_named_available_ignores_busy_or_offline_targets() {
+        let mut app = test_app();
+        let _r = add_client(&mut app, 1, "busy");
+        set_present(&mut app, 1, Status::InGame); // in a match -> not challengeable
+        assert!(find_named_available(&app, "busy").is_none(), "InGame isn't available");
+        assert!(find_named_available(&app, "ghost").is_none(), "offline isn't available");
+        set_present(&mut app, 1, Status::Available);
+        assert_eq!(find_named_available(&app, "busy"), Some(1), "Available is challengeable");
+    }
+
+    // --- per-player stats (the players table) --------------------------------
+
+    #[test]
+    fn player_settlement_folds_record_streak_bests_and_times() {
+        let conn = mem_db();
+        // alice wins a 500-tick match with score 1200, 30 lines, 400 funds.
+        let win = MatchStats { won: true, score: 1200, lines: 30, funds: 400, ticks: 500, natural: true };
+        db_record_player_stats(&conn, "alice", 28.0, 5.0, &win).unwrap();
+        let p = db_get_player(&conn, "alice").unwrap().unwrap();
+        assert_eq!((p.games, p.wins, p.losses), (1, 1, 0));
+        assert_eq!((p.streak, p.streak_type.as_deref()), (1, Some("wins")));
+        assert_eq!(p.high_score, Some(1200));
+        assert_eq!(p.high_lines, Some(30));
+        assert_eq!(p.high_funds, Some(400));
+        assert_eq!(p.longest_game, Some(500));
+        assert_eq!(p.fastest_kill, Some(500), "a win sets fastest_kill");
+        assert_eq!(p.quickest_death, None, "no loss yet");
+
+        // A second win extends the streak; a faster kill + lower score don't regress
+        // the bests; longest_game takes the max.
+        let win2 = MatchStats { won: true, score: 800, lines: 50, funds: 100, ticks: 300, natural: true };
+        db_record_player_stats(&conn, "alice", 29.0, 4.5, &win2).unwrap();
+        let p = db_get_player(&conn, "alice").unwrap().unwrap();
+        assert_eq!((p.streak, p.streak_type.as_deref()), (2, Some("wins")), "streak grows");
+        assert_eq!(p.high_score, Some(1200), "high_score keeps the max");
+        assert_eq!(p.high_lines, Some(50), "high_lines takes the new max");
+        assert_eq!(p.fastest_kill, Some(300), "fastest_kill takes the min");
+        assert_eq!(p.longest_game, Some(500), "longest_game keeps the max");
+        assert!((p.mu - 29.0).abs() < 1e-9, "mu kept in sync");
+
+        // A loss resets the streak to a fresh losing run and sets quickest_death.
+        let loss = MatchStats { won: false, score: 50, lines: 2, funds: 0, ticks: 120, natural: true };
+        db_record_player_stats(&conn, "alice", 27.5, 4.4, &loss).unwrap();
+        let p = db_get_player(&conn, "alice").unwrap().unwrap();
+        assert_eq!((p.games, p.wins, p.losses), (3, 2, 1));
+        assert_eq!((p.streak, p.streak_type.as_deref()), (1, Some("losses")), "streak resets");
+        assert_eq!(p.quickest_death, Some(120), "a loss sets quickest_death");
+        assert_eq!(p.fastest_kill, Some(300), "fastest_kill untouched by a loss");
+    }
+
+    #[test]
+    fn a_forfeit_records_the_result_but_not_kill_death_timing() {
+        let conn = mem_db();
+        // A forfeit win (natural=false) counts as a win + game, but its arbitrary
+        // length must NOT set fastest_kill.
+        let ff_win = MatchStats { won: true, score: 10, lines: 1, funds: 0, ticks: 7, natural: false };
+        db_record_player_stats(&conn, "carol", 25.0, 8.0, &ff_win).unwrap();
+        let p = db_get_player(&conn, "carol").unwrap().unwrap();
+        assert_eq!((p.games, p.wins), (1, 1), "forfeit still counts as a win");
+        assert_eq!(p.longest_game, Some(7), "length still feeds longest_game");
+        assert_eq!(p.fastest_kill, None, "a forfeit must not set fastest_kill");
+
+        // A forfeit loss likewise leaves quickest_death untouched.
+        let ff_loss = MatchStats { won: false, score: 0, lines: 0, funds: 0, ticks: 9, natural: false };
+        db_record_player_stats(&conn, "carol", 24.0, 8.0, &ff_loss).unwrap();
+        let p = db_get_player(&conn, "carol").unwrap().unwrap();
+        assert_eq!((p.wins, p.losses), (1, 1));
+        assert_eq!(p.quickest_death, None, "a forfeit must not set quickest_death");
+    }
+
+    #[test]
+    fn ratings_json_migrates_into_an_empty_players_table_once() {
+        let conn = mem_db();
+        let mut ratings = HashMap::new();
+        ratings.insert("veteran".to_string(), (30.0_f64, 2.0_f64, 42u32));
+        ratings.insert("rookie".to_string(), (25.0, 25.0 / 3.0, 0));
+
+        migrate_ratings_into_players(&conn, &ratings);
+        let vet = db_get_player(&conn, "veteran").unwrap().unwrap();
+        assert!((vet.mu - 30.0).abs() < 1e-9 && (vet.sigma - 2.0).abs() < 1e-9);
+        assert_eq!(vet.games, 42, "experience maps to games");
+        assert_eq!(vet.wins, 0, "migration brings ratings, not a win/loss split");
+
+        // A second migration is a no-op (table no longer empty) — it must not
+        // clobber accumulated stats.
+        let win = MatchStats { won: true, score: 1, lines: 1, funds: 1, ticks: 10, natural: true };
+        db_record_player_stats(&conn, "veteran", 31.0, 1.9, &win).unwrap();
+        migrate_ratings_into_players(&conn, &ratings);
+        let vet = db_get_player(&conn, "veteran").unwrap().unwrap();
+        assert_eq!(vet.games, 43, "migration didn't overwrite the post-game row");
+        assert!((vet.mu - 31.0).abs() < 1e-9, "post-game rating preserved");
+    }
+
+    #[test]
+    fn player_record_json_defaults_for_an_unknown_player() {
+        let p = PlayerStats::fresh("nobody");
+        let v = player_record_json(&p);
+        assert_eq!(v["name"], "nobody");
+        assert_eq!(v["games"], 0);
+        assert_eq!(v["wins"], 0);
+        assert_eq!(v["elo"], 1000, "a fresh player reads ~1000 Elo");
+        assert!(v["high_score"].is_null(), "never-recorded bests are null");
+        assert!(v["fastest_kill"].is_null());
+        assert!(v["streak_type"].is_null());
     }
 }

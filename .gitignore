@@ -31,3 +31,6 @@ usr/src/daemons/btnetwork.idx
 usr/src/daemons/btplayers.dat
 usr/src/daemons/btplayers.idx
 usr/src/btref/btref.tmpdb*
+
+# Local bt-server runtime DB (dev)
+rust/replays.db*

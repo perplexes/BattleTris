@@ -7,52 +7,52 @@
 body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
     background-color: #bfbfbf;
-    padding: 20px;
+    padding: 12px 20px;
 }
 
-.container {
-    max-width: 1000px;
-    margin: 0 auto;
-}
+/* ═══ Two screens (lobby <-> playfield), one visible at a time ═══════════════
+   Mirrors the original window swapping the BTChallenge and BTGame forms. */
+.screen { width: 100%; }
 
-/* ─── Title logo ──────────────────────────────────────────────────────────── */
-.title-wrap {
-    text-align: center;
-    margin-bottom: 16px;
-}
+/* ─── Lobby screen (BTChallenge.C): two-column gray75 Motif card ───────────── */
+.lobby-screen { max-width: 900px; margin: 0 auto; }
 
-.title-img {
-    max-width: 533px;
-    width: 100%;
-    display: inline-block;
-    image-rendering: pixelated;
-    image-rendering: crisp-edges;
-}
-
-/* ─── Mode buttons ────────────────────────────────────────────────────────── */
-.mode-selector {
+.lobby-card {
     display: flex;
-    gap: 10px;
+    gap: 18px;
+    background-color: #bfbfbf;                 /* gray75 window */
+    border: 3px solid #808080;
+    border-top-color: #ffffff; border-left-color: #ffffff;
+    border-bottom-color: #000000; border-right-color: #000000;
+    padding: 16px;
+    box-shadow: 2px 2px 6px rgba(0, 0, 0, 0.4);
+}
+.lobby-left, .lobby-right {
+    display: flex; flex-direction: column; gap: 14px;
+    flex: 1; min-width: 0;
+}
+
+/* Secondary actions row (old BTStartup menu + our extras) */
+.lobby-extras {
+    display: flex;
+    gap: 8px;
     justify-content: center;
-    margin-bottom: 20px;
     flex-wrap: wrap;
-    align-items: center;
+    margin: 14px auto 0;
+    max-width: 900px;
 }
 
-.ernie-level {
-    display: inline-flex;
+.lobby-footer {
+    display: flex;
     align-items: center;
-    gap: 6px;
-    font-size: 14px;
-    color: #404040;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+    max-width: 900px;
+    margin: 14px auto 0;
+    padding-top: 10px;
 }
-
-.ernie-level select {
-    padding: 6px 8px;
-    background-color: #dfdfdf;
-    border: 2px solid #808080;
-    font-family: inherit;
-}
+.players-online { font-size: 13px; font-weight: bold; color: #404040; }
 
 .mode-btn {
     padding: 10px 20px;
@@ -86,27 +86,26 @@ body {
     border-bottom-color: #808080;
 }
 
-/* ─── Game layout ─────────────────────────────────────────────────────────── */
+/* ─── Game screen (BTGame.C): board left (fills height) + score/arsenal right ── */
+.game-screen { min-height: 100vh; }
+
 .game-area {
     display: flex;
-    gap: 20px;
+    gap: 22px;
     justify-content: center;
     align-items: flex-start;
+    padding: 28px 16px;
 }
 
-.left-panel {
+.center-panel { flex-shrink: 0; }
+
+.game-right {
     display: flex;
     flex-direction: column;
-    gap: 20px;
-}
-
-.center-panel {
-    flex-shrink: 0;
-}
-
-.right-panel {
-    display: flex;
-    flex-direction: column;
+    gap: 12px;
+    width: 360px;
+    max-height: calc(100vh - 56px);
+    overflow-y: auto;
 }
 
 /* ─── Board ───────────────────────────────────────────────────────────────── */
@@ -147,50 +146,40 @@ body {
     letter-spacing: 4px;
 }
 
-/* ─── Combined Stats panel (left) ─────────────────────────────────────────── */
-.stats-panel {
-    background-color: #bfbfbf;
-    border: 3px solid #808080;
-    padding: 14px 16px;
-    width: 220px;
-    box-shadow: inset 1px 1px 0 #ffffff, inset -1px -1px 0 #000000, 2px 2px 4px rgba(0, 0, 0, 0.5);
+/* ─── Score box (BTGame score_box: blue lucidatypewriter on gray66) ────────── */
+.score-box, .arsenal-box {
+    background-color: #a8a8a8;                 /* gray66 */
+    border: 2px solid #808080;
+    border-top-color: #ffffff; border-left-color: #ffffff;
+    border-bottom-color: #000000; border-right-color: #000000;
 }
+.score-box { padding: 12px 16px; }
+.arsenal-box { padding: 8px; }
 
-/* Visual gap row between stat groups */
-.stat-gap {
-    height: 8px;
-}
-
-/* Each stat row: label left, value right on same line */
-.stat-row {
+.score-row {
     display: flex;
     justify-content: space-between;
     align-items: baseline;
-    margin-bottom: 4px;
-    gap: 6px;
-}
-
-.stat-label {
-    font-family: 'Courier New', monospace;
+    font-family: 'Courier New', Menlo, monospace;
     font-weight: bold;
-    color: #0000cd;
-    font-size: 11px;
-    flex-shrink: 0;
+    color: #0000cd;                            /* blue */
+    font-size: 17px;
+    line-height: 1.5;
 }
+.score-label { white-space: nowrap; }
+.score-value { white-space: nowrap; padding-left: 16px; }
+.score-gap { height: 12px; }
 
-.stat-value {
-    font-family: 'Courier New', monospace;
+.playing-status {
+    font-family: 'Courier New', Menlo, monospace;
     font-weight: bold;
-    color: #0000cd;
-    font-size: 13px;
-    text-align: right;
-    white-space: nowrap;
+    font-size: 14px;
+    color: #222;
+    padding: 0 2px;
 }
 
-/* Keep the hidden legacy opponent panel out of flow */
-.opponent-panel {
-    display: none;
-}
+.game-buttons { display: flex; gap: 8px; }
+.game-buttons .lobby-btn { flex: 1; }
 
 .new-game-btn {
     width: 100%;
@@ -412,18 +401,15 @@ body {
     background-color: #000000;
 }
 
-/* ─── Bazaar overlay ──────────────────────────────────────────────────────── */
+/* ─── Bazaar overlay (a full-viewport modal, like the original 800x800 form) ── */
 .bazaar-overlay {
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
+    position: fixed;
+    inset: 0;
     background-color: rgba(0, 0, 0, 0.85);
     display: none;
     align-items: center;
     justify-content: center;
-    z-index: 20;
+    z-index: 50;
 }
 
 .bazaar-panel {
@@ -611,36 +597,38 @@ body {
     background-color: #0000cc;
 }
 
-/* Selected weapon info at bottom of middle col */
+/* Selected-weapon description: a band spanning the bottom of the bazaar
+   (BTBazaar.C weap_desc at 340,600 -> 780,780), not jammed in the middle col. */
 .bazaar-info {
-    margin-top: 6px;
-    padding: 6px;
-    background-color: #e8e8e8;
-    border: 1px inset #808080;
+    margin: 0 8px 8px;
+    padding: 8px 12px;
+    background-color: #a8a8a8;                  /* gray66 */
+    border: 2px solid #808080;
+    border-top-color: #000000; border-left-color: #000000;
+    border-bottom-color: #ffffff; border-right-color: #ffffff;
     font-family: 'Courier New', monospace;
-    font-size: 10px;
-    flex: 1;
-    overflow-y: auto;
-    min-height: 60px;
+    font-size: 13px;
+    min-height: 62px;
+    flex-shrink: 0;
 }
 
 .bazaar-info-price {
     font-weight: bold;
-    color: #008000;
-    margin-bottom: 3px;
+    color: #006000;
+    margin-right: 18px;
 }
 
 .bazaar-info-duration {
-    color: #555;
-    margin-bottom: 3px;
+    color: #444;
 }
 
 .bazaar-info-desc {
     color: #0000cd;
-    line-height: 1.3;
-    font-size: 10px;
+    line-height: 1.35;
+    font-size: 13px;
     white-space: pre-wrap;
     word-break: break-word;
+    margin-top: 5px;
 }
 
 /* Right: arsenal in bazaar */
@@ -747,15 +735,14 @@ body {
         flex-direction: column;
         align-items: center;
         gap: 8px;
+        padding: 6px 4px;
     }
 
-    /* Hide the desktop left panel (stats + controls) */
-    .left-panel {
-        display: none;
-    }
+    /* Lobby stacks into one column on narrow screens */
+    .lobby-card { flex-direction: column; }
 
-    /* Hide the desktop right panel (arsenal, ai board) */
-    .right-panel {
+    /* Hide the desktop score/arsenal column (mobile uses the compact bars) */
+    .game-right {
         display: none;
     }
 
@@ -1404,3 +1391,113 @@ body {
     color: #33ff44;
     margin-right: 8px;
 }
+
+/* ═══════════════════ LOBBY COMPONENTS (BTChallenge.C) ═══════════════════════ */
+
+/* Blue Motif push button (the original's blue-on-gray buttons). */
+.lobby-btn {
+    padding: 9px 16px;
+    background-color: #c8c8c8;
+    border: 2px solid #808080;
+    border-top-color: #ffffff; border-left-color: #ffffff;
+    border-bottom-color: #000000; border-right-color: #000000;
+    color: #0000cd;                            /* blue foreground */
+    font-weight: bold;
+    font-size: 14px;
+    cursor: pointer;
+    transition: background-color 0.1s;
+}
+.lobby-btn:hover:not(:disabled) { background-color: #d8d8d8; }
+.lobby-btn:active:not(:disabled) {
+    border-top-color: #000000; border-left-color: #000000;
+    border-bottom-color: #ffffff; border-right-color: #ffffff;
+}
+.lobby-btn:disabled { color: #888; cursor: default; }
+/* Find Match pulses green while a background search runs. */
+.lobby-btn.searching {
+    background-color: #d8eed8;
+    animation: bt-search-pulse 1.1s ease-in-out infinite;
+}
+
+/* Player list (red selection on gray66, per BTChallenge*XmList). */
+.lobby-listbox {
+    flex: 1;
+    min-height: 240px;
+    display: flex; flex-direction: column;
+    border: 2px solid #808080;
+    border-top-color: #000000; border-left-color: #000000;
+    border-bottom-color: #ffffff; border-right-color: #ffffff;
+    background-color: #a8a8a8;
+}
+.lobby-listbox-head {
+    padding: 5px 8px;
+    font-weight: bold; font-size: 13px; color: #0000cd;
+    border-bottom: 1px solid #808080;
+    background-color: #bfbfbf;
+}
+.lobby-list {
+    flex: 1; overflow-y: auto;
+    font-family: 'Courier New', monospace; font-size: 13px;
+    color: #cc0000;                            /* red3 */
+}
+.lobby-list-row {
+    display: flex; justify-content: space-between; gap: 10px;
+    padding: 3px 8px; cursor: pointer;
+}
+.lobby-list-row:hover { background-color: #b8b8b8; }
+.lobby-list-row.selected { background-color: #cc0000; color: #ffffff; }
+.ll-status { opacity: 0.85; font-size: 12px; }
+.lobby-list-empty { padding: 14px; color: #555; font-size: 12px; font-style: italic; }
+
+/* "Play Computer" frame. */
+.lobby-frame {
+    border: 2px solid #808080;
+    border-top-color: #ffffff; border-left-color: #ffffff;
+    border-bottom-color: #000000; border-right-color: #000000;
+    padding: 12px;
+    display: flex; flex-direction: column; gap: 10px;
+}
+.lobby-frame legend { font-weight: bold; color: #0000cd; padding: 0 6px; font-size: 13px; }
+.lobby-slider { width: 100%; }
+.lobby-toggle { font-size: 13px; color: #333; display: flex; align-items: center; gap: 6px; cursor: pointer; }
+
+/* Right column: shield, actions, stats. */
+.lobby-logo-row { text-align: center; }
+.lobby-shield {
+    height: 120px; width: auto;
+    image-rendering: pixelated; image-rendering: crisp-edges;
+}
+.lobby-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.lobby-actions .lobby-btn { flex: 1; min-width: 90px; }
+
+.lobby-statsbox {
+    flex: 1;
+    border: 2px solid #808080;
+    border-top-color: #000000; border-left-color: #000000;
+    border-bottom-color: #ffffff; border-right-color: #ffffff;
+    background-color: #a8a8a8;
+    padding: 10px 12px;
+    overflow-y: auto;
+    min-height: 200px;
+}
+.lobby-stats {
+    margin: 0;
+    font-family: 'Courier New', Menlo, monospace;
+    font-size: 13px;
+    color: #cc0000;                            /* red3 */
+    white-space: pre-wrap;
+    line-height: 1.4;
+}
+
+/* Arsenal items on the playfield: blue monospace (BTGame arsenal_box). */
+.arsenal-box .arsenal-item {
+    color: #0000cd;
+    font-size: 14px;
+    background-color: #bdbdbd;
+    padding: 5px 9px;
+}
+.arsenal-box .arsenal-item.occupied { color: #0000cd; }
+
+/* Incoming-challenge modal reuses the bug-modal frame. */
+.challenge-panel { text-align: center; }
+.challenge-panel h2 { margin-bottom: 16px; }

@@ -286,6 +286,22 @@ impl Bout {
         self.versus.game(side).score().lines.max(0) as u32
     }
 
+    /// This side's final score — for the per-player `high_score` stat at settlement.
+    pub fn score(&self, side: Side) -> i64 {
+        self.versus.game(side).score().score
+    }
+
+    /// This side's final funds — for the per-player `high_funds` stat at settlement.
+    pub fn funds(&self, side: Side) -> i64 {
+        self.versus.game(side).score().funds
+    }
+
+    /// How many ticks the match has run — the unit for the per-player time stats
+    /// (`longest_game`, `fastest_kill`, `quickest_death`).
+    pub fn tick_count(&self) -> u64 {
+        self.tick
+    }
+
     /// The authoritative snapshot for `side` as a ready-to-send ws message: the
     /// [`Snapshot`] fields plus a `{"type":"snapshot"}` tag.
     pub fn snapshot_message(&self, side: Side, include_keyframe: bool) -> String {
@@ -467,6 +483,17 @@ mod tests {
         let sb = b.snapshot_for(Side::B, true);
         assert!(!sb.spying && sb.spy_board.is_none(), "the spied player learns nothing");
         assert!(b.snapshot_for(Side::A, false).spy_board.is_none(), "spy board rides keyframes only");
+    }
+
+    #[test]
+    fn settlement_accessors_report_per_side_state_and_tick_count() {
+        let mut b = Bout::new(1, 2);
+        assert_eq!(b.tick_count(), 0, "no ticks yet");
+        assert_eq!(b.score(Side::A), 0);
+        assert_eq!(b.funds(Side::B), 0);
+        b.tick(16);
+        b.tick(16);
+        assert_eq!(b.tick_count(), 2, "tick_count advances with the sim");
     }
 
     #[test]
