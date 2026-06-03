@@ -178,6 +178,12 @@ function cleanupOnline() {
 // match, send it to the server tagged with a seq (and remember it for replay on
 // the next keyframe). Returns the buy/sell success for the bazaar UI.
 function predict(kind, arg) {
+    // The bazaar freezes play: only shopping actions are valid (the server
+    // rejects the rest). Gate centrally so NO call site — keys, touch, arsenal
+    // clicks — can predict/send a non-shopping input while in the bazaar.
+    if (inBazaar() && kind !== 'BuyWeapon' && kind !== 'SellWeapon' && kind !== 'LeaveBazaar') {
+        return;
+    }
     let repr = null;
     switch (kind) {
         case 'MoveLeft':  game.move_left();  repr = 'MoveLeft';  break;
