@@ -30,12 +30,18 @@ function fmtAge(mtime) {
     }
     statusEl.textContent = `${replays.length} replay${replays.length === 1 ? '' : 's'}`;
 
+    const esc = (s) => String(s).replace(/[&<>"]/g, (c) => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]
+    ));
+
     for (const r of replays) {
         const a = document.createElement('a');
         a.className = 'library-item';
         a.href = '/replay/' + r.id;
         const lvl = (r.ai_level !== null && r.ai_level !== undefined) ? ` (Ernie ${r.ai_level})` : '';
+        const title = r.title ? `<span class="library-title">${esc(r.title)}</span>` : '';
         a.innerHTML =
+            title +
             `<span class="library-mode">${r.mode}${lvl}</span>` +
             `<span class="library-stat">${r.tick_count} ticks</span>` +
             `<span class="library-stat">${r.inputs} inputs</span>` +

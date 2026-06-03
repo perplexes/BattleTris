@@ -1397,3 +1397,10 @@ body {
     background-color: #062006;
     text-shadow: 0 0 4px #33ff44;
 }
+
+/* Replay library: optional human label (e.g. weapon-showcase name). */
+.library-title {
+    font-weight: bold;
+    color: #33ff44;
+    margin-right: 8px;
+}

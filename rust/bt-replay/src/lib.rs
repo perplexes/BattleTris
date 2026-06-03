@@ -124,6 +124,10 @@ pub struct Replay {
     /// Total engine ticks elapsed at the end of the recording.
     pub tick_count: u32,
     pub frames: Vec<Frame>,
+    /// Optional human label (e.g. a weapon-showcase name). Absent in older
+    /// recordings, so it defaults to `None` on deserialize.
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 impl Replay {
@@ -151,6 +155,7 @@ pub struct Recorder {
     engine_sha: String,
     tick: u32,
     frames: Vec<Frame>,
+    title: Option<String>,
 }
 
 impl Recorder {
@@ -163,7 +168,13 @@ impl Recorder {
             engine_sha: engine_sha.to_string(),
             tick: 0,
             frames: Vec::new(),
+            title: None,
         }
+    }
+
+    /// Attach a human label to the recording (shown in the replay library).
+    pub fn set_title(&mut self, title: impl Into<String>) {
+        self.title = Some(title.into());
     }
 
     /// Stamp `input` at the current tick. Call this whenever an input is applied
@@ -197,6 +208,7 @@ impl Recorder {
             engine_sha: self.engine_sha.clone(),
             tick_count: self.tick,
             frames: self.frames.clone(),
+            title: self.title.clone(),
         }
     }
 

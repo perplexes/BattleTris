@@ -36,6 +36,7 @@ fn build_showcase(token: WeaponToken) -> (Replay, Vec<Vec<Option<i32>>>) {
     let seed: u32 = 12_345;
     let mut g = Game::new(seed as u64);
     let mut rec = Recorder::new(seed, Mode::Practice, None, 16, "weapon-showcase");
+    rec.set_title(weapon_table()[token.index()].name);
 
     let mut drop_piece = |g: &mut Game, rec: &mut Recorder, lefts: u32| {
         for _ in 0..lefts {

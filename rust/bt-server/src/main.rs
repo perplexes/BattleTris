@@ -481,7 +481,8 @@ CREATE TABLE IF NOT EXISTS replays (
     inputs      INTEGER NOT NULL,
     engine_sha  TEXT NOT NULL,
     created_at  INTEGER NOT NULL,
-    json        TEXT NOT NULL
+    json        TEXT NOT NULL,
+    title       TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_replays_created ON replays(created_at);
 CREATE TABLE IF NOT EXISTS counters (
@@ -490,7 +491,12 @@ CREATE TABLE IF NOT EXISTS counters (
 );";
 
 fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(SCHEMA)
+    conn.execute_batch(SCHEMA)?;
+    // Migration for DBs created before `title` existed. CREATE TABLE IF NOT
+    // EXISTS won't add the column, so ALTER it in; ignore the duplicate-column
+    // error when it's already there.
+    let _ = conn.execute("ALTER TABLE replays ADD COLUMN title TEXT", []);
+    Ok(())
 }
 
 /// Open (creating if needed) the replay DB and ensure the schema exists. WAL +
@@ -515,8 +521,8 @@ fn open_db() -> Connection {
 fn db_insert(conn: &Connection, id: &str, r: &Replay, json: &str, created_at: i64) -> rusqlite::Result<usize> {
     conn.execute(
         "INSERT OR IGNORE INTO replays
-            (id, mode, seed, ai_level, tick_count, inputs, engine_sha, created_at, json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            (id, mode, seed, ai_level, tick_count, inputs, engine_sha, created_at, json, title)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         rusqlite::params![
             id,
             format!("{:?}", r.mode),
@@ -527,6 +533,7 @@ fn db_insert(conn: &Connection, id: &str, r: &Replay, json: &str, created_at: i6
             r.engine_sha,
             created_at,
             json,
+            r.title,
         ],
     )
 }
@@ -561,11 +568,12 @@ fn db_hits(conn: &Connection) -> i64 {
 /// browse page needs.
 fn db_list(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Value>> {
     let mut stmt = conn.prepare(
-        "SELECT id, mode, seed, ai_level, tick_count, inputs, engine_sha, created_at
+        "SELECT id, mode, seed, ai_level, tick_count, inputs, engine_sha, created_at, title
          FROM replays ORDER BY created_at DESC, id DESC LIMIT ?1",
     )?;
     let rows = stmt.query_map([limit], |row| {
         let ai_level: Option<i64> = row.get(3)?;
+        let title: Option<String> = row.get(8)?;
         Ok(json!({
             "id": row.get::<_, String>(0)?,
             "mode": row.get::<_, String>(1)?,
@@ -575,6 +583,7 @@ fn db_list(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Value>> {
             "inputs": row.get::<_, i64>(5)?,
             "engine_sha": row.get::<_, String>(6)?,
             "mtime": row.get::<_, i64>(7)?,
+            "title": title,
         }))
     })?;
     rows.collect()
@@ -909,6 +918,7 @@ mod tests {
             engine_sha: "abc1234".to_string(),
             tick_count: 100,
             frames: vec![bt_replay::Frame { tick: 5, input: bt_replay::Input::MoveLeft }],
+            title: None,
         }
     }
 
@@ -916,6 +926,18 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_schema(&conn).unwrap();
         conn
+    }
+
+    #[test]
+    fn replay_title_round_trips_through_the_db() {
+        let conn = mem_db();
+        let mut r = sample_replay(7, bt_replay::Mode::Practice, None);
+        r.title = Some("The Gimp".to_string());
+        let json = r.to_json();
+        let id = replay_id(&json);
+        db_insert(&conn, &id, &r, &json, 1234).unwrap();
+        let list = db_list(&conn, 10).unwrap();
+        assert_eq!(list[0]["title"], "The Gimp", "the library listing surfaces the title");
     }
 
     #[test]
