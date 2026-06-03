@@ -20,11 +20,22 @@ let broadcastChannel = null;
 
 // Online / WebRTC state
 let ws = null;       // WebSocket to signaling server
-let pc = null;       // RTCPeerConnection
-let dc = null;       // RTCDataChannel
+let pc = null;       // RTCPeerConnection (legacy P2P; unused in authoritative mode)
+let dc = null;       // RTCDataChannel (legacy P2P)
 let onlinePaused = true;  // true until the data channel opens
 let onlineOpponentName = '';
 let searching = false;    // background matchmaking in progress (queued, not yet matched)
+
+// Server-authoritative online play (the client-server migration). In an
+// authoritative match the server runs the real simulation; the client predicts
+// locally for a 0-latency feel, sends each input to the server (tagged with a
+// monotonic seq), and reconciles against the server's keyframes by restoring the
+// full game state and re-applying its not-yet-acknowledged inputs.
+let authoritative = false; // true during a server-authoritative online match
+let inputSeq = 0;          // monotonic client input counter
+let unackedInputs = [];    // [{seq, repr}] sent to the server, not yet acked
+let authSelf = null;       // latest authoritative own-status {funds,in_bazaar,lines_til_bazaar}
+let authOpp = null;        // latest authoritative opponent view {score,lines,game_over}
 let playerName = null;    // remembered after the first prompt
 
 // Canvas and context
@@ -155,6 +166,131 @@ function cleanupOnline() {
     if (ws) { try { ws.close(); } catch (_) {} ws = null; }
     onlinePaused = true;
     onlineOpponentName = '';
+    authoritative = false;
+    unackedInputs = [];
+    authSelf = null;
+    authOpp = null;
+}
+
+// ─── Server-authoritative client (prediction + reconciliation) ────────────────
+
+// Apply a gameplay action to the LOCAL game (prediction) and, in an authoritative
+// match, send it to the server tagged with a seq (and remember it for replay on
+// the next keyframe). Returns the buy/sell success for the bazaar UI.
+function predict(kind, arg) {
+    let repr = null;
+    switch (kind) {
+        case 'MoveLeft':  game.move_left();  repr = 'MoveLeft';  break;
+        case 'MoveRight': game.move_right(); repr = 'MoveRight'; break;
+        case 'Rotate':    game.rotate();     repr = 'Rotate';    break;
+        case 'BeginDrop': game.begin_drop(); repr = 'BeginDrop'; break;
+        case 'SoftDrop':  game.soft_drop();  repr = 'SoftDrop';  break;
+        case 'LaunchWeapon': game.launch_weapon(arg); repr = { LaunchWeapon: arg >>> 0 }; break;
+        case 'LeaveBazaar':
+            // In an authoritative match the bazaar is a server-side barrier: send
+            // "done" but DON'T leave locally (the keyframe clears in_bazaar once
+            // BOTH players are done; leaving early would tick while the server is
+            // frozen). Local modes leave immediately.
+            if (!authoritative) game.leave_bazaar();
+            repr = 'LeaveBazaar';
+            break;
+        case 'BuyWeapon': {
+            const ok = game.buy_weapon(arg);
+            if (authoritative && !gameEnded) sendInput({ BuyWeapon: arg });
+            return ok;
+        }
+        case 'SellWeapon': {
+            const ok = game.sell_weapon(arg);
+            if (authoritative && !gameEnded) sendInput({ SellWeapon: arg });
+            return ok;
+        }
+        case 'SetPaused': game.set_paused(arg); return; // local only; the server rejects pause
+    }
+    if (authoritative && !gameEnded && repr !== null) sendInput(repr);
+}
+
+function sendInput(repr) {
+    inputSeq += 1;
+    unackedInputs.push({ seq: inputSeq, repr });
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'input', seq: inputSeq, input: repr }));
+    }
+}
+
+// Re-apply a not-yet-acked input to the (just-restored) local game, WITHOUT
+// re-sending it — the reconciliation replay on top of a keyframe.
+function applyReprToGame(repr) {
+    if (repr === 'MoveLeft') game.move_left();
+    else if (repr === 'MoveRight') game.move_right();
+    else if (repr === 'Rotate') game.rotate();
+    else if (repr === 'BeginDrop') game.begin_drop();
+    else if (repr === 'SoftDrop') game.soft_drop();
+    else if (repr === 'LeaveBazaar') { /* server-confirmed; not predicted locally */ }
+    else if (repr && repr.LaunchWeapon !== undefined) game.launch_weapon(repr.LaunchWeapon);
+    else if (repr && repr.BuyWeapon !== undefined) game.buy_weapon(repr.BuyWeapon);
+    else if (repr && repr.SellWeapon !== undefined) game.sell_weapon(repr.SellWeapon);
+}
+
+// An authoritative snapshot from the server: update opponent/own status, reconcile
+// against the keyframe (when present), and latch the result.
+function applySnapshot(msg) {
+    authSelf = msg.you;
+    authOpp = msg.opp;
+    // Discard inputs the server has now applied.
+    unackedInputs = unackedInputs.filter((i) => i.seq > msg.ack);
+    // On a keyframe, snap to the authoritative state then replay the unacked inputs.
+    if (msg.keyframe && game.restore_keyframe) {
+        game.restore_keyframe(Uint8Array.from(msg.keyframe));
+        for (const i of unackedInputs) applyReprToGame(i.repr);
+    }
+    if (!gameEnded && msg.result === 1) {
+        gameEnded = true;
+        gameOverText.textContent = 'YOU WIN!';
+        gameOverOverlay.style.display = 'flex';
+    } else if (!gameEnded && msg.result === 2) {
+        gameEnded = true;
+        gameOverText.textContent = 'GAME OVER - You Lost';
+        gameOverOverlay.style.display = 'flex';
+    }
+}
+
+// Drop into a server-authoritative match: build the local prediction game with
+// the server-assigned seed and start predicting immediately (we share the seed,
+// so we're in lockstep with the server until a cross-player event arrives).
+function enterAuthoritativeGame(msg) {
+    searching = false;
+    modeOnlineBtn.classList.remove('searching');
+    cancelSearchBtn.style.display = 'none';
+    mode = 'online';
+    authoritative = true;
+    onlineOpponentName = msg.opponent || 'Opponent';
+    updateModeButtons();
+
+    game = new WasmGame((msg.seed >>> 0));
+    resetMatchState();
+    inputSeq = 0;
+    unackedInputs = [];
+    authSelf = null;
+    authOpp = null;
+
+    const width = game.width();
+    const height = game.height();
+    canvas.width = width * CELL_SIZE;
+    canvas.height = height * CELL_SIZE;
+    canvas.style.width = (width * CELL_SIZE * 1.6) + 'px';
+    canvas.style.height = (height * CELL_SIZE * 1.6) + 'px';
+    aiBoard.style.display = 'none';
+    aiLabel.style.display = 'none';
+
+    paused = false;
+    gameEnded = false;
+    onlinePaused = false; // server is ticking; predict immediately from the shared seed
+    gameOverOverlay.style.display = 'none';
+    bazaarOverlay.style.display = 'none';
+    onlineStatus.style.display = 'block';
+    setOnlineStatus(`Matched vs ${onlineOpponentName} - fight!`);
+    lastFrameTime = performance.now();
+    tickAccumulator = 0;
 }
 
 function showWin() {
@@ -248,7 +384,8 @@ function findMatch() {
     const wsUrl = `${wsProto}://${location.host}/ws`;
     ws = new WebSocket(wsUrl);
 
-    ws.onopen = () => ws.send(JSON.stringify({ type: 'queue', name }));
+    // Announce the server-authoritative protocol (the client-server migration).
+    ws.onopen = () => ws.send(JSON.stringify({ type: 'queue', name, authoritative: true }));
 
     ws.onerror = (err) => {
         console.warn('WebSocket error', err);
@@ -314,6 +451,16 @@ function enterOnlineGame() {
 // the background search and the live online game.
 async function onSignalMessage(ev) {
     const msg = JSON.parse(ev.data);
+
+    // Server-authoritative match handoff + per-frame authoritative state.
+    if (msg.type === 'matchStart') {
+        enterAuthoritativeGame(msg);
+        return;
+    }
+    if (msg.type === 'snapshot') {
+        if (authoritative && game) applySnapshot(msg);
+        return;
+    }
 
     if (msg.type === 'matched') {
         enterOnlineGame();
@@ -457,6 +604,7 @@ function startGame(newMode) {
     updateModeButtons();
     paused = false;
     gameEnded = false;
+    authoritative = false; // local modes are not server-authoritative
     resetMatchState();
     gameOverOverlay.style.display = 'none';
     bazaarOverlay.style.display = 'none';
@@ -518,8 +666,11 @@ function render() {
 function updateStats() {
     const score = game.score();
     const lines = game.lines();
-    const funds = game.funds();
-    const tilBazaar = game.lines_til_bazaar();
+    // In an authoritative match, funds (changed by opponent taxes) and the bazaar
+    // countdown (depends on combined lines) are authoritative per-frame; score and
+    // lines come from local prediction.
+    const funds = (authoritative && authSelf) ? authSelf.funds : game.funds();
+    const tilBazaar = (authoritative && authSelf) ? authSelf.lines_til_bazaar : game.lines_til_bazaar();
 
     scoreValue.textContent = score;
     linesValue.textContent = lines;
@@ -534,8 +685,9 @@ function updateStats() {
 }
 
 function updateOpponentPanel() {
-    const opScore = game.op_score();
-    const opLines = game.op_lines();
+    // The opponent's score/lines are authoritative per-frame in an online match.
+    const opScore = (authoritative && authOpp) ? authOpp.score : game.op_score();
+    const opLines = (authoritative && authOpp) ? authOpp.lines : game.op_lines();
     opponentScore.textContent = opScore >= 0 ? opScore : '-';
     opponentLines.textContent = opLines >= 0 ? opLines : '-';
 
@@ -575,7 +727,7 @@ function updateArsenalPanel() {
             div.classList.add('occupied');
             div.addEventListener('click', () => {
                 if (!game) return;
-                game.launch_weapon(slot);
+                predict('LaunchWeapon', slot);
             });
         } else {
             div.textContent = `${key}. < Empty >`;
@@ -594,7 +746,7 @@ function updateArsenalPanel() {
             mslot.classList.add('occupied');
             mslot.addEventListener('click', () => {
                 if (!game) return;
-                game.launch_weapon(slot);
+                predict('LaunchWeapon', slot);
             });
         } else {
             mslot.textContent = `${key}\n-`;
@@ -711,7 +863,11 @@ function maybeLeaveBazaar() {
 }
 
 function updateBazaarOverlay() {
-    if (game.is_in_bazaar()) {
+    // The bazaar is a server-authoritative barrier online: open/close on the
+    // authoritative in_bazaar (prompt every frame), not the slightly-lagged local
+    // prediction. Local modes use the engine's own flag.
+    const inBaz = (authoritative && authSelf) ? authSelf.in_bazaar : game.is_in_bazaar();
+    if (inBaz) {
         bazaarOverlay.style.display = 'flex';
         if (!bazaarWasOpen) {
             // Only fully repopulate when bazaar first opens
@@ -726,7 +882,7 @@ function updateBazaarOverlay() {
             }
         } else {
             // Keep funds and arsenal display fresh while open
-            bazaarFunds.textContent = game.funds();
+            bazaarFunds.textContent = (authoritative && authSelf) ? authSelf.funds : game.funds();
             refreshBazaarArsenal();
         }
     } else {
@@ -932,6 +1088,11 @@ function processEvents() {
             else if (a === 2) Sound.missedSmiley();
         }
 
+        // In an authoritative match the SERVER resolves every cross-player effect
+        // and game-over: the client sends its actions via predict() and takes all
+        // state from snapshots, so here it only plays audio for its own events.
+        if (authoritative) continue;
+
         if (tag === 1) {
             // WeaponLaunched. (vs-Computer routes weapons through the engine
             // relay, so this block only fires for vsplayer/online.)
@@ -1130,11 +1291,11 @@ canvas.addEventListener('touchmove', (e) => {
     // Horizontal drag: move piece one cell at a time
     const cell = touchState.cell;
     while (touchState.accDx >= cell) {
-        game.move_right();
+        predict('MoveRight');
         touchState.accDx -= cell;
     }
     while (touchState.accDx <= -cell) {
-        game.move_left();
+        predict('MoveLeft');
         touchState.accDx += cell;
     }
 
@@ -1143,7 +1304,7 @@ canvas.addEventListener('touchmove', (e) => {
         touchState.totalDy > 45 &&
         Math.abs(touchState.totalDy) > Math.abs(touchState.totalDx)) {
         touchState.dropped = true;
-        game.begin_drop();
+        predict('BeginDrop');
     }
 }, { passive: false });
 
@@ -1173,14 +1334,14 @@ canvas.addEventListener('touchend', (e) => {
     if (!touchState.dropped &&
         touchState.totalDy > 45 &&
         absDy > absDx) {
-        game.begin_drop();
+        predict('BeginDrop');
         touchState = null;
         return;
     }
 
     // Tap -> rotate (small movement, short time, no drop)
     if (!touchState.dropped && absDx < 12 && absDy < 12 && duration < 250) {
-        game.rotate();
+        predict('Rotate');
     }
 
     touchState = null;
@@ -1255,11 +1416,11 @@ function setupTouchButton(btnId, action, repeatInterval) {
 
 // Set up buttons after DOM is ready (called after initGame)
 function setupTouchControls() {
-    setupTouchButton('touchLeft',   () => game.move_left(),   90);
-    setupTouchButton('touchRight',  () => game.move_right(),  90);
-    setupTouchButton('touchRotate', () => game.rotate(),      null);
+    setupTouchButton('touchLeft',   () => predict('MoveLeft'),  90);
+    setupTouchButton('touchRight',  () => predict('MoveRight'), 90);
+    setupTouchButton('touchRotate', () => predict('Rotate'),    null);
     // Soft drop: tap = one cell; hold = fast controlled descent (35ms/cell).
-    setupTouchButton('touchDrop',   () => game.soft_drop(),   35);
+    setupTouchButton('touchDrop',   () => predict('SoftDrop'),  35);
 }
 
 // Input handling
@@ -1292,40 +1453,40 @@ function handleKeyDown(e) {
     switch (key) {
         case 'ArrowLeft':
             e.preventDefault();
-            game.move_left();
+            predict('MoveLeft');
             return;
         case 'ArrowRight':
             e.preventDefault();
-            game.move_right();
+            predict('MoveRight');
             return;
         case 'ArrowUp':
             e.preventDefault();
-            game.rotate();
+            predict('Rotate');
             return;
         case 'ArrowDown':
             // Soft drop one cell; holding repeats via the OS key-repeat.
             e.preventDefault();
-            game.soft_drop();
+            predict('SoftDrop');
             return;
         case ' ':
         case 'Spacebar':
             // Hard drop (slam to the bottom).
             e.preventDefault();
-            game.begin_drop();
+            predict('BeginDrop');
             return;
         case 'p':
         case 'P':
             paused = !paused;
-            game.set_paused(paused);
+            predict('SetPaused', paused);
             return;
     }
 
     // Weapon launch: digits 1-0 map to arsenal slots 0-9
     if (key >= '1' && key <= '9') {
         const slot = parseInt(key) - 1;
-        game.launch_weapon(slot);
+        predict('LaunchWeapon', slot);
     } else if (key === '0') {
-        game.launch_weapon(9);
+        predict('LaunchWeapon', 9);
     }
 }
 
@@ -1334,7 +1495,13 @@ document.addEventListener('keydown', handleKeyDown);
 newGameBtn.addEventListener('click', newGame);
 
 bazaarDoneBtn.addEventListener('click', () => {
-    if (mode === 'vsplayer' || mode === 'online') {
+    if (authoritative) {
+        // Server-authoritative barrier: tell the server we're done. It clears our
+        // in_bazaar (via the next keyframe / you-status) once BOTH players are done.
+        predict('LeaveBazaar');
+        bazaarDoneBtn.disabled = true;
+        bazaarDoneBtn.textContent = 'WAITING FOR OPPONENT...';
+    } else if (mode === 'vsplayer' || mode === 'online') {
         // Don't resume until the opponent is also done (synchronized barrier).
         localBazaarDone = true;
         bazaarDoneBtn.disabled = true;
@@ -1350,7 +1517,7 @@ bazaarDoneBtn.addEventListener('click', () => {
 
 bazaarAddBtn.addEventListener('click', () => {
     if (bazaarSelectedToken < 0 || !game) return;
-    if (game.buy_weapon(bazaarSelectedToken)) {
+    if (predict('BuyWeapon', bazaarSelectedToken)) {
         bazaarFunds.textContent = game.funds();
         updateStats();
         updateArsenalPanel();
@@ -1362,7 +1529,7 @@ bazaarAddBtn.addEventListener('click', () => {
 
 bazaarRemoveBtn.addEventListener('click', () => {
     if (bazaarSelectedToken < 0 || !game) return;
-    if (game.sell_weapon(bazaarSelectedToken)) {
+    if (predict('SellWeapon', bazaarSelectedToken)) {
         bazaarFunds.textContent = game.funds();
         updateStats();
         updateArsenalPanel();
