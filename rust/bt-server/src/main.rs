@@ -1,8 +1,10 @@
 //! BattleTris server: one binary that serves the web client (static files) AND
 //! the online backend on the SAME port —
 //!   * `GET /ws`        WebSocket: matchmaking (paired by TrueSkill match
-//!                      quality), WebRTC signaling relay (gameplay stays P2P),
-//!                      and result -> rating updates persisted to a JSON file.
+//!                      quality) and the SERVER-AUTHORITATIVE match itself — the
+//!                      server runs the deterministic engine (a [`bout::Bout`]),
+//!                      clients send inputs and reconcile against snapshots —
+//!                      plus result -> rating updates persisted to a JSON file.
 //!   * everything else  static files from `STATIC_DIR` (default `bt-wasm`,
 //!                      which holds `www/` and `pkg/`); `/` redirects to `/www/`.
 //!
@@ -14,14 +16,16 @@
 //!
 //! Protocol (JSON text frames):
 //!   client -> server:
-//!     {"type":"queue","name":"alice"}
-//!     {"type":"signal","data":<any>}                 (relayed to your peer)
-//!     {"type":"result","won":true,"lines":30,"opLines":18}
+//!     {"type":"queue","name":"alice","authoritative":true}
+//!     {"type":"input","seq":N,"input":<bt_replay::Input>}   (a gameplay action)
 //!   server -> client:
-//!     {"type":"matched","role":"offer|answer","opponent":"bob",...}
-//!     {"type":"signal","data":<any>}
+//!     {"type":"matchStart","side":"A|B","seed":N,"opponent":"bob",...}
+//!     {"type":"snapshot","tick":N,"ack":N,"result":...,"you":...,"opp":...,"keyframe"?:[..]}
 //!     {"type":"rating","mu":...,"sigma":...,"conservative":...,"won":true}
 //!     {"type":"opponentLeft"}
+//!
+//! (The legacy WebRTC P2P relay — `signal`/`matched` — was removed with the
+//! migration to the server-authoritative model.)
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -92,8 +96,8 @@ struct Client {
     peer: Option<u64>,
     state: PlayerState,
     /// Does this client speak the server-authoritative protocol (sends `input`,
-    /// renders `snapshot`)? Announced on `queue`. Old WebRTC clients leave it
-    /// false and keep the legacy signaling-relay handoff, untouched.
+    /// renders `snapshot`)? Announced on `queue`. Every shipped client sets it;
+    /// a client that doesn't simply gets no match handoff.
     authoritative: bool,
     /// While in an authoritative match: the channel to the match's tick loop and
     /// which side this client plays. `input` messages are forwarded here.
@@ -267,8 +271,8 @@ fn derive_seed(id: u64) -> u64 {
 /// Match `id` against the best-quality waiting opponent; otherwise queue.
 ///
 /// Returns `Some(PendingBout)` only when it pairs two server-authoritative
-/// clients — the async caller then spawns the match's tick loop. Legacy (WebRTC)
-/// clients get the unchanged `matched` signaling handoff and `None`.
+/// clients — the async caller then spawns the match's tick loop. A client that
+/// didn't announce `authoritative` (none ship now) just gets `None`.
 fn try_match(app: &mut App, id: u64) -> Option<PendingBout> {
     let my_rating = app.clients.get(&id).map(|c| c.state.rating)?;
 
@@ -470,14 +474,24 @@ async fn run_bout(state: Shared, pb: PendingBout) {
             &mut app, match_id, id_a, &name_a, state_a, id_b, &name_b, state_b,
             a_won, bout.lines(Side::A), bout.lines(Side::B),
         );
-        // Persist the match as a deterministic, replayable VersusReplay (closes D5).
-        let replay = bout.to_replay(bout::TICK_MS, ENGINE_SHA);
-        let json = replay.to_json();
-        let id = replay_id(&json);
-        if let Ok(conn) = app.db.lock() {
-            let _ = db_insert_versus(&conn, &id, &replay, &json, now_secs());
+        // Persist the match as a deterministic, replayable VersusReplay (closes
+        // D5) — but ONLY for a natural finish (a real top-out the board reaches).
+        // A forfeit (a client disconnected) isn't in the seed+input stream, so its
+        // playback would never latch a winner; we don't store those.
+        if bout.is_over() {
+            let replay = bout.to_replay(bout::TICK_MS, ENGINE_SHA);
+            let json = replay.to_json();
+            let id = replay_id(&json);
+            let stored = app
+                .db
+                .lock()
+                .ok()
+                .and_then(|conn| db_insert_versus(&conn, &id, &replay, &json, now_secs()).ok())
+                .is_some();
+            if stored {
+                println!("stored online replay {id} ({} ticks)", replay.tick_count);
+            }
         }
-        println!("stored online replay {id} ({} ticks)", replay.tick_count);
     }
 }
 

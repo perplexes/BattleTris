@@ -4,7 +4,7 @@ import { Sound } from './sound.js';
 
 // Game state
 let game = null;
-let mode = 'practice'; // 'practice', 'vscomputer', 'vsplayer', 'online'
+let mode = 'practice'; // 'practice', 'vscomputer', 'online' (online = server-authoritative)
 let lastFrameTime = 0;
 // Fixed-timestep accumulator. The engine is advanced in constant FIXED_DT steps
 // (read from wasm) decoupled from requestAnimationFrame, so play and every
@@ -68,7 +68,6 @@ const opponentLines = document.getElementById('opponentLines');
 const bazaarList = document.getElementById('bazaarList');
 const modePracticeBtn = document.getElementById('modePractice');
 const modeVsComputerBtn = document.getElementById('modeVsComputer');
-const modeVsPlayerBtn = document.getElementById('modeVsPlayer');
 const modeOnlineBtn = document.getElementById('modeOnline');
 const aiBoard = document.getElementById('aiBoard');
 const aiLabel = document.getElementById('aiLabel');
@@ -399,8 +398,9 @@ function cancelSearch() {
 // starts a clean board - the practice / vs-Computer game you played while waiting
 // is discarded here.
 
-// Signaling-socket message handler: matchmaking result + WebRTC relay. Shared by
-// the background search and the live online game.
+// Matchmaking-socket message handler: the match handoff (matchStart) + the
+// per-frame authoritative state (snapshot) + rating / opponentLeft. Shared by
+// the background search and the live authoritative match.
 async function onSignalMessage(ev) {
     const msg = JSON.parse(ev.data);
 
@@ -509,15 +509,12 @@ function startGame(newMode) {
 function updateModeButtons() {
     modePracticeBtn.classList.remove('active');
     modeVsComputerBtn.classList.remove('active');
-    modeVsPlayerBtn.classList.remove('active');
     modeOnlineBtn.classList.remove('active');
 
     if (mode === 'practice') {
         modePracticeBtn.classList.add('active');
     } else if (mode === 'vscomputer') {
         modeVsComputerBtn.classList.add('active');
-    } else if (mode === 'vsplayer') {
-        modeVsPlayerBtn.classList.add('active');
     } else if (mode === 'online') {
         modeOnlineBtn.classList.add('active');
     }
@@ -840,7 +837,8 @@ function gameLoop(now) {
         tickAccumulator = 0;
     }
 
-    // Process events and relay to opponent (vsplayer or online)
+    // Process events (audio; local-mode game-over). In an authoritative match the
+    // server resolves cross-player effects; inputs are sent via predict().
     if (!onlinePaused || mode !== 'online') {
         processEvents();
     }
@@ -1163,7 +1161,6 @@ bazaarRemoveBtn.addEventListener('click', () => {
 // Mode selector buttons
 modePracticeBtn.addEventListener('click', () => startGame('practice'));
 modeVsComputerBtn.addEventListener('click', () => startGame('vscomputer'));
-modeVsPlayerBtn.addEventListener('click', () => startGame('vsplayer'));
 modeOnlineBtn.addEventListener('click', () => startGame('online'));
 if (cancelSearchBtn) cancelSearchBtn.addEventListener('click', cancelSearch);
 
