@@ -9,7 +9,7 @@ use bt_core::constants::{BT_PIECE_HEIGHT, BT_PIECE_WIDTH};
 use bt_core::game::GameEvent;
 use bt_core::weapons::{weapon_table, WeaponToken, BT_MAX_WEAPONS};
 use bt_core::Game;
-use bt_replay::{Input, Mode, Recorder, Replay, ReplayPlayer};
+use bt_replay::{Input, Mode, Recorder, Replay, ReplayPlayer, VersusReplay, VersusReplayPlayer};
 use wasm_bindgen::prelude::*;
 
 /// Sentinel id for an empty square in [`WasmGame::render_grid`].
@@ -628,6 +628,72 @@ impl WasmReplayPlayer {
     }
     pub fn arsenal_quantity(&self, i: u32) -> i32 {
         self.inner.player().arsenal_quantity(i as usize) as i32
+    }
+}
+
+// --- online (server-authoritative) match playback -----------------------
+
+/// Plays back a recorded online match — the deterministic two-board
+/// [`VersusReplay`] the server stores. Re-runs a `bt_core::Versus` from the two
+/// seeds + the recorded input stream, so the whole match (both boards, every
+/// weapon / tax / bazaar / spy) reproduces exactly.
+#[wasm_bindgen]
+pub struct WasmVersusReplayPlayer {
+    inner: VersusReplayPlayer,
+}
+
+#[wasm_bindgen]
+impl WasmVersusReplayPlayer {
+    pub fn from_json(json: &str) -> Result<WasmVersusReplayPlayer, JsValue> {
+        let replay = VersusReplay::from_json(json)
+            .map_err(|e| JsValue::from_str(&format!("invalid versus replay: {e}")))?;
+        Ok(WasmVersusReplayPlayer { inner: VersusReplayPlayer::new(replay) })
+    }
+
+    pub fn step(&mut self) -> bool {
+        self.inner.step()
+    }
+    pub fn seek(&mut self, tick: u32) {
+        self.inner.seek(tick);
+    }
+    pub fn tick_index(&self) -> u32 {
+        self.inner.tick_index()
+    }
+    pub fn tick_count(&self) -> u32 {
+        self.inner.replay().tick_count
+    }
+    /// 0 = ongoing, 1 = A won, 2 = B won.
+    pub fn result(&self) -> i32 {
+        self.inner.result()
+    }
+    pub fn engine_sha(&self) -> String {
+        self.inner.replay().engine_sha.clone()
+    }
+    pub fn width(&self) -> i32 {
+        self.inner.game(true).board().width
+    }
+    pub fn height(&self) -> i32 {
+        self.inner.game(true).board().height
+    }
+    /// Side A's board as a render-id grid (piece overlaid, empty = -2).
+    pub fn render_a(&self) -> Vec<i32> {
+        self.inner.game(true).render_ids()
+    }
+    /// Side B's board.
+    pub fn render_b(&self) -> Vec<i32> {
+        self.inner.game(false).render_ids()
+    }
+    pub fn score_a(&self) -> i32 {
+        self.inner.game(true).score().score as i32
+    }
+    pub fn lines_a(&self) -> i32 {
+        self.inner.game(true).score().lines as i32
+    }
+    pub fn score_b(&self) -> i32 {
+        self.inner.game(false).score().score as i32
+    }
+    pub fn lines_b(&self) -> i32 {
+        self.inner.game(false).score().lines as i32
     }
 }
 

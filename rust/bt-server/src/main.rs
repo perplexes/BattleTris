@@ -35,7 +35,7 @@ use axum::response::{IntoResponse, Redirect};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use bt_core::versus::Side;
-use bt_replay::{Input, Replay};
+use bt_replay::{Input, Replay, VersusReplay};
 use bt_trueskill::ts2::{rate_match, MatchOutcome, PlayerState, Ts2Params, Winner};
 use bt_trueskill::{quality_1v1, Rating};
 use futures_util::{SinkExt, StreamExt};
@@ -50,6 +50,13 @@ use bout::Bout;
 
 /// One queued input headed for an authoritative [`Bout`]: (side, action, seq).
 type BoutInput = (Side, Input, u64);
+
+/// The engine build online replays are stamped with (the `git` short SHA passed
+/// at compile time via `BT_GIT_SHA`, or "dev" locally).
+const ENGINE_SHA: &str = match option_env!("BT_GIT_SHA") {
+    Some(s) => s,
+    None => "dev",
+};
 
 /// Matchmaking/relay state (tokio mutex — held across `.await`).
 type Shared = Arc<Mutex<App>>;
@@ -471,6 +478,14 @@ async fn run_bout(state: Shared, pb: PendingBout) {
             &mut app, match_id, id_a, &name_a, state_a, id_b, &name_b, state_b,
             a_won, bout.lines(Side::A), bout.lines(Side::B),
         );
+        // Persist the match as a deterministic, replayable VersusReplay (closes D5).
+        let replay = bout.to_replay(bout::TICK_MS, ENGINE_SHA);
+        let json = replay.to_json();
+        let id = replay_id(&json);
+        if let Ok(conn) = app.db.lock() {
+            let _ = db_insert_versus(&conn, &id, &replay, &json, now_secs());
+        }
+        println!("stored online replay {id} ({} ticks)", replay.tick_count);
     }
 }
 
@@ -782,6 +797,35 @@ fn db_insert(conn: &Connection, id: &str, r: &Replay, json: &str, created_at: i6
             format!("{:?}", r.mode),
             r.seed,
             r.ai_level,
+            r.tick_count,
+            r.frames.len() as i64,
+            r.engine_sha,
+            created_at,
+            json,
+            r.title,
+        ],
+    )
+}
+
+/// Store a server-recorded online (`Versus`) match. Same `replays` table — mode
+/// `"Online"`, `seed` = side A's seed; the `json` holds the full [`VersusReplay`]
+/// (two seeds + the ordered input stream), which the playback page detects.
+fn db_insert_versus(
+    conn: &Connection,
+    id: &str,
+    r: &VersusReplay,
+    json: &str,
+    created_at: i64,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "INSERT OR IGNORE INTO replays
+            (id, mode, seed, ai_level, tick_count, inputs, engine_sha, created_at, json, title)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        rusqlite::params![
+            id,
+            "Online",
+            r.seed_a,
+            Option::<u32>::None,
             r.tick_count,
             r.frames.len() as i64,
             r.engine_sha,

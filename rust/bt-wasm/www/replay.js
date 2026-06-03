@@ -1,8 +1,28 @@
 // Replay playback page. Loads a recording by id, reconstructs the game with
 // WasmReplayPlayer (deterministic - same seed + inputs => bit-identical), and
 // plays it back at the original fixed timestep with play/pause/seek/speed.
-import init, { WasmReplayPlayer, fixed_dt } from '../pkg/bt_wasm.js';
+import init, { WasmReplayPlayer, WasmVersusReplayPlayer, fixed_dt } from '../pkg/bt_wasm.js';
 import { CELL_SIZE, drawBoard } from './render.js';
+
+// Adapt a two-board online (Versus) replay to the single-board player interface
+// the page already drives: side A on the main canvas, side B on the AI panel.
+function versusAdapter(vp) {
+    return {
+        render_grid: () => vp.render_a(),
+        render_ai_grid: () => vp.render_b(),
+        has_ai: () => true,
+        width: () => vp.width(),
+        height: () => vp.height(),
+        tick_index: () => vp.tick_index(),
+        tick_count: () => vp.tick_count(),
+        step: () => vp.step(),
+        seek: (t) => vp.seek(t),
+        result: () => vp.result(),
+        mode: () => 'Online',
+        seed: () => 'online',
+        engine_sha: () => vp.engine_sha(),
+    };
+}
 
 const canvas = document.getElementById('replayCanvas');
 const ctx = canvas.getContext('2d');
@@ -79,6 +99,11 @@ function loop(now) {
 }
 
 function resultText(r, mode) {
+    if (mode === 'Online') {
+        if (r === 1) return ' · side A won';
+        if (r === 2) return ' · side B won';
+        return '';
+    }
     if (mode !== 'VsComputer') return '';
     if (r === 1) return ' · player won';
     if (r === 2) return ' · player lost';
@@ -103,7 +128,13 @@ function resultText(r, mode) {
     }
 
     try {
-        player = WasmReplayPlayer.from_json(text);
+        // An online match recording carries two seeds (seed_a/seed_b); play it
+        // with the two-board Versus player. Everything else is a single-board game.
+        let isVersus = false;
+        try { isVersus = JSON.parse(text).seed_a !== undefined; } catch (_) {}
+        player = isVersus
+            ? versusAdapter(WasmVersusReplayPlayer.from_json(text))
+            : WasmReplayPlayer.from_json(text);
     } catch (e) {
         showError('This replay is invalid or from an incompatible engine build.');
         return;

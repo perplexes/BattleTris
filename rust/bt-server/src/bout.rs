@@ -22,7 +22,7 @@
 use bt_core::versus::Side;
 use bt_core::weapons::{weapon_table, WeaponToken};
 use bt_core::Versus;
-use bt_replay::Input;
+use bt_replay::{Input, VersusFrame, VersusReplay, REPLAY_VERSION};
 use serde::Serialize;
 
 /// The authoritative tick interval (ms). Matches the engine's fixed timestep
@@ -164,6 +164,12 @@ fn degrade_board(mut grid: Vec<i32>, token: WeaponToken) -> Vec<i32> {
 pub struct Bout {
     versus: Versus,
     tick: u64,
+    /// The two seeds, kept so the match can be exported as a deterministic
+    /// [`VersusReplay`] (the totally-ordered input stream + seeds, closing D5).
+    seed_a: u64,
+    seed_b: u64,
+    /// Every applied client input, stamped with the tick — the replay's frames.
+    frames: Vec<VersusFrame>,
     /// Last applied input sequence number per side (A = [0], B = [1]).
     ack: [u64; 2],
     /// Active spy per side: `(token, lines remaining)`. A spy reveals the
@@ -182,9 +188,28 @@ impl Bout {
         Bout {
             versus: Versus::new(seed_a, seed_b),
             tick: 0,
+            seed_a,
+            seed_b,
+            frames: Vec::new(),
             ack: [0, 0],
             spy: [None, None],
             opp_lines_seen: [0, 0],
+        }
+    }
+
+    /// Export the match so far as a deterministic, replayable [`VersusReplay`]
+    /// (the seeds + the totally-ordered client-input stream). Replaying re-runs a
+    /// `Versus`, so the whole relay reproduces — no need to record its effects.
+    pub fn to_replay(&self, dt_ms: i32, engine_sha: &str) -> VersusReplay {
+        VersusReplay {
+            version: REPLAY_VERSION,
+            seed_a: self.seed_a as u32,
+            seed_b: self.seed_b as u32,
+            dt_ms,
+            engine_sha: engine_sha.to_string(),
+            tick_count: self.tick as u32,
+            frames: self.frames.clone(),
+            title: None,
         }
     }
 
@@ -207,6 +232,9 @@ impl Bout {
         }
         input.apply_to_game(g);
         self.ack[idx] = seq;
+        // Record it (stamped with the current tick — inputs for tick N are drained
+        // before the Nth tick advances, so a replay applies them at the same tick).
+        self.frames.push(VersusFrame { tick: self.tick as u32, side: idx as u8, input: input.clone() });
         true
     }
 

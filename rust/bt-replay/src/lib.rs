@@ -29,8 +29,9 @@
 
 use bt_ai::VsComputer;
 use bt_core::game::GameEvent;
+use bt_core::versus::Side;
 use bt_core::weapons::WeaponToken;
-use bt_core::Game;
+use bt_core::{Game, Versus};
 use serde::{Deserialize, Serialize};
 
 /// Bump when the on-disk format changes incompatibly.
@@ -342,9 +343,161 @@ impl ReplayPlayer {
     }
 }
 
+// ─── Online (server-authoritative) match replays ──────────────────────────────
+
+/// One recorded client input in a versus replay: which side launched it, stamped
+/// with the tick it was applied at.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersusFrame {
+    pub tick: u32,
+    /// 0 = side A, 1 = side B.
+    pub side: u8,
+    pub input: Input,
+}
+
+/// A self-contained recording of an online server-authoritative match: the two
+/// seeds plus the totally-ordered client-input stream. Because [`Versus`] is
+/// deterministic, replaying = re-running it and applying each input at its tick —
+/// the whole relay (weapons, taxes, bazaar, spies) reproduces exactly, so none of
+/// it needs to be recorded. This is the "totally-ordered event log = canonical
+/// online replay" the migration set out to make possible (closes D5).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersusReplay {
+    pub version: u32,
+    pub seed_a: u32,
+    pub seed_b: u32,
+    pub dt_ms: i32,
+    pub engine_sha: String,
+    pub tick_count: u32,
+    pub frames: Vec<VersusFrame>,
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+impl VersusReplay {
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+    pub fn from_json(s: &str) -> Result<VersusReplay, serde_json::Error> {
+        serde_json::from_str(s)
+    }
+}
+
+/// Drives a [`VersusReplay`] over a [`Versus`] at its recorded timestep, so BOTH
+/// boards are reproduced. Step tick-by-tick (scrubbable) or run to the end.
+pub struct VersusReplayPlayer {
+    versus: Versus,
+    replay: VersusReplay,
+    executed: u32,
+    cursor: usize,
+}
+
+impl VersusReplayPlayer {
+    pub fn new(replay: VersusReplay) -> VersusReplayPlayer {
+        let versus = Versus::new(replay.seed_a as u64, replay.seed_b as u64);
+        VersusReplayPlayer { versus, replay, executed: 0, cursor: 0 }
+    }
+
+    /// Advance one tick: apply every input stamped at the current tick, then tick
+    /// the match. Returns false once the recording is exhausted.
+    pub fn step(&mut self) -> bool {
+        if self.executed >= self.replay.tick_count {
+            return false;
+        }
+        while self.cursor < self.replay.frames.len()
+            && self.replay.frames[self.cursor].tick == self.executed
+        {
+            let input = self.replay.frames[self.cursor].input.clone();
+            let side = if self.replay.frames[self.cursor].side == 0 { Side::A } else { Side::B };
+            input.apply_to_game(self.versus.game_mut(side));
+            self.cursor += 1;
+        }
+        self.versus.tick(self.replay.dt_ms);
+        // Drain both sides' events so a long replay doesn't accumulate them.
+        let _: Vec<GameEvent> = self.versus.game_mut(Side::A).take_events();
+        let _: Vec<GameEvent> = self.versus.game_mut(Side::B).take_events();
+        self.executed += 1;
+        true
+    }
+
+    pub fn run_to_end(&mut self) {
+        while self.step() {}
+    }
+
+    /// Jump to tick `target` (backward seeks rebuild from the seeds + fast-forward).
+    pub fn seek(&mut self, target: u32) {
+        let target = target.min(self.replay.tick_count);
+        if target < self.executed {
+            *self = VersusReplayPlayer::new(self.replay.clone());
+        }
+        while self.executed < target && self.step() {}
+    }
+
+    pub fn tick_index(&self) -> u32 {
+        self.executed
+    }
+
+    /// A side's game (read-only) — `true` for A, `false` for B.
+    pub fn game(&self, side_a: bool) -> &Game {
+        self.versus.game(if side_a { Side::A } else { Side::B })
+    }
+
+    /// 0 = ongoing, 1 = A won, 2 = B won.
+    pub fn result(&self) -> i32 {
+        self.versus.result()
+    }
+
+    pub fn replay(&self) -> &VersusReplay {
+        &self.replay
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn versus_replay_round_trips_and_reproduces_deterministically() {
+        let frames = vec![
+            VersusFrame { tick: 2, side: 0, input: Input::MoveLeft },
+            VersusFrame { tick: 3, side: 1, input: Input::MoveRight },
+            VersusFrame { tick: 5, side: 0, input: Input::BeginDrop },
+            VersusFrame { tick: 20, side: 1, input: Input::BeginDrop },
+            VersusFrame { tick: 40, side: 0, input: Input::BeginDrop },
+            VersusFrame { tick: 60, side: 1, input: Input::Rotate },
+        ];
+        let replay = VersusReplay {
+            version: REPLAY_VERSION,
+            seed_a: 111,
+            seed_b: 222,
+            dt_ms: 16,
+            engine_sha: "test".into(),
+            tick_count: 200,
+            frames,
+            title: None,
+        };
+
+        // JSON round-trips exactly.
+        let parsed = VersusReplay::from_json(&replay.to_json()).expect("parses");
+        assert_eq!(parsed, replay);
+
+        // Two independent plays reproduce BOTH boards + the result identically.
+        let fingerprint = |r: &VersusReplay| {
+            let mut p = VersusReplayPlayer::new(r.clone());
+            p.run_to_end();
+            (p.game(true).render_ids(), p.game(false).render_ids(), p.result())
+        };
+        assert_eq!(fingerprint(&replay), fingerprint(&replay), "deterministic reproduction");
+
+        // Seeking to the end matches running to the end.
+        let mut stepped = VersusReplayPlayer::new(replay.clone());
+        stepped.run_to_end();
+        let mut sought = VersusReplayPlayer::new(replay.clone());
+        sought.seek(10_000); // clamps to tick_count
+        assert_eq!(sought.tick_index(), replay.tick_count);
+        assert_eq!(stepped.game(true).render_ids(), sought.game(true).render_ids());
+        assert_eq!(stepped.game(false).render_ids(), sought.game(false).render_ids());
+    }
 
     /// A compact, comparable fingerprint of a game's visible state.
     fn snapshot(g: &Game) -> (Vec<i32>, i64, i64, i64, i32, i32, i32) {
