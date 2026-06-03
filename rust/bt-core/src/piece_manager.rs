@@ -368,4 +368,89 @@ mod tests {
         }
         assert!(found_die, "Should find at least one die piece");
     }
+
+    #[test]
+    fn test_four_by_four_weapon() {
+        // After weapon_on(FourByFour): the box piece is replaced by the 4x4 -
+        // no Box appears, and FourByFour does (BTPieceManager::receive).
+        let mut manager = PieceManager::new();
+        let mut rng = Rng::new(456);
+        manager.weapon_on(WeaponToken::FourByFour);
+
+        let mut found_4x4 = false;
+        for _ in 0..2000 {
+            let piece = manager.create(&mut rng, 0, 0);
+            assert_ne!(piece.kind, PieceKind::Box, "Box appeared while Four-by-Four active");
+            if piece.kind == PieceKind::FourByFour {
+                found_4x4 = true;
+            }
+        }
+        assert!(found_4x4, "Four-by-Four pieces should appear");
+
+        manager.weapon_off(WeaponToken::FourByFour);
+        let mut found_box = false;
+        for _ in 0..400 {
+            if manager.create(&mut rng, 0, 0).kind == PieceKind::Box {
+                found_box = true;
+                break;
+            }
+        }
+        assert!(found_box, "the Box returns once Four-by-Four is off");
+    }
+
+    #[test]
+    fn test_so_long_weapon() {
+        // After weapon_on(SoLong): no Long pieces; they return when it's off.
+        let mut manager = PieceManager::new();
+        let mut rng = Rng::new(321);
+        manager.weapon_on(WeaponToken::SoLong);
+
+        for _ in 0..2000 {
+            assert_ne!(
+                manager.create(&mut rng, 0, 0).kind,
+                PieceKind::Long,
+                "Long appeared while So Long active"
+            );
+        }
+
+        manager.weapon_off(WeaponToken::SoLong);
+        let mut found_long = false;
+        for _ in 0..600 {
+            if manager.create(&mut rng, 0, 0).kind == PieceKind::Long {
+                found_long = true;
+                break;
+            }
+        }
+        assert!(found_long, "Long pieces return once So Long is off");
+    }
+
+    #[test]
+    fn test_broken_record_repeats_pieces() {
+        // Broken Record: the same piece repeats; it only changes ~1 in
+        // BT_BROKEN_PROB draws, so the vast majority of consecutive draws match.
+        let mut manager = PieceManager::new();
+        let mut rng = Rng::new(654);
+        // Establish a valid current piece first: Broken Record is always received
+        // mid-game (a Game spawns a piece before any weapon arrives), so
+        // `old_piece` is valid by the time it activates. Activating it on a
+        // pristine manager would try to repeat the unset old_piece (id 0).
+        let _ = manager.create(&mut rng, 0, 0);
+        manager.weapon_on(WeaponToken::Broken);
+
+        let mut prev = manager.create(&mut rng, 0, 0).kind;
+        let mut same = 0;
+        const N: usize = 400;
+        for _ in 0..N {
+            let kind = manager.create(&mut rng, 0, 0).kind;
+            if kind == prev {
+                same += 1;
+            }
+            prev = kind;
+        }
+        // Change probability ~1/10, so expect well over 70% repeats.
+        assert!(
+            same as f64 / N as f64 > 0.7,
+            "Broken Record should mostly repeat: only {same}/{N} consecutive matches"
+        );
+    }
 }
