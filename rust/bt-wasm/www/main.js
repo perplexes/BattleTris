@@ -16,13 +16,10 @@ const MAX_FRAME_DT = 250; // clamp huge gaps (e.g. backgrounded tab) to avoid a 
 const MAX_STEPS_PER_FRAME = 8; // cap catch-up work per frame
 let paused = false;
 let gameEnded = false;
-let broadcastChannel = null;
 
-// Online / WebRTC state
-let ws = null;       // WebSocket to signaling server
-let pc = null;       // RTCPeerConnection (legacy P2P; unused in authoritative mode)
-let dc = null;       // RTCDataChannel (legacy P2P)
-let onlinePaused = true;  // true until the data channel opens
+// Online (server-authoritative matchmaking + match) state
+let ws = null;       // WebSocket: matchmaking handoff + the authoritative match
+let onlinePaused = true;  // true until a match starts
 let onlineOpponentName = '';
 let searching = false;    // background matchmaking in progress (queued, not yet matched)
 
@@ -156,15 +153,8 @@ function markActive() {
     }
 }
 
-function dcSend(obj) {
-    if (dc && dc.readyState === 'open') {
-        dc.send(JSON.stringify(obj));
-    }
-}
 
 function cleanupOnline() {
-    if (dc) { try { dc.close(); } catch (_) {} dc = null; }
-    if (pc) { try { pc.close(); } catch (_) {} pc = null; }
     if (ws) { try { ws.close(); } catch (_) {} ws = null; }
     onlinePaused = true;
     onlineOpponentName = '';
@@ -330,55 +320,7 @@ function showWin() {
     gameOverOverlay.style.display = 'flex';
 }
 
-function setupDataChannel(channel) {
-    channel.onopen = () => {
-        startOnlineGame();
-    };
 
-    channel.onmessage = (ev) => {
-        const m = JSON.parse(ev.data);
-        if (handleExchange(m)) {
-            // consumed (swap/susan exchange)
-        } else if (m.kind === 'weapon') {
-            receiveWeaponFromOpponent(m.token);
-        } else if (m.kind === 'funds') {
-            game.add_funds(m.amount); // Mondale/Keating credit from the victim
-        } else if (m.kind === 'score') {
-            game.receive_op_score(m.score, m.lines, m.funds);
-            spyOnOpponentScore(); // line-based spy expiry + refresh
-        } else if (m.kind === 'bazaarDone') {
-            opponentBazaarDone = true;
-            maybeLeaveBazaar();
-        } else if (m.kind === 'dead') {
-            // Opponent died - we win
-            showWin();
-            if (ws) {
-                ws.send(JSON.stringify({
-                    type: 'result',
-                    won: true,
-                    lines: game.lines(),
-                    opLines: game.op_lines()
-                }));
-            }
-        }
-    };
-
-    channel.onclose = () => {
-        if (!gameEnded) {
-            setOnlineStatus('Data channel closed.');
-        }
-    };
-
-    channel.onerror = (err) => {
-        console.warn('DataChannel error', err);
-    };
-}
-
-function startOnlineGame() {
-    onlinePaused = false;
-    const oppLabel = onlineOpponentName || 'Opponent';
-    setOnlineStatus(`Connected - fight!  (vs ${oppLabel})`);
-}
 
 function getPlayerName() {
     if (playerName) return playerName;
@@ -393,9 +335,9 @@ function getPlayerName() {
     return playerName;
 }
 
-// Background matchmaking: open the signaling socket and queue WITHOUT
+// Background matchmaking: open the matchmaking socket and queue WITHOUT
 // interrupting your current local game. You keep playing practice / vs Computer
-// while the search runs; `enterOnlineGame` swaps you in when a match is found.
+// while the search runs; `enterAuthoritativeGame` swaps you in when matched.
 // Switching between local modes leaves the search running (see startGame); only
 // an explicit Cancel or tearing down an established online game stops it.
 function findMatch() {
@@ -456,35 +398,6 @@ function cancelSearch() {
 // their own seed and exchanges weapons + scores over the data channel), so this
 // starts a clean board - the practice / vs-Computer game you played while waiting
 // is discarded here.
-function enterOnlineGame() {
-    searching = false;
-    modeOnlineBtn.classList.remove('searching');
-    cancelSearchBtn.style.display = 'none';
-    mode = 'online';
-    updateModeButtons();
-
-    const seed = (performance.now() | 0) ^ (Math.floor(Math.random() * 1e9));
-    game = new WasmGame(seed);
-    onlinePaused = true;
-
-    const width = game.width();
-    const height = game.height();
-    canvas.width = width * CELL_SIZE;
-    canvas.height = height * CELL_SIZE;
-    canvas.style.width = (width * CELL_SIZE * 1.6) + 'px';
-    canvas.style.height = (height * CELL_SIZE * 1.6) + 'px';
-    aiBoard.style.display = 'none';
-    aiLabel.style.display = 'none';
-    resetMatchState(); // drop any spy/bazaar/swap state from a previous match
-
-    paused = false;
-    gameEnded = false;
-    gameOverOverlay.style.display = 'none';
-    bazaarOverlay.style.display = 'none';
-    onlineStatus.style.display = 'block';
-    lastFrameTime = performance.now();
-    tickAccumulator = 0;
-}
 
 // Signaling-socket message handler: matchmaking result + WebRTC relay. Shared by
 // the background search and the live online game.
@@ -501,65 +414,7 @@ async function onSignalMessage(ev) {
         return;
     }
 
-    if (msg.type === 'matched') {
-        enterOnlineGame();
-        onlineOpponentName = msg.opponent || 'Opponent';
-        const conservative = (msg.oppMu - 3 * msg.oppSigma).toFixed(1);
-        const quality = msg.quality != null ? Math.round(msg.quality * 100) : '?';
-        setOnlineStatus(
-            `Matched vs ${onlineOpponentName} (rating μ-3σ ~ ${conservative}` +
-            `, quality ${quality}%) - connecting...`
-        );
-
-        // Create peer connection
-        pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
-
-        pc.onicecandidate = (e) => {
-            if (e.candidate) {
-                ws.send(JSON.stringify({ type: 'signal', data: { candidate: e.candidate } }));
-            }
-        };
-
-        pc.onconnectionstatechange = () => {
-            console.log('PC connection state:', pc.connectionState);
-        };
-
-        if (msg.role === 'offer') {
-            // We are the offerer: create data channel then offer
-            dc = pc.createDataChannel('game');
-            setupDataChannel(dc);
-
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            ws.send(JSON.stringify({ type: 'signal', data: { sdp: pc.localDescription } }));
-
-        } else {
-            // We are the answerer: wait for data channel from peer
-            pc.ondatachannel = (e) => {
-                dc = e.channel;
-                setupDataChannel(dc);
-            };
-            // The answer SDP is sent when we receive the offer signal (below)
-        }
-
-    } else if (msg.type === 'signal') {
-        const d = msg.data;
-        if (d.sdp) {
-            await pc.setRemoteDescription(d.sdp);
-            if (d.sdp.type === 'offer') {
-                const ans = await pc.createAnswer();
-                await pc.setLocalDescription(ans);
-                ws.send(JSON.stringify({ type: 'signal', data: { sdp: pc.localDescription } }));
-            }
-        } else if (d.candidate) {
-            try {
-                await pc.addIceCandidate(d.candidate);
-            } catch (e) {
-                console.warn('addIceCandidate error', e);
-            }
-        }
-
-    } else if (msg.type === 'rating') {
+    if (msg.type === 'rating') {
         const conservative = (msg.mu - 3 * msg.sigma).toFixed(1);
         const result = msg.won ? 'WIN' : 'LOSS';
         setOnlineStatus(
@@ -700,14 +555,6 @@ function render() {
         } else {
             aiBoard.style.display = 'none';
         }
-    } else if (spyType >= 0) {
-        // A spy is up (online/2-tab): show the opponent's board on the same
-        // panel. It expires on the opponent's line-clears (spyOnOpponentScore);
-        // here we just keep the view live with a ~1s re-snapshot fallback.
-        const now = performance.now();
-        if (now - spyLastReq > 1000) requestSpy();
-        aiBoard.style.display = spyHidden ? 'none' : 'block';
-        if (spyGrid && !spyHidden) drawBoard(aiCtx, spyGrid, width, height);
     }
 }
 
@@ -878,36 +725,15 @@ function populateBazaar() {
     refreshBazaarArsenal();
 }
 
-// Track whether bazaar was open last frame to avoid re-populating every tick
+// Track whether bazaar was open last frame to avoid re-populating every tick.
+// The synchronized bazaar BARRIER is server-authoritative online (the bout freezes
+// both boards until both players hit Done — the client reads authSelf.in_bazaar);
+// in local modes the engine's own flag drives it.
 let bazaarWasOpen = false;
 
-// Synchronized bazaar barrier for 2-player / online: the original freezes BOTH
-// boards until BOTH players leave the shop (BTServer BT_START_BAZ/BT_END_BAZ),
-// so one player can't finish early and play unopposed. We hold the local game
-// frozen (it stays is_in_bazaar) until each side has hit Done.
-let localBazaarDone = false;
-let opponentBazaarDone = false;
-
-// Reset all per-match relay state when a new game starts, so a previous match's
-// half-finished bazaar handshake, spy view, or pending swap can't leak in.
+// Reset per-match overlay state when a new game starts.
 function resetMatchState() {
     bazaarWasOpen = false;
-    localBazaarDone = false;
-    opponentBazaarDone = false;
-    swapPending = false;
-    susanPending = false;
-    spyType = -1;
-    spyGrid = null;
-    spyRemaining = 0;
-}
-
-function maybeLeaveBazaar() {
-    if (localBazaarDone && opponentBazaarDone) {
-        game.leave_bazaar();
-        bazaarOverlay.style.display = 'none';
-        localBazaarDone = false;
-        opponentBazaarDone = false;
-    }
 }
 
 function updateBazaarOverlay() {
@@ -918,12 +744,9 @@ function updateBazaarOverlay() {
     if (inBaz) {
         bazaarOverlay.style.display = 'flex';
         if (!bazaarWasOpen) {
-            // Only fully repopulate when bazaar first opens
+            // Only fully repopulate when bazaar first opens; re-enable Done.
             populateBazaar();
             bazaarWasOpen = true;
-            // New round: reset OUR done-state (keep the opponent's, which may
-            // have arrived before our slightly-lagged score relay opened ours).
-            localBazaarDone = false;
             if (bazaarDoneBtn) {
                 bazaarDoneBtn.disabled = false;
                 bazaarDoneBtn.textContent = 'DONE';
@@ -939,172 +762,6 @@ function updateBazaarOverlay() {
             bazaarWasOpen = false;
         }
     }
-}
-
-// Weapon token indices (from WeaponToken). Mirror Mirror is OFFENSIVE
-// (BTWeaponManager.C:204-219): launching it curses your OPPONENT. While a
-// player is mirror-cursed, every weapon THEY launch is caught by the curse -
-// these nine simply fizzle (the original's nullify list), everything else
-// backfires onto the cursed launcher. The curse is resolved on the LAUNCH side,
-// so an incoming weapon is just applied (the sender already handled their curse).
-const SWAP_TOKEN = 5;
-const UPBYSIDE_TOKEN = 3;
-const BOTTLE_TOKEN = 24;
-const SUSAN_TOKEN = 26;
-const MIRROR_TOKEN = 28;
-const MIRROR_NULLIFY = new Set([5, 13, 14, 17, 18, 19, 20, 26, 28]);
-// Swap, Mondale, Keating, Ames, Ace, Condor, NiceDay, Susan, Mirror.
-
-// Initiator guards for the two-way exchanges (the original's `swapper_`): while
-// one is outstanding, a simultaneous swap/susan from the opponent is a collision
-// - decline it so neither side double-imports and corrupts its board (D3).
-let swapPending = false;
-let susanPending = false;
-
-function sendToOpponent(msg) {
-    if (gameEnded) return;
-    if (mode === 'vsplayer' && broadcastChannel) broadcastChannel.postMessage(msg);
-    else if (mode === 'online') dcSend(msg);
-}
-
-function sendWeaponToOpponent(token) {
-    sendToOpponent({ kind: 'weapon', token });
-}
-
-// Swap and Lazy Susan are two-way exchanges over the channel: we send ours, the
-// opponent applies it and sends theirs back, and we apply that. Both clear
-// Bottle/Upbyside on a board swap. A Mirror-shielded opponent nullifies either.
-function initiateSwap() {
-    // Clear Bottle/Upbyside on OUR side before exporting, so the board we hand
-    // over is already cleaned (the original drops both on a swap, both sides).
-    clearBottleUpbyside();
-    swapPending = true;
-    sendToOpponent({ kind: 'swap', board: Array.from(game.export_board()) });
-}
-function initiateSusan() {
-    susanPending = true;
-    sendToOpponent({ kind: 'susan', arsenal: Array.from(game.export_arsenal()) });
-}
-function clearBottleUpbyside() {
-    game.force_weapon_off(BOTTLE_TOKEN);
-    game.force_weapon_off(UPBYSIDE_TOKEN);
-}
-
-// Spies (Ames/Ace/Condor): launching one requests the opponent's board for
-// display on the aiBoard panel. The cheaper spies are unreliable (cells drop
-// out); the Condor is perfect. Token indices + obscure-fractions.
-const AMES_TOKEN = 17, ACE_TOKEN = 18, CONDOR_TOKEN = 19;
-const SPY_TOKENS = new Set([AMES_TOKEN, ACE_TOKEN, CONDOR_TOKEN]);
-// Fraction of the opponent's cells that DROP OUT of the spy view (1 - report_prob
-// from BTRecon.C:58-62): Ames shows 50%, Ace 85%, the Condor satellite is perfect.
-const SPY_DROP = { 17: 0.50, 18: 0.15, 19: 0.0 };
-const EMPTY_ID = -2; // matches WasmGame render-grid EMPTY
-const aiBoardLabel = document.getElementById('aiBoardLabel');
-let spyType = -1;     // active spy token, or -1
-let spyRemaining = 0; // lines of opponent clears left before the spy expires (BTRecon spy_on_)
-let spyOpLines = 0;   // opponent line count at the last decrement (to measure the delta)
-let spyGrid = null;   // latest (degraded) opponent grid
-let spyLastReq = 0;   // last spyRequest time
-let spyHidden = false; // Condor 'c' toggle
-
-function initiateSpy(token) {
-    // Duration is measured in OPPONENT line-clears (BTRecon.C:201-209), not
-    // seconds: the spy expires after the opponent clears `duration` lines.
-    // Relaunching ACCUMULATES the budget and switches the accuracy to the newest
-    // spy (BTRecon.C:171-179: `spy_on_ += duration; spy_token_ = token`).
-    if (spyType < 0) spyOpLines = game.op_lines(); // fresh spy: start counting now
-    spyRemaining += weapon_duration(token) || 20;
-    spyType = token;
-    spyHidden = false;
-    if (aiBoardLabel) aiBoardLabel.textContent = 'Opponent (spy)';
-    requestSpy();
-}
-
-// Decrement the spy's line budget by the opponent's new clears, and refresh the
-// view (the original re-snapshots on every BT_OP_SCORE). Called when an opponent
-// score update arrives.
-function spyOnOpponentScore() {
-    if (spyType < 0) return;
-    const opLines = game.op_lines();
-    const delta = opLines - spyOpLines;
-    if (delta > 0) {
-        spyRemaining -= delta;
-        spyOpLines = opLines;
-    }
-    if (spyRemaining <= 0) clearSpy();
-    else requestSpy(); // re-snapshot the opponent board
-}
-function requestSpy() {
-    spyLastReq = performance.now();
-    sendToOpponent({ kind: 'spyRequest' });
-}
-function degradeGrid(grid, token) {
-    const drop = SPY_DROP[token] || 0;
-    if (drop <= 0) return grid;
-    return grid.map((id) => (id !== EMPTY_ID && Math.random() < drop ? EMPTY_ID : id));
-}
-function clearSpy() {
-    spyType = -1;
-    spyGrid = null;
-    if (mode !== 'vscomputer') aiBoard.style.display = 'none';
-}
-
-// Handle the cross-player exchange messages. Returns true if it consumed `m`.
-function handleExchange(m) {
-    switch (m.kind) {
-        case 'spyRequest':
-            // The opponent is spying us; send our current board.
-            sendToOpponent({ kind: 'spyBoard', grid: Array.from(game.render_grid()) });
-            return true;
-        case 'spyBoard':
-            if (spyType >= 0) spyGrid = degradeGrid(m.grid, spyType);
-            return true;
-        case 'swap': {
-            // Collision guard (D3): if we also have a swap outstanding, both
-            // sides launched at once - decline so neither double-imports.
-            if (swapPending) {
-                sendToOpponent({ kind: 'swapAck', nullified: true });
-            } else {
-                const mine = Array.from(game.export_board());
-                game.import_board(Int32Array.from(m.board));
-                clearBottleUpbyside();
-                sendToOpponent({ kind: 'swapAck', board: mine });
-            }
-            return true;
-        }
-        case 'swapAck': {
-            swapPending = false;
-            if (!m.nullified) {
-                game.import_board(Int32Array.from(m.board));
-                clearBottleUpbyside();
-            }
-            return true;
-        }
-        case 'susan': {
-            if (susanPending) {
-                sendToOpponent({ kind: 'susanAck', nullified: true });
-            } else {
-                const mine = Array.from(game.export_arsenal());
-                game.import_arsenal(Int32Array.from(m.arsenal));
-                sendToOpponent({ kind: 'susanAck', arsenal: mine });
-            }
-            return true;
-        }
-        case 'susanAck': {
-            susanPending = false;
-            if (!m.nullified) game.import_arsenal(Int32Array.from(m.arsenal));
-            return true;
-        }
-    }
-    return false;
-}
-
-// An incoming weapon from the opponent (online/2-tab; in vs-Computer the engine
-// relay does this instead). With the offensive Mirror, the sender already
-// resolved their own curse before launching, so we just apply what arrives -
-// including a Mirror, which curses us (game.receive_weapon sets BTActive[MIRROR]).
-function receiveWeaponFromOpponent(token) {
-    game.receive_weapon(token);
 }
 
 function processEvents() {
@@ -1136,56 +793,13 @@ function processEvents() {
             else if (a === 2) Sound.missedSmiley();
         }
 
-        // In an authoritative match the SERVER resolves every cross-player effect
-        // and game-over: the client sends its actions via predict() and takes all
-        // state from snapshots, so here it only plays audio for its own events.
-        if (authoritative) continue;
-
-        if (tag === 1) {
-            // WeaponLaunched. (vs-Computer routes weapons through the engine
-            // relay, so this block only fires for vsplayer/online.)
-            if ((mode === 'vsplayer' || mode === 'online') && !gameEnded) {
-                if (game.weapon_active && game.weapon_active(MIRROR_TOKEN)) {
-                    // We are mirror-cursed: our own launch is caught by the curse.
-                    // The nullify-9 (incl. Mirror itself and the spies - D6) fizzle;
-                    // everything else backfires onto us.
-                    if (!MIRROR_NULLIFY.has(a)) game.receive_weapon(a);
-                } else if (a === SWAP_TOKEN) initiateSwap();
-                else if (a === SUSAN_TOKEN) initiateSusan();
-                else if (SPY_TOKENS.has(a)) initiateSpy(a); // request opponent board
-                else sendWeaponToOpponent(a); // Mirror included: curses the opponent
-            }
-        } else if (tag === 7) {
-            // FundsStolen: we (the victim) were taxed/robbed - credit the
-            // attacker (the opponent banks it via game.add_funds).
-            if ((mode === 'vsplayer' || mode === 'online') && !gameEnded && a !== 0) {
-                sendToOpponent({ kind: 'funds', amount: a });
-            }
-        } else if (tag === 2) {
-            // Scored: relay score update
-            if (mode === 'vsplayer' && broadcastChannel && !gameEnded) {
-                broadcastChannel.postMessage({ kind: 'score', score: a, lines: b, funds: c });
-            } else if (mode === 'online' && !gameEnded) {
-                dcSend({ kind: 'score', score: a, lines: b, funds: c });
-            }
-        } else if (tag === 5) {
-            // GameOver: tell opponent we died
+        // Local-mode game over (practice / vs-computer top-out). In an
+        // authoritative online match the server's result drives game over (via
+        // the snapshot), so the client doesn't latch it from its own prediction.
+        if (!authoritative && tag === 5) {
             gameEnded = true;
-            gameOverText.textContent = 'GAME OVER - You Lost';
+            gameOverText.textContent = 'GAME OVER';
             gameOverOverlay.style.display = 'flex';
-            if (mode === 'vsplayer' && broadcastChannel) {
-                broadcastChannel.postMessage({ kind: 'dead' });
-            } else if (mode === 'online') {
-                dcSend({ kind: 'dead' });
-                if (ws) {
-                    ws.send(JSON.stringify({
-                        type: 'result',
-                        won: false,
-                        lines: game.lines(),
-                        opLines: game.op_lines()
-                    }));
-                }
-            }
         }
     }
 }
@@ -1258,32 +872,6 @@ function gameLoop(now) {
     requestAnimationFrame(gameLoop);
 }
 
-function handleBroadcastMessage(ev) {
-    if (mode !== 'vsplayer') return;
-
-    const m = ev.data;
-
-    if (handleExchange(m)) {
-        // consumed (swap/susan exchange)
-    } else if (m.kind === 'weapon') {
-        // Opponent launched a weapon at us (the sender resolved their own curse).
-        receiveWeaponFromOpponent(m.token);
-    } else if (m.kind === 'funds') {
-        game.add_funds(m.amount); // Mondale/Keating credit from the victim
-    } else if (m.kind === 'bazaarDone') {
-        opponentBazaarDone = true;
-        maybeLeaveBazaar();
-    } else if (m.kind === 'score') {
-        // Opponent score update
-        game.receive_op_score(m.score, m.lines, m.funds);
-        spyOnOpponentScore(); // line-based spy expiry + refresh
-    } else if (m.kind === 'dead') {
-        // Opponent died; we win
-        gameEnded = true;
-        gameOverText.textContent = 'YOU WIN!\n(opponent died)';
-        gameOverOverlay.style.display = 'flex';
-    }
-}
 
 // ─── Touch gesture handling on game canvas ────────────────────────────────────
 
@@ -1491,12 +1079,6 @@ function handleKeyDown(e) {
     // stray Tab/Shift doesn't mark you "online").
     if (GAMEPLAY_KEYS.has(key)) markActive();
 
-    // Condor is a hold-'c' toggle: flip the spy view on/off (BTGame::condor).
-    if ((key === 'c' || key === 'C') && spyType === CONDOR_TOKEN) {
-        spyHidden = !spyHidden;
-        return;
-    }
-
     // Arrow keys and pause
     switch (key) {
         case 'ArrowLeft':
@@ -1549,14 +1131,6 @@ bazaarDoneBtn.addEventListener('click', () => {
         predict('LeaveBazaar');
         bazaarDoneBtn.disabled = true;
         bazaarDoneBtn.textContent = 'WAITING FOR OPPONENT...';
-    } else if (mode === 'vsplayer' || mode === 'online') {
-        // Don't resume until the opponent is also done (synchronized barrier).
-        localBazaarDone = true;
-        bazaarDoneBtn.disabled = true;
-        bazaarDoneBtn.textContent = 'WAITING FOR OPPONENT...';
-        if (mode === 'vsplayer' && broadcastChannel) broadcastChannel.postMessage({ kind: 'bazaarDone' });
-        else if (mode === 'online') dcSend({ kind: 'bazaarDone' });
-        maybeLeaveBazaar();
     } else {
         game.leave_bazaar();
         bazaarOverlay.style.display = 'none';
@@ -1758,8 +1332,6 @@ if (openLeaderboardBtn) openLeaderboardBtn.addEventListener('click', () => { loc
     await initGame();
 
     // Set up broadcast channel for two-player communication
-    broadcastChannel = new BroadcastChannel('battletris');
-    broadcastChannel.onmessage = handleBroadcastMessage;
 
     // Wire up on-screen touch control buttons
     setupTouchControls();

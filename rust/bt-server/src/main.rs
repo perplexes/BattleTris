@@ -346,18 +346,10 @@ fn try_match(app: &mut App, id: u64) -> Option<PendingBout> {
             input_rx,
         })
     } else {
-        // Legacy WebRTC handshake (unchanged): one offer side, one answer side.
-        let matched = |role: &str, you: &PlayerState, opp_name: &str, opp_s: &PlayerState| {
-            json!({
-                "type": "matched", "role": role, "opponent": opp_name,
-                "yourMu": you.rating.mu, "yourSigma": you.rating.sigma,
-                "oppMu": opp_s.rating.mu, "oppSigma": opp_s.rating.sigma,
-                "quality": quality,
-            })
-        };
-        send(app, opp, &matched("offer", &a_state, &b_name, &b_state));
-        send(app, id, &matched("answer", &b_state, &a_name, &a_state));
-        println!("matched {opp} <-> {id} (quality {quality:.3})");
+        // Every shipped client is authoritative (the WebRTC P2P handoff was
+        // removed with the client-server migration), so this is unreachable in
+        // practice — a client that doesn't announce `authoritative` simply gets
+        // no match handoff rather than a dead WebRTC bootstrap.
         None
     }
 }
@@ -613,13 +605,6 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
                     // try_send: drop under flood rather than grow memory (bounded channel).
                     let _ = tx.try_send((*side, input, seq));
                 }
-            }
-        }
-        Some("signal") => {
-            let app = state.lock().await;
-            if let Some(peer) = app.clients.get(&id).and_then(|c| c.peer) {
-                let data = v.get("data").cloned().unwrap_or(Value::Null);
-                send(&app, peer, &json!({"type": "signal", "data": data}));
             }
         }
         Some("result") => {
@@ -1134,23 +1119,6 @@ mod tests {
     }
 
     #[test]
-    fn two_waiting_players_get_paired_with_offer_and_answer() {
-        let mut app = test_app();
-        let mut rx_a = add_client(&mut app, 1, "alice");
-        let mut rx_b = add_client(&mut app, 2, "bob");
-
-        try_match(&mut app, 1); // alice queues
-        try_match(&mut app, 2); // bob matches alice
-
-        assert!(app.waiting.is_empty(), "both leave the queue on a match");
-        assert_eq!(app.clients[&1].peer, Some(2), "peers linked");
-        assert_eq!(app.clients[&2].peer, Some(1));
-        // The WebRTC handshake is bootstrapped: one offer side, one answer side.
-        assert!(drained_types(&mut rx_a).contains(&"matched".to_string()));
-        assert!(drained_types(&mut rx_b).contains(&"matched".to_string()));
-    }
-
-    #[test]
     fn authoritative_pair_starts_a_bout_instead_of_webrtc() {
         let mut app = test_app();
         let mut rx_a = add_client(&mut app, 1, "alice");
@@ -1173,19 +1141,6 @@ mod tests {
         assert!(tb.contains(&"matchStart".to_string()));
     }
 
-    #[test]
-    fn a_mixed_pair_falls_back_to_webrtc() {
-        // If even one side is a legacy client, the match uses the WebRTC handoff.
-        let mut app = test_app();
-        let mut rx_a = add_client(&mut app, 1, "alice");
-        let _rx_b = add_client(&mut app, 2, "bob");
-        app.clients.get_mut(&1).unwrap().authoritative = true; // alice new, bob legacy
-
-        try_match(&mut app, 1);
-        assert!(try_match(&mut app, 2).is_none(), "mixed pair -> no hosted bout");
-        assert!(app.clients[&1].bout.is_none(), "no authoritative bout bound");
-        assert!(drained_types(&mut rx_a).contains(&"matched".to_string()), "WebRTC handoff");
-    }
 
     #[tokio::test]
     async fn run_bout_ticks_and_broadcasts_snapshots_to_both_sides() {
