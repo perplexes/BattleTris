@@ -955,6 +955,27 @@ impl Game {
         true
     }
 
+    /// [`Self::snapshot`] as little-endian bytes — the wire form for the
+    /// client-server keyframe. (The i64 stream includes `keep_prob` f64
+    /// bit-patterns that exceed 2^53, so it can't ride as JSON numbers; bytes
+    /// round-trip exactly and the transport sends them as a `Uint8Array`.)
+    pub fn snapshot_bytes(&self) -> Vec<u8> {
+        self.snapshot().iter().flat_map(|v| v.to_le_bytes()).collect()
+    }
+
+    /// Restore from a [`Self::snapshot_bytes`] buffer. False if the length isn't
+    /// a multiple of 8 or the keyframe is malformed (see [`Self::restore`]).
+    pub fn restore_bytes(&mut self, bytes: &[u8]) -> bool {
+        if bytes.len() % 8 != 0 {
+            return false;
+        }
+        let kf: Vec<i64> = bytes
+            .chunks_exact(8)
+            .map(|c| i64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        self.restore(&kf)
+    }
+
     /// Effective bazaar price for `token` — doubled while Carter is active
     /// (the original displays and charges the doubled price).
     pub fn bazaar_price(&self, token: WeaponToken) -> i32 {
@@ -1208,6 +1229,12 @@ mod tests {
         let mut h = Game::new(1); // a DIFFERENT seed — restore must overwrite everything
         assert!(h.restore(&snap), "restore accepts a valid keyframe");
         assert_eq!(h.snapshot(), snap, "the restored game re-serializes identically");
+
+        // The byte (wire) form round-trips too.
+        let mut hb = Game::new(2);
+        assert!(hb.restore_bytes(&g.snapshot_bytes()));
+        assert_eq!(hb.snapshot(), snap, "byte-form restore matches");
+        assert!(!hb.restore_bytes(&[1, 2, 3]), "a non-multiple-of-8 buffer is rejected");
     }
 
     #[test]

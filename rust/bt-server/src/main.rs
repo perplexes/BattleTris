@@ -427,16 +427,19 @@ async fn run_bout(state: Shared, pb: PendingBout) {
         bout.tick(bout::TICK_MS);
 
         if bout.is_over() {
-            // Final authoritative snapshot so both clients see the end state.
-            let _ = tx_a.send(Message::Text(bout.snapshot_message(Side::A)));
-            let _ = tx_b.send(Message::Text(bout.snapshot_message(Side::B)));
+            // Final frame carries a keyframe so both clients settle on the end state.
+            let _ = tx_a.send(Message::Text(bout.snapshot_message(Side::A, true)));
+            let _ = tx_b.send(Message::Text(bout.snapshot_message(Side::B, true)));
             break Some(bout.result() == 1); // 1 = A won
         }
-        // Throttle snapshots to ~30Hz (every other 16ms tick); this is also where
-        // a client disconnect is detected (the send fails).
+        // Snapshots go out at ~30Hz (every other 16ms tick) — this is also where a
+        // client disconnect is detected (the send fails). A full reconciliation
+        // keyframe rides every ~32nd tick (~2Hz) and the very first frame, so a
+        // client gets an authoritative anchor immediately and steady corrections.
         if frame % 2 == 0 {
-            let a_ok = tx_a.send(Message::Text(bout.snapshot_message(Side::A))).is_ok();
-            let b_ok = tx_b.send(Message::Text(bout.snapshot_message(Side::B))).is_ok();
+            let kf = frame % 32 == 0;
+            let a_ok = tx_a.send(Message::Text(bout.snapshot_message(Side::A, kf))).is_ok();
+            let b_ok = tx_b.send(Message::Text(bout.snapshot_message(Side::B, kf))).is_ok();
             match (a_ok, b_ok) {
                 (false, false) => break None,       // both disconnected
                 (true, false) => break Some(true),  // B dropped -> A wins by forfeit

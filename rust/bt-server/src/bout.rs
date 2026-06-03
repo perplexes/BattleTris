@@ -76,26 +76,6 @@ fn is_bazaar_input(input: &Input) -> bool {
     )
 }
 
-/// The authoritative RENDER view of a player's own board: enough to draw their
-/// side and show a divergence, using the engine's flat i32 codec
-/// (`export_board`/`export_arsenal`, the same one the old P2P Swap/Susan relay
-/// used). NOTE: this is NOT a full reconciliation keyframe — `export_board`
-/// omits the falling piece, phase/timers, RNG + piece-manager state, and the
-/// active-weapon flags/durations + pending queue. Phase 4 (client prediction)
-/// needs a complete `Game` keyframe (a serialize/restore of the whole engine
-/// state) to re-sim unacked inputs on top of; this struct is the display view.
-#[derive(Serialize, Debug, Clone, PartialEq)]
-pub struct SelfView {
-    pub board: Vec<i32>,
-    pub arsenal: Vec<i32>,
-    pub score: i64,
-    pub lines: i64,
-    pub funds: i64,
-    pub in_bazaar: bool,
-    pub lines_til_bazaar: i32,
-    pub game_over: bool,
-}
-
 /// What a player is allowed to see about their OPPONENT by default — only
 /// score/lines for the opponent panel. NOT the board and NOT funds: in the
 /// original those are revealed only by a spy (Ames "displays your opponent's
@@ -109,17 +89,22 @@ pub struct OppView {
     pub game_over: bool,
 }
 
-/// One authoritative frame sent to a client. `ack` is the last input sequence
-/// the server has applied from THIS client, so the client can discard
-/// acknowledged inputs and re-apply only the unacked ones on top of `you`.
+/// One authoritative frame sent to a client. Per-frame frames are LIGHT — the
+/// client renders its own board from local prediction; `ack` (the last input
+/// seq the server applied from this client) lets it discard acked inputs. The
+/// full authoritative state rides `keyframe` (the byte form of `Game::snapshot`)
+/// on a throttle: the client restores it and re-applies its unacked inputs.
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct Snapshot {
     pub tick: u64,
     pub ack: u64,
     /// 0 = ongoing, 1 = this client won, 2 = this client lost.
     pub result: i32,
-    pub you: SelfView,
     pub opp: OppView,
+    /// Full-state reconciliation keyframe (bytes), present only on the throttled
+    /// keyframe frames; omitted from the JSON otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keyframe: Option<Vec<u8>>,
 }
 
 /// A server-hosted authoritative match between two clients.
@@ -185,20 +170,21 @@ impl Bout {
 
     /// The authoritative snapshot for `side` as a ready-to-send ws message: the
     /// [`Snapshot`] fields plus a `{"type":"snapshot"}` tag.
-    pub fn snapshot_message(&self, side: Side) -> String {
-        let mut v =
-            serde_json::to_value(self.snapshot_for(side)).unwrap_or(serde_json::Value::Null);
+    pub fn snapshot_message(&self, side: Side, include_keyframe: bool) -> String {
+        let mut v = serde_json::to_value(self.snapshot_for(side, include_keyframe))
+            .unwrap_or(serde_json::Value::Null);
         if let Some(obj) = v.as_object_mut() {
             obj.insert("type".into(), serde_json::Value::String("snapshot".into()));
         }
         v.to_string()
     }
 
-    /// Build the authoritative snapshot to send to `side`.
-    pub fn snapshot_for(&self, side: Side) -> Snapshot {
+    /// Build the authoritative snapshot for `side`. `include_keyframe` attaches
+    /// the full-state keyframe (the caller throttles it); otherwise the frame is
+    /// just tick/ack/result/opp and the client renders from its local prediction.
+    pub fn snapshot_for(&self, side: Side, include_keyframe: bool) -> Snapshot {
         let me = self.versus.game(side);
         let them = self.versus.game(side.other());
-        let s = me.score();
 
         // The match result is latched as A/B; translate to this client's POV
         // (1 = you won, 2 = you lost).
@@ -212,21 +198,12 @@ impl Bout {
             tick: self.tick,
             ack: self.ack[side_idx(side)],
             result,
-            you: SelfView {
-                board: me.export_board(),
-                arsenal: me.export_arsenal(),
-                score: s.score,
-                lines: s.lines,
-                funds: s.funds,
-                in_bazaar: me.is_in_bazaar(),
-                lines_til_bazaar: me.lines_til_bazaar(),
-                game_over: me.is_game_over(),
-            },
             opp: OppView {
                 score: them.score().score,
                 lines: them.score().lines,
                 game_over: them.is_game_over(),
             },
+            keyframe: include_keyframe.then(|| me.snapshot_bytes()),
         }
     }
 }
@@ -261,11 +238,11 @@ mod tests {
     fn apply_input_rejects_illegal_and_records_ack_for_legal() {
         let mut b = Bout::new(1, 2);
         assert!(!b.apply_input(Side::A, &Input::AddFunds(500), 1), "funds injection rejected");
-        assert_eq!(b.snapshot_for(Side::A).you.funds, 0, "no funds granted");
+        assert_eq!(b.versus.game(Side::A).score().funds, 0, "no funds granted");
 
         assert!(b.apply_input(Side::A, &Input::MoveLeft, 5), "legal move accepted");
-        assert_eq!(b.snapshot_for(Side::A).ack, 5, "ack advanced to the applied seq");
-        assert_eq!(b.snapshot_for(Side::B).ack, 0, "the other side's ack is independent");
+        assert_eq!(b.snapshot_for(Side::A, false).ack, 5, "ack advanced to the applied seq");
+        assert_eq!(b.snapshot_for(Side::B, false).ack, 0, "the other side's ack is independent");
     }
 
     #[test]
@@ -275,24 +252,25 @@ mod tests {
         // A replay of the same seq, or any seq <= ack, is rejected and ack holds.
         assert!(!b.apply_input(Side::A, &Input::MoveRight, 5), "duplicate seq rejected");
         assert!(!b.apply_input(Side::A, &Input::MoveRight, 3), "older seq rejected");
-        assert_eq!(b.snapshot_for(Side::A).ack, 5, "ack never moves backward");
+        assert_eq!(b.snapshot_for(Side::A, false).ack, 5, "ack never moves backward");
         assert!(b.apply_input(Side::A, &Input::MoveRight, 6), "the next seq advances");
-        assert_eq!(b.snapshot_for(Side::A).ack, 6);
+        assert_eq!(b.snapshot_for(Side::A, false).ack, 6);
     }
 
     #[test]
-    fn snapshot_reflects_authoritative_state_and_is_per_side() {
-        let mut b = Bout::new(1, 2);
-        let snap_a = b.snapshot_for(Side::A);
-        // A full board export is width*height*4 ints (flat [tag,a,b,hidden] cells).
-        assert_eq!(snap_a.you.board.len() % 4, 0);
-        assert!(!snap_a.you.board.is_empty());
-        assert_eq!(snap_a.you.arsenal.len(), 20, "10 slots * [token,qty]");
-        assert_eq!(snap_a.result, 0, "ongoing");
-        // The two sides see mirrored opp/you score views (both 0 at start here).
-        let snap_b = b.snapshot_for(Side::B);
-        assert_eq!(snap_a.opp.score, snap_b.you.score);
-        let _ = &mut b;
+    fn snapshot_is_light_by_default_and_carries_a_keyframe_on_request() {
+        let b = Bout::new(1, 2);
+        let light = b.snapshot_for(Side::A, false);
+        assert!(light.keyframe.is_none(), "the default frame is light (no keyframe)");
+        assert_eq!(light.result, 0, "ongoing");
+        assert_eq!(light.opp.score, 0, "opponent starts at 0");
+
+        let full = b.snapshot_for(Side::A, true);
+        let kf = full.keyframe.expect("keyframe present on request");
+        assert_eq!(kf.len() % 8, 0, "keyframe is a buffer of i64s");
+        // It's a real full-state keyframe: it restores into a fresh engine.
+        let mut g = bt_core::Game::new(999);
+        assert!(g.restore_bytes(&kf), "the keyframe restores a full game");
     }
 
     #[test]
@@ -309,7 +287,7 @@ mod tests {
             seq += 1;
             b.apply_input(Side::B, &Input::BeginDrop, seq);
             b.tick(16);
-            let board = b.snapshot_for(Side::B).you.board;
+            let board = b.versus.game(Side::B).export_board();
             // Count non-empty cells (tag != 0 in each quad).
             let filled = board.chunks(4).filter(|q| q[0] != 0).count();
             if filled >= 9 {
@@ -342,7 +320,7 @@ mod tests {
             }
         }
         assert_eq!(b.result(), 1, "A won (B topped out)");
-        assert_eq!(b.snapshot_for(Side::A).result, 1, "A's POV: you won");
-        assert_eq!(b.snapshot_for(Side::B).result, 2, "B's POV: you lost");
+        assert_eq!(b.snapshot_for(Side::A, false).result, 1, "A's POV: you won");
+        assert_eq!(b.snapshot_for(Side::B, false).result, 2, "B's POV: you lost");
     }
 }

@@ -162,6 +162,18 @@ impl WasmGame {
         self.inner.add_funds(amount as i64);
         self.rec.record(Input::AddFunds(amount as i64));
     }
+    /// Restore the full authoritative game state from a server keyframe (the
+    /// byte form from `Game::snapshot_bytes`), for client-server reconciliation:
+    /// the client overwrites its predicted state, then re-applies its unacked
+    /// inputs. Returns false on a malformed keyframe (state left untouched).
+    pub fn restore_keyframe(&mut self, bytes: Vec<u8>) -> bool {
+        self.inner.restore_bytes(&bytes)
+    }
+    /// The full game state as a keyframe (byte form) — for debugging / parity
+    /// checks against the server's authoritative snapshot.
+    pub fn snapshot_keyframe(&self) -> Vec<u8> {
+        self.inner.snapshot_bytes()
+    }
     /// Whether weapon `token` is currently active on this game (drives the
     /// online Mirror reflect/nullify check).
     pub fn weapon_active(&self, token: i32) -> bool {
