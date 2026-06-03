@@ -19,16 +19,14 @@
 //! Transport wiring (the `/ws` handoff from matchmaking, snapshot broadcast
 //! cadence, client prediction/reconciliation) layers on top of this core.
 //!
-//! NOTE: this is the authoritative match CORE, landed and tested ahead of the
-//! transport layer. Until the `/ws` handler hosts a `Bout` per matched pair,
-//! these items are reachable only from tests, hence the module-wide allow — it
-//! comes off in the commit that wires the bout into matchmaking.
-#![allow(dead_code)]
-
 use bt_core::versus::Side;
 use bt_core::Versus;
 use bt_replay::Input;
 use serde::Serialize;
+
+/// The authoritative tick interval (ms). Matches the engine's fixed timestep
+/// (`bt_wasm::FIXED_DT_MS`), so one real interval = one deterministic step.
+pub const TICK_MS: i32 = 16;
 
 /// Map a [`Side`] to a 0/1 index (A = 0, B = 1) for per-side arrays.
 fn side_idx(side: Side) -> usize {
@@ -180,8 +178,20 @@ impl Bout {
         self.versus.is_over()
     }
 
-    pub fn tick_count(&self) -> u64 {
-        self.tick
+    /// This side's cleared-line count — for settling the match outcome (TrueSkill).
+    pub fn lines(&self, side: Side) -> u32 {
+        self.versus.game(side).score().lines.max(0) as u32
+    }
+
+    /// The authoritative snapshot for `side` as a ready-to-send ws message: the
+    /// [`Snapshot`] fields plus a `{"type":"snapshot"}` tag.
+    pub fn snapshot_message(&self, side: Side) -> String {
+        let mut v =
+            serde_json::to_value(self.snapshot_for(side)).unwrap_or(serde_json::Value::Null);
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("type".into(), serde_json::Value::String("snapshot".into()));
+        }
+        v.to_string()
     }
 
     /// Build the authoritative snapshot to send to `side`.

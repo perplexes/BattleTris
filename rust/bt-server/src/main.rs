@@ -34,7 +34,8 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Redirect};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use bt_replay::Replay;
+use bt_core::versus::Side;
+use bt_replay::{Input, Replay};
 use bt_trueskill::ts2::{rate_match, MatchOutcome, PlayerState, Ts2Params, Winner};
 use bt_trueskill::{quality_1v1, Rating};
 use futures_util::{SinkExt, StreamExt};
@@ -45,6 +46,10 @@ use tower_http::services::ServeDir;
 
 /// Server-authoritative online match engine (the client-server migration).
 mod bout;
+use bout::Bout;
+
+/// One queued input headed for an authoritative [`Bout`]: (side, action, seq).
+type BoutInput = (Side, Input, u64);
 
 /// Matchmaking/relay state (tokio mutex — held across `.await`).
 type Shared = Arc<Mutex<App>>;
@@ -79,6 +84,13 @@ struct Client {
     tx: mpsc::UnboundedSender<Message>,
     peer: Option<u64>,
     state: PlayerState,
+    /// Does this client speak the server-authoritative protocol (sends `input`,
+    /// renders `snapshot`)? Announced on `queue`. Old WebRTC clients leave it
+    /// false and keep the legacy signaling-relay handoff, untouched.
+    authoritative: bool,
+    /// While in an authoritative match: the channel to the match's tick loop and
+    /// which side this client plays. `input` messages are forwarded here.
+    bout: Option<(mpsc::UnboundedSender<BoutInput>, Side)>,
 }
 
 /// Shared server state.
@@ -209,12 +221,33 @@ fn save_ratings(ratings: &HashMap<String, (f64, f64, u32)>) {
     }
 }
 
+/// Everything the async caller needs to spawn an authoritative match's tick
+/// loop, handed back by [`try_match`] when it pairs two authoritative clients.
+struct PendingBout {
+    id_a: u64,
+    id_b: u64,
+    seed_a: u64,
+    seed_b: u64,
+    tx_a: mpsc::UnboundedSender<Message>,
+    tx_b: mpsc::UnboundedSender<Message>,
+    input_rx: mpsc::UnboundedReceiver<BoutInput>,
+}
+
+/// A per-match seed from a connection id — distinct across matches (ids are
+/// monotonic) without an rng dependency, and masked to 32 bits so it round-trips
+/// through the JS client's `WasmGame::new(seed: u32)` exactly (same RNG stream
+/// on both sides → client prediction agrees with the authoritative sim).
+fn derive_seed(id: u64) -> u64 {
+    (id.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 16) & 0xFFFF_FFFF
+}
+
 /// Match `id` against the best-quality waiting opponent; otherwise queue.
-fn try_match(app: &mut App, id: u64) {
-    let my_rating = match app.clients.get(&id).map(|c| c.state.rating) {
-        Some(r) => r,
-        None => return,
-    };
+///
+/// Returns `Some(PendingBout)` only when it pairs two server-authoritative
+/// clients — the async caller then spawns the match's tick loop. Legacy (WebRTC)
+/// clients get the unchanged `matched` signaling handoff and `None`.
+fn try_match(app: &mut App, id: u64) -> Option<PendingBout> {
+    let my_rating = app.clients.get(&id).map(|c| c.state.rating)?;
 
     let mut best: Option<(u64, f64)> = None;
     for &wid in &app.waiting {
@@ -229,36 +262,109 @@ fn try_match(app: &mut App, id: u64) {
         }
     }
 
-    match best {
-        Some((opp, quality)) => {
-            app.waiting.retain(|&w| w != opp && w != id);
-            if let (Some(a), Some(b)) = (app.clients.get(&opp), app.clients.get(&id)) {
-                let (a_name, a_state) = (a.name.clone(), a.state);
-                let (b_name, b_state) = (b.name.clone(), b.state);
-                let matched = |role: &str, you: &PlayerState, opp_name: &str, opp_s: &PlayerState| {
-                    json!({
-                        "type": "matched", "role": role, "opponent": opp_name,
-                        "yourMu": you.rating.mu, "yourSigma": you.rating.sigma,
-                        "oppMu": opp_s.rating.mu, "oppSigma": opp_s.rating.sigma,
-                        "quality": quality,
-                    })
-                };
-                send(app, opp, &matched("offer", &a_state, &b_name, &b_state));
-                send(app, id, &matched("answer", &b_state, &a_name, &a_state));
-            }
-            if let Some(c) = app.clients.get_mut(&opp) {
-                c.peer = Some(id);
-            }
-            if let Some(c) = app.clients.get_mut(&id) {
-                c.peer = Some(opp);
-            }
-            println!("matched {opp} <-> {id} (quality {quality:.3})");
-        }
+    let (opp, quality) = match best {
+        Some(x) => x,
         None => {
             if !app.waiting.contains(&id) {
                 app.waiting.push(id);
             }
+            return None;
         }
+    };
+
+    app.waiting.retain(|&w| w != opp && w != id);
+    // Link peers (used by settle + the legacy `opponentLeft` path either way).
+    if let Some(c) = app.clients.get_mut(&opp) {
+        c.peer = Some(id);
+    }
+    if let Some(c) = app.clients.get_mut(&id) {
+        c.peer = Some(opp);
+    }
+
+    let both_authoritative = app.clients.get(&opp).is_some_and(|c| c.authoritative)
+        && app.clients.get(&id).is_some_and(|c| c.authoritative);
+
+    let (a_name, a_state) = match app.clients.get(&opp) {
+        Some(c) => (c.name.clone(), c.state),
+        None => return None,
+    };
+    let (b_name, b_state) = match app.clients.get(&id) {
+        Some(c) => (c.name.clone(), c.state),
+        None => return None,
+    };
+
+    if both_authoritative {
+        // Server-authoritative match. opp = side A (first queued), id = side B.
+        let (seed_a, seed_b) = (derive_seed(opp), derive_seed(id));
+        let (input_tx, input_rx) = mpsc::unbounded_channel::<BoutInput>();
+        let tx_a = app.clients[&opp].tx.clone();
+        let tx_b = app.clients[&id].tx.clone();
+        if let Some(c) = app.clients.get_mut(&opp) {
+            c.bout = Some((input_tx.clone(), Side::A));
+        }
+        if let Some(c) = app.clients.get_mut(&id) {
+            c.bout = Some((input_tx, Side::B));
+        }
+        send(app, opp, &json!({"type":"matchStart","side":"A","seed":seed_a,"opponent":b_name,"quality":quality}));
+        send(app, id, &json!({"type":"matchStart","side":"B","seed":seed_b,"opponent":a_name,"quality":quality}));
+        println!("authoritative match {opp} <-> {id} (quality {quality:.3})");
+        Some(PendingBout { id_a: opp, id_b: id, seed_a, seed_b, tx_a, tx_b, input_rx })
+    } else {
+        // Legacy WebRTC handshake (unchanged): one offer side, one answer side.
+        let matched = |role: &str, you: &PlayerState, opp_name: &str, opp_s: &PlayerState| {
+            json!({
+                "type": "matched", "role": role, "opponent": opp_name,
+                "yourMu": you.rating.mu, "yourSigma": you.rating.sigma,
+                "oppMu": opp_s.rating.mu, "oppSigma": opp_s.rating.sigma,
+                "quality": quality,
+            })
+        };
+        send(app, opp, &matched("offer", &a_state, &b_name, &b_state));
+        send(app, id, &matched("answer", &b_state, &a_name, &a_state));
+        println!("matched {opp} <-> {id} (quality {quality:.3})");
+        None
+    }
+}
+
+/// The per-match authoritative tick loop. Advances the deterministic engine on
+/// the server's clock, broadcasts a snapshot to each client every tick, and
+/// settles on the natural end (or by forfeit if a client drops).
+async fn run_bout(state: Shared, pb: PendingBout) {
+    let PendingBout { id_a, id_b, seed_a, seed_b, tx_a, tx_b, mut input_rx } = pb;
+    let mut bout = Bout::new(seed_a, seed_b);
+    let mut ticker = tokio::time::interval(Duration::from_millis(bout::TICK_MS as u64));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    // `Some(a_won)` = settle with A as winner/loser; `None` = both gone, nothing to rate.
+    let outcome: Option<bool> = loop {
+        ticker.tick().await;
+        while let Ok((side, input, seq)) = input_rx.try_recv() {
+            bout.apply_input(side, &input, seq);
+        }
+        bout.tick(bout::TICK_MS);
+        let a_ok = tx_a.send(Message::Text(bout.snapshot_message(Side::A))).is_ok();
+        let b_ok = tx_b.send(Message::Text(bout.snapshot_message(Side::B))).is_ok();
+
+        if bout.is_over() {
+            break Some(bout.result() == 1); // 1 = A won
+        }
+        match (a_ok, b_ok) {
+            (false, false) => break None,    // both disconnected
+            (true, false) => break Some(true),  // B dropped -> A wins by forfeit
+            (false, true) => break Some(false), // A dropped -> B wins by forfeit
+            (true, true) => {}
+        }
+    };
+
+    let mut app = state.lock().await;
+    if let Some(c) = app.clients.get_mut(&id_a) {
+        c.bout = None;
+    }
+    if let Some(c) = app.clients.get_mut(&id_b) {
+        c.bout = None;
+    }
+    if let Some(a_won) = outcome {
+        settle_result(&mut app, id_a, a_won, bout.lines(Side::A), bout.lines(Side::B));
     }
 }
 
@@ -348,13 +454,37 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
         }
         Some("queue") => {
             let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("anon").to_string();
-            let mut app = state.lock().await;
-            let st = app.rating_for(&name);
-            if let Some(c) = app.clients.get_mut(&id) {
-                c.name = name;
-                c.state = st;
+            // New clients announce the authoritative protocol; old ones omit it
+            // and keep the WebRTC handoff untouched.
+            let authoritative = v.get("authoritative").and_then(|b| b.as_bool()).unwrap_or(false);
+            let pending = {
+                let mut app = state.lock().await;
+                let st = app.rating_for(&name);
+                if let Some(c) = app.clients.get_mut(&id) {
+                    c.name = name;
+                    c.state = st;
+                    c.authoritative = authoritative;
+                }
+                try_match(&mut app, id)
+            };
+            // Spawn the match's tick loop outside the lock (it locks again only to settle).
+            if let Some(pb) = pending {
+                tokio::spawn(run_bout(state.clone(), pb));
             }
-            try_match(&mut app, id);
+        }
+        // A gameplay action in a server-authoritative match — forward it to that
+        // match's tick loop, which validates + applies it. {seq, input}.
+        Some("input") => {
+            let seq = v.get("seq").and_then(|n| n.as_u64()).unwrap_or(0);
+            let input = v
+                .get("input")
+                .and_then(|iv| serde_json::from_value::<Input>(iv.clone()).ok());
+            if let Some(input) = input {
+                let app = state.lock().await;
+                if let Some((tx, side)) = app.clients.get(&id).and_then(|c| c.bout.as_ref()) {
+                    let _ = tx.send((*side, input, seq));
+                }
+            }
         }
         Some("signal") => {
             let app = state.lock().await;
@@ -388,7 +518,10 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
     {
         let mut a = state.lock().await;
         let st = a.rating_for("");
-        a.clients.insert(id, Client { name: String::new(), tx, peer: None, state: st });
+        a.clients.insert(
+            id,
+            Client { name: String::new(), tx, peer: None, state: st, authoritative: false, bout: None },
+        );
     }
 
     // Writer task: drain the per-client channel to the socket.
@@ -810,7 +943,10 @@ mod tests {
     fn add_client(app: &mut App, id: u64, name: &str) -> mpsc::UnboundedReceiver<Message> {
         let (tx, rx) = mpsc::unbounded_channel();
         let state = app.rating_for(name);
-        app.clients.insert(id, Client { name: name.to_string(), tx, peer: None, state });
+        app.clients.insert(
+            id,
+            Client { name: name.to_string(), tx, peer: None, state, authoritative: false, bout: None },
+        );
         rx
     }
 
@@ -850,6 +986,66 @@ mod tests {
         // The WebRTC handshake is bootstrapped: one offer side, one answer side.
         assert!(drained_types(&mut rx_a).contains(&"matched".to_string()));
         assert!(drained_types(&mut rx_b).contains(&"matched".to_string()));
+    }
+
+    #[test]
+    fn authoritative_pair_starts_a_bout_instead_of_webrtc() {
+        let mut app = test_app();
+        let mut rx_a = add_client(&mut app, 1, "alice");
+        let mut rx_b = add_client(&mut app, 2, "bob");
+        app.clients.get_mut(&1).unwrap().authoritative = true;
+        app.clients.get_mut(&2).unwrap().authoritative = true;
+
+        assert!(try_match(&mut app, 1).is_none(), "alice queues, no opponent yet");
+        let pending = try_match(&mut app, 2).expect("bob matches alice -> a hosted bout");
+
+        assert_eq!((pending.id_a, pending.id_b), (1, 2), "first-queued is side A");
+        assert!(
+            app.clients[&1].bout.is_some() && app.clients[&2].bout.is_some(),
+            "both clients are bound to the bout's input channel"
+        );
+        // Authoritative clients get `matchStart` (with a seed), NOT WebRTC `matched`.
+        let ta = drained_types(&mut rx_a);
+        let tb = drained_types(&mut rx_b);
+        assert!(ta.contains(&"matchStart".to_string()) && !ta.contains(&"matched".to_string()));
+        assert!(tb.contains(&"matchStart".to_string()));
+    }
+
+    #[test]
+    fn a_mixed_pair_falls_back_to_webrtc() {
+        // If even one side is a legacy client, the match uses the WebRTC handoff.
+        let mut app = test_app();
+        let mut rx_a = add_client(&mut app, 1, "alice");
+        let _rx_b = add_client(&mut app, 2, "bob");
+        app.clients.get_mut(&1).unwrap().authoritative = true; // alice new, bob legacy
+
+        try_match(&mut app, 1);
+        assert!(try_match(&mut app, 2).is_none(), "mixed pair -> no hosted bout");
+        assert!(app.clients[&1].bout.is_none(), "no authoritative bout bound");
+        assert!(drained_types(&mut rx_a).contains(&"matched".to_string()), "WebRTC handoff");
+    }
+
+    #[tokio::test]
+    async fn run_bout_ticks_and_broadcasts_snapshots_to_both_sides() {
+        use std::sync::Arc;
+        let (tx_a, mut rx_a) = mpsc::unbounded_channel::<Message>();
+        let (tx_b, mut rx_b) = mpsc::unbounded_channel::<Message>();
+        let (input_tx, input_rx) = mpsc::unbounded_channel::<BoutInput>();
+        let pb = PendingBout { id_a: 1, id_b: 2, seed_a: 11, seed_b: 22, tx_a, tx_b, input_rx };
+        let shared: Shared = Arc::new(Mutex::new(test_app()));
+        let handle = tokio::spawn(run_bout(shared, pb));
+
+        // A legal input is accepted by the loop (no panic).
+        let _ = input_tx.send((Side::A, Input::MoveLeft, 1));
+        // Let several 16ms ticks elapse, then confirm snapshots reached both sides.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(drained_types(&mut rx_a).iter().any(|t| t == "snapshot"), "A got snapshots");
+        assert!(drained_types(&mut rx_b).iter().any(|t| t == "snapshot"), "B got snapshots");
+
+        // Dropping both receivers ends the loop (snapshot sends fail).
+        drop(rx_a);
+        drop(rx_b);
+        let _ = tokio::time::timeout(Duration::from_millis(300), handle).await;
     }
 
     #[test]
