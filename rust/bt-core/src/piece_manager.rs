@@ -106,8 +106,16 @@ impl PieceManager {
                 }
             }
         } else if self.hap_on == 0 && self.broken {
-            // Broken Record: repeat the old piece
-            self.old_piece
+            // Broken Record: repeat the old piece. Guard the degenerate case
+            // where Broken activated before any piece spawned (old_piece still
+            // 0, an invalid id) — fall back to a valid piece instead of
+            // panicking in `from_id`. Unreachable in real play (a Game always
+            // spawns first), so this never changes RNG order or a live game.
+            if self.old_piece != 0 {
+                self.old_piece
+            } else {
+                BT_EL_PIECE
+            }
         } else {
             // Happy piece forced
             self.hap_on -= 1;
@@ -422,6 +430,18 @@ mod tests {
             }
         }
         assert!(found_long, "Long pieces return once So Long is off");
+    }
+
+    #[test]
+    fn broken_on_pristine_manager_does_not_panic() {
+        // The degenerate case the guard protects: Broken active before any
+        // piece has spawned (old_piece still 0). Must yield a valid piece.
+        let mut manager = PieceManager::new();
+        let mut rng = Rng::new(1);
+        manager.weapon_on(WeaponToken::Broken);
+        let piece = manager.create(&mut rng, 0, 0); // must not panic
+        assert!(matches!(PieceKind::from_id(BT_EL_PIECE), Some(_)));
+        let _ = piece.kind; // a real, constructed piece
     }
 
     #[test]
