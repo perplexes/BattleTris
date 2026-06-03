@@ -20,6 +20,7 @@
 //! cadence, client prediction/reconciliation) layers on top of this core.
 //!
 use bt_core::versus::Side;
+use bt_core::weapons::{weapon_table, WeaponToken};
 use bt_core::Versus;
 use bt_replay::Input;
 use serde::Serialize;
@@ -115,10 +116,50 @@ pub struct Snapshot {
     /// Prompt own-state the client can't predict between keyframes.
     pub you: SelfStatus,
     pub opp: OppView,
+    /// Whether a spy of THIS client is currently active (drives showing/hiding
+    /// the opponent-board panel), sent every frame.
+    pub spying: bool,
+    /// The opponent's board as revealed by this client's active spy — already
+    /// DEGRADED to the spy's accuracy server-side (so a client can't read cells
+    /// the spy didn't earn). Rides the throttled keyframe frames, like `keyframe`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spy_board: Option<Vec<i32>>,
     /// Full-state reconciliation keyframe (bytes, op_funds redacted), present
     /// only on the throttled keyframe frames; omitted from the JSON otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keyframe: Option<Vec<u8>>,
+}
+
+/// % of a spy's revealed cells the server HIDES — `1 - report_prob` from
+/// BTRecon.C: Ames shows 50%, Ace 85%, Condor (satellite) is perfect.
+fn spy_hide_pct(token: WeaponToken) -> u32 {
+    match token {
+        WeaponToken::Ames => 50,
+        WeaponToken::Ace => 15,
+        _ => 0, // Condor
+    }
+}
+
+/// Degrade a flat board export ([tag,a,b,hidden] per cell) to a spy's accuracy by
+/// HIDING a deterministic ~hide% of non-empty cells (server-side, so a modified
+/// client can't read the cells the spy didn't reveal — this is what makes the old
+/// unauthenticated spy request, D4, moot). Stable per position (no flicker).
+fn degrade_board(mut board: Vec<i32>, token: WeaponToken) -> Vec<i32> {
+    let hide = spy_hide_pct(token);
+    if hide == 0 {
+        return board;
+    }
+    let cells = board.len() / 4;
+    for i in 0..cells {
+        let base = i * 4;
+        if board[base] != 0 {
+            let h = (i.wrapping_mul(2_654_435_761) >> 8) % 100;
+            if (h as u32) < hide {
+                board[base..base + 4].copy_from_slice(&[0, 0, 0, 0]); // hide -> empty
+            }
+        }
+    }
+    board
 }
 
 /// A server-hosted authoritative match between two clients.
@@ -127,6 +168,13 @@ pub struct Bout {
     tick: u64,
     /// Last applied input sequence number per side (A = [0], B = [1]).
     ack: [u64; 2],
+    /// Active spy per side: `(token, lines remaining)`. A spy reveals the
+    /// opponent's board to this side until the OPPONENT clears `duration` lines
+    /// (BTRecon's `spy_on_`). A = [0], B = [1].
+    spy: [Option<(WeaponToken, i32)>; 2],
+    /// The opponent's line count last seen per side, to measure the spy's
+    /// line-clear decrement.
+    opp_lines_seen: [i64; 2],
 }
 
 impl Bout {
@@ -137,6 +185,8 @@ impl Bout {
             versus: Versus::new(seed_a, seed_b),
             tick: 0,
             ack: [0, 0],
+            spy: [None, None],
+            opp_lines_seen: [0, 0],
         }
     }
 
@@ -162,10 +212,28 @@ impl Bout {
         true
     }
 
-    /// Advance the authoritative simulation by `dt_ms` (the server's clock).
+    /// Advance the authoritative simulation by `dt_ms` (the server's clock), and
+    /// run the spy bookkeeping (BTRecon): a launched spy reveals the opponent for
+    /// `duration` of the OPPONENT's line-clears; relaunch accumulates + switches
+    /// the accuracy to the newest spy.
     pub fn tick(&mut self, dt_ms: i32) {
         self.versus.tick(dt_ms);
         self.tick += 1;
+        for (i, side) in [Side::A, Side::B].into_iter().enumerate() {
+            if let Some(tok) = self.versus.take_spy_launch(side) {
+                let add = weapon_table()[tok.index()].duration as i32;
+                let cur = self.spy[i].map_or(0, |(_, r)| r);
+                self.spy[i] = Some((tok, cur + add)); // newest token, accumulated budget
+                self.opp_lines_seen[i] = self.versus.game(side.other()).score().lines;
+            }
+            if let Some((tok, rem)) = self.spy[i] {
+                let opp_lines = self.versus.game(side.other()).score().lines;
+                let delta = (opp_lines - self.opp_lines_seen[i]).max(0) as i32;
+                self.opp_lines_seen[i] = opp_lines;
+                let left = rem - delta;
+                self.spy[i] = if left > 0 { Some((tok, left)) } else { None };
+            }
+        }
     }
 
     /// Take (and clear) the "a client can't have predicted this" flag from the
@@ -206,6 +274,12 @@ impl Bout {
     pub fn snapshot_for(&self, side: Side, include_keyframe: bool) -> Snapshot {
         let me = self.versus.game(side);
         let them = self.versus.game(side.other());
+        let spy = self.spy[side_idx(side)];
+        // The (degraded) opponent board rides the keyframe frames while spying.
+        let spy_board = match (spy, include_keyframe) {
+            (Some((tok, _)), true) => Some(degrade_board(them.export_board(), tok)),
+            _ => None,
+        };
 
         // The match result is latched as A/B; translate to this client's POV
         // (1 = you won, 2 = you lost).
@@ -229,6 +303,8 @@ impl Bout {
                 lines: them.score().lines,
                 game_over: them.is_game_over(),
             },
+            spying: spy.is_some(),
+            spy_board,
             // op_funds-redacted: a client must not learn the opponent's funds.
             keyframe: include_keyframe.then(|| me.client_keyframe_bytes()),
         }
@@ -338,6 +414,29 @@ mod tests {
             }
         }
         panic!("RiseUp was not delivered to B by the authoritative bout");
+    }
+
+    #[test]
+    fn a_spy_reveals_a_degraded_opponent_board_only_to_the_launcher() {
+        let mut b = Bout::new(1, 2);
+        // Give B some board so the reveal is non-empty.
+        for x in 0..6 {
+            b.versus.game_mut(Side::B).board_mut().set(x, 20, Some(bt_core::Cell::die(3)));
+        }
+        b.versus.game_mut(Side::A).grant_weapon(WeaponToken::Ames);
+        assert!(b.apply_input(Side::A, &Input::LaunchWeapon(0), 1));
+        b.tick(16); // relay records the spy; the bout activates it
+
+        let sa = b.snapshot_for(Side::A, true);
+        assert!(sa.spying, "A is spying after launching Ames");
+        let board = sa.spy_board.expect("A gets the opponent board on a keyframe frame");
+        let (w, h) = (b.versus.game(Side::B).board().width, b.versus.game(Side::B).board().height);
+        assert_eq!(board.len() as i32, w * h * 4, "a full (degraded) board grid");
+
+        // B is not spying and gets nothing; and a light frame carries no spy board.
+        let sb = b.snapshot_for(Side::B, true);
+        assert!(!sb.spying && sb.spy_board.is_none(), "the spied player learns nothing");
+        assert!(b.snapshot_for(Side::A, false).spy_board.is_none(), "spy board rides keyframes only");
     }
 
     #[test]

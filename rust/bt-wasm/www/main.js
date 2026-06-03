@@ -36,6 +36,8 @@ let inputSeq = 0;          // monotonic client input counter
 let unackedInputs = [];    // [{seq, repr}] sent to the server, not yet acked
 let authSelf = null;       // latest authoritative own-status {funds,in_bazaar,lines_til_bazaar}
 let authOpp = null;        // latest authoritative opponent view {score,lines,game_over}
+let authSpying = false;    // is a spy of ours active (server-authorized)?
+let authSpyBoard = null;   // latest server-DEGRADED opponent board (from a keyframe), or null
 let playerName = null;    // remembered after the first prompt
 
 // Canvas and context
@@ -170,6 +172,8 @@ function cleanupOnline() {
     unackedInputs = [];
     authSelf = null;
     authOpp = null;
+    authSpying = false;
+    authSpyBoard = null;
 }
 
 // ─── Server-authoritative client (prediction + reconciliation) ────────────────
@@ -256,6 +260,11 @@ function applyReprToGame(repr) {
 function applySnapshot(msg) {
     authSelf = msg.you;
     authOpp = msg.opp;
+    // Server-authorized spy: `spying` every frame; the degraded opponent board
+    // rides keyframes. Keep the last board while spying; drop it when it ends.
+    authSpying = !!msg.spying;
+    if (msg.spy_board) authSpyBoard = Int32Array.from(msg.spy_board);
+    if (!authSpying) authSpyBoard = null;
     // Discard inputs the server has now applied.
     unackedInputs = unackedInputs.filter((i) => i.seq > msg.ack);
     // On a keyframe, snap to the authoritative state then replay the unacked inputs.
@@ -292,6 +301,8 @@ function enterAuthoritativeGame(msg) {
     unackedInputs = [];
     authSelf = null;
     authOpp = null;
+    authSpying = false;
+    authSpyBoard = null;
 
     const width = game.width();
     const height = game.height();
@@ -680,6 +691,15 @@ function render() {
     if (mode === 'vscomputer') {
         const aiGrid = game.render_ai_grid();
         drawBoard(aiCtx, aiGrid, width, height);
+    } else if (authoritative) {
+        // Server-authorized spy: show the opponent's board (already degraded to
+        // the spy's accuracy server-side) only while a spy of ours is active.
+        if (authSpying && authSpyBoard) {
+            aiBoard.style.display = 'block';
+            drawBoard(aiCtx, authSpyBoard, width, height);
+        } else {
+            aiBoard.style.display = 'none';
+        }
     } else if (spyType >= 0) {
         // A spy is up (online/2-tab): show the opponent's board on the same
         // panel. It expires on the opponent's line-clears (spyOnOpponentScore);

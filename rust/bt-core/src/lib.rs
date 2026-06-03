@@ -30,5 +30,5 @@ pub use game::{Game, GameEvent, Score};
 pub use piece::{Piece, PieceKind};
 pub use piece_manager::PieceManager;
 pub use rng::Rng;
-pub use versus::{deliver_weapon, mirror_nullifies, Versus};
+pub use versus::{deliver_weapon, is_spy, mirror_nullifies, Versus};
 pub use weapons::{ActiveFlags, WeaponToken};

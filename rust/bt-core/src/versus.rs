@@ -33,6 +33,14 @@ impl Side {
     }
 }
 
+/// Whether `token` is a spy (Ames/Ace/Condor) — an info weapon that reveals the
+/// opponent's board TO the launcher, rather than hitting the opponent. Resolved
+/// by the host (the server includes a degraded opponent board in the launcher's
+/// snapshot), not by the board engine.
+pub fn is_spy(token: WeaponToken) -> bool {
+    matches!(token, WeaponToken::Ames | WeaponToken::Ace | WeaponToken::Condor)
+}
+
 /// Weapons a Mirror simply nullifies (fizzles) rather than backfiring, per the
 /// original `BTWeaponManager.C:204-216` switch and the Mirror description.
 /// Includes Mirror itself (so a curse can't ping-pong) and the spies (D6).
@@ -102,6 +110,9 @@ pub struct Versus {
     /// entry. The host reads it via [`Versus::take_dirty`] to push a prompt
     /// reconciliation keyframe instead of waiting for the periodic heartbeat.
     dirty: bool,
+    /// A spy launched THIS tick by each side (A = [0], B = [1]), for the host to
+    /// pick up (the spy reveal is a host concern, not a board effect).
+    spy_launch: [Option<WeaponToken>; 2],
 }
 
 impl Versus {
@@ -113,6 +124,7 @@ impl Versus {
             b: Game::new(seed_b),
             result: 0,
             dirty: false,
+            spy_launch: [None, None],
         }
     }
 
@@ -121,6 +133,16 @@ impl Versus {
     /// it to send a prompt keyframe rather than wait for the periodic one.
     pub fn take_dirty(&mut self) -> bool {
         std::mem::take(&mut self.dirty)
+    }
+
+    /// Take (and clear) a spy `side` launched on the last tick (the host then
+    /// tracks the spy's line-based duration and reveals the opponent's board).
+    pub fn take_spy_launch(&mut self, side: Side) -> Option<WeaponToken> {
+        self.spy_launch[match side {
+            Side::A => 0,
+            Side::B => 1,
+        }]
+        .take()
     }
 
     pub fn game(&self, side: Side) -> &Game {
@@ -173,7 +195,16 @@ impl Versus {
         for e in self.a.take_events() {
             match e {
                 GameEvent::WeaponLaunched(t) => {
-                    deliver_weapon(&mut self.a, &mut self.b, t);
+                    if is_spy(t) {
+                        // A spy reveals the opponent to the LAUNCHER (a host concern),
+                        // it is NOT delivered to the opponent — unless the launcher
+                        // is mirror-cursed, in which case it fizzles (D6).
+                        if !self.a.weapon_active(WeaponToken::Mirror) {
+                            self.spy_launch[0] = Some(t);
+                        }
+                    } else {
+                        deliver_weapon(&mut self.a, &mut self.b, t);
+                    }
                     self.dirty = true;
                 }
                 GameEvent::Scored { score, lines, funds } => {
@@ -194,7 +225,13 @@ impl Versus {
         for e in self.b.take_events() {
             match e {
                 GameEvent::WeaponLaunched(t) => {
-                    deliver_weapon(&mut self.b, &mut self.a, t);
+                    if is_spy(t) {
+                        if !self.b.weapon_active(WeaponToken::Mirror) {
+                            self.spy_launch[1] = Some(t);
+                        }
+                    } else {
+                        deliver_weapon(&mut self.b, &mut self.a, t);
+                    }
                     self.dirty = true;
                 }
                 GameEvent::Scored { score, lines, funds } => {
@@ -323,6 +360,22 @@ mod tests {
             }
         }
         assert!(cell_count(v.game(Side::B)) >= 9, "B received A's RiseUp");
+    }
+
+    #[test]
+    fn a_spy_is_recorded_for_the_launcher_and_not_delivered_to_the_opponent() {
+        let mut v = Versus::new(1, 2);
+        v.game_mut(Side::A).grant_weapon(WeaponToken::Ames);
+        v.game_mut(Side::A).launch_weapon(0);
+        v.tick(16); // the relay records the spy launch for the host
+        assert_eq!(v.take_spy_launch(Side::A), Some(WeaponToken::Ames), "launcher's spy recorded");
+        assert_eq!(v.take_spy_launch(Side::B), None);
+        // The opponent must NOT receive the spy as a weapon (it's info-only).
+        lock(v.game_mut(Side::B));
+        assert!(
+            !v.game(Side::B).weapon_active(WeaponToken::Ames),
+            "the opponent is unaffected by being spied on"
+        );
     }
 
     #[test]
