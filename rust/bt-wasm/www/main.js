@@ -1006,6 +1006,9 @@ function updateBazaarOverlay() {
     // authoritative in_bazaar (prompt every frame), not the slightly-lagged local
     // prediction. Local modes use the engine's own flag.
     const inBaz = (authoritative && authSelf) ? authSelf.in_bazaar : game.is_in_bazaar();
+    // The bazaar is a full-screen page: while it's open the gameplay touch
+    // controls are useless and would overlap it, so hide them (CSS keys off this).
+    document.body.classList.toggle('bazaar-open', inBaz);
     if (inBaz) {
         bazaarOverlay.style.display = 'flex';
         if (!bazaarWasOpen) {
