@@ -49,6 +49,10 @@ pub enum Input {
     MoveRight,
     Rotate,
     BeginDrop,
+    /// Ernie's flat-scored hard drop (`Game::ai_begin_drop`, BTComputer.C:1255).
+    /// Distinct from the human `BeginDrop` (which scores `BT_BOARD_HGT - y`) so
+    /// an AI-driven recording — e.g. a fuzz repro — replays bit-for-bit.
+    AiDrop,
     SoftDrop,
     LaunchWeapon(u32),
     BuyWeapon(i32),
@@ -67,6 +71,7 @@ impl Input {
             Input::MoveRight => g.move_right(),
             Input::Rotate => g.rotate(),
             Input::BeginDrop => g.begin_drop(),
+            Input::AiDrop => g.ai_begin_drop(),
             Input::SoftDrop => g.soft_drop(),
             Input::LaunchWeapon(slot) => g.launch_weapon(*slot as usize),
             Input::BuyWeapon(t) => {
