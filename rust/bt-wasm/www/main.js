@@ -174,6 +174,9 @@ function setupDataChannel(channel) {
             receiveWeaponFromOpponent(m.token, m.reflected);
         } else if (m.kind === 'score') {
             game.receive_op_score(m.score, m.lines, m.funds);
+        } else if (m.kind === 'bazaarDone') {
+            opponentBazaarDone = true;
+            maybeLeaveBazaar();
         } else if (m.kind === 'dead') {
             // Opponent died - we win
             showWin();
@@ -663,6 +666,22 @@ function populateBazaar() {
 // Track whether bazaar was open last frame to avoid re-populating every tick
 let bazaarWasOpen = false;
 
+// Synchronized bazaar barrier for 2-player / online: the original freezes BOTH
+// boards until BOTH players leave the shop (BTServer BT_START_BAZ/BT_END_BAZ),
+// so one player can't finish early and play unopposed. We hold the local game
+// frozen (it stays is_in_bazaar) until each side has hit Done.
+let localBazaarDone = false;
+let opponentBazaarDone = false;
+
+function maybeLeaveBazaar() {
+    if (localBazaarDone && opponentBazaarDone) {
+        game.leave_bazaar();
+        bazaarOverlay.style.display = 'none';
+        localBazaarDone = false;
+        opponentBazaarDone = false;
+    }
+}
+
 function updateBazaarOverlay() {
     if (game.is_in_bazaar()) {
         bazaarOverlay.style.display = 'flex';
@@ -670,6 +689,13 @@ function updateBazaarOverlay() {
             // Only fully repopulate when bazaar first opens
             populateBazaar();
             bazaarWasOpen = true;
+            // New round: reset OUR done-state (keep the opponent's, which may
+            // have arrived before our slightly-lagged score relay opened ours).
+            localBazaarDone = false;
+            if (bazaarDoneBtn) {
+                bazaarDoneBtn.disabled = false;
+                bazaarDoneBtn.textContent = 'DONE';
+            }
         } else {
             // Keep funds and arsenal display fresh while open
             bazaarFunds.textContent = game.funds();
@@ -850,6 +876,9 @@ function handleBroadcastMessage(ev) {
     if (m.kind === 'weapon') {
         // Opponent launched a weapon at us (honor our Mirror).
         receiveWeaponFromOpponent(m.token, m.reflected);
+    } else if (m.kind === 'bazaarDone') {
+        opponentBazaarDone = true;
+        maybeLeaveBazaar();
     } else if (m.kind === 'score') {
         // Opponent score update
         game.receive_op_score(m.score, m.lines, m.funds);
@@ -1113,8 +1142,18 @@ document.addEventListener('keydown', handleKeyDown);
 newGameBtn.addEventListener('click', newGame);
 
 bazaarDoneBtn.addEventListener('click', () => {
-    game.leave_bazaar();
-    bazaarOverlay.style.display = 'none';
+    if (mode === 'vsplayer' || mode === 'online') {
+        // Don't resume until the opponent is also done (synchronized barrier).
+        localBazaarDone = true;
+        bazaarDoneBtn.disabled = true;
+        bazaarDoneBtn.textContent = 'WAITING FOR OPPONENT...';
+        if (mode === 'vsplayer' && broadcastChannel) broadcastChannel.postMessage({ kind: 'bazaarDone' });
+        else if (mode === 'online') dcSend({ kind: 'bazaarDone' });
+        maybeLeaveBazaar();
+    } else {
+        game.leave_bazaar();
+        bazaarOverlay.style.display = 'none';
+    }
 });
 
 bazaarAddBtn.addEventListener('click', () => {
