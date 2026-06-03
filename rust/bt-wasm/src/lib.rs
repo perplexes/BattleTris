@@ -42,6 +42,7 @@ const TAG_ENTER_BAZAAR: i32 = 3; // [0, 0, 0]
 const TAG_AIRSLIDE: i32 = 4; // [0, 0, 0]
 const TAG_GAME_OVER: i32 = 5; // [0, 0, 0]
 const TAG_IDIOT: i32 = 6; // [reason, 0, 0]
+const TAG_FUNDS_STOLEN: i32 = 7; // [amount, 0, 0] — credit the attacker (online relay)
 
 #[wasm_bindgen]
 pub struct WasmGame {
@@ -154,6 +155,12 @@ impl WasmGame {
     }
     pub fn lines_til_bazaar(&self) -> i32 {
         self.inner.lines_til_bazaar()
+    }
+    /// Credit funds taxed/seized from the opponent (online Mondale/Keating): the
+    /// victim relays its `FundsStolen` amount and the attacker banks it here.
+    pub fn add_funds(&mut self, amount: i32) {
+        self.inner.add_funds(amount as i64);
+        self.rec.record(Input::AddFunds(amount as i64));
     }
     /// Whether weapon `token` is currently active on this game (drives the
     /// online Mirror reflect/nullify check).
@@ -350,6 +357,7 @@ fn event_quad(e: GameEvent) -> [i32; 4] {
         GameEvent::Idiot(reason) => [TAG_IDIOT, reason as i32, 0, 0],
         GameEvent::Airslide => [TAG_AIRSLIDE, 0, 0, 0],
         GameEvent::GameOver => [TAG_GAME_OVER, 0, 0, 0],
+        GameEvent::FundsStolen(amount) => [TAG_FUNDS_STOLEN, amount as i32, 0, 0],
     }
 }
 

@@ -74,4 +74,10 @@ export const Sound = {
 
     // A smiley face was buried instead of cleared - a glum wah-wah.
     missedSmiley() { note(330, 0.28, { type: 'triangle', vol: 0.14, slideTo: 196 }); },
+
+    // A bad move (BT_BAD_MOVE / idiot reason 0) - a short low dissonant buzz.
+    badMove() { note(98, 0.12, { type: 'sawtooth', vol: 0.10, slideTo: 73 }); },
+
+    // An airslide (BT_AIRSLIDE) - a quick rising whoosh as the piece tucks under.
+    airslide() { note(520, 0.07, { type: 'triangle', vol: 0.09, slideTo: 880 }); },
 };

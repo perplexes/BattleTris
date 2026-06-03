@@ -139,3 +139,95 @@ fn mondale_taxes_line_funds_by_thirty_percent() {
     }
     assert!(verified, "expected at least one taxed line clear while Mondale was active");
 }
+
+/// Mondale also CREDITS the attacker: the 30% it swipes off each clear is
+/// emitted as a `FundsStolen` event for the relay to pay the launcher (faithful
+/// to BTScoreManager.C, where the tax flows to the attacker, not into the void).
+#[test]
+fn mondale_emits_the_swiped_tax_for_the_attacker() {
+    let mut g = Game::new(2024);
+    let mut d = Driver::new();
+
+    g.receive_weapon(WeaponToken::Mondale);
+    assert!(
+        d.run_until(&mut g, |g| g.board().active.is_active(WeaponToken::Mondale), 3000),
+        "Mondale should flush in"
+    );
+
+    for _ in 0..6000 {
+        if g.is_game_over() {
+            break;
+        }
+        let evs = d.step(&mut g);
+        let gross: i64 = evs
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::Locked { funds, .. } if *funds > 0 => Some(*funds as i64),
+                _ => None,
+            })
+            .sum();
+        if gross == 0 {
+            continue;
+        }
+        let stolen: i64 = evs
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::FundsStolen(amt) => Some(*amt),
+                _ => None,
+            })
+            .sum();
+        // Faithful to BTScoreManager.C: the attacker's cut is re-grossed from the
+        // victim's truncated kept funds, not simply `gross - kept`.
+        let kept = (gross as f64 * (1.0 - BT_MONDALE_RATE)) as i64;
+        let expected = (((1.0 / (1.0 - BT_MONDALE_RATE)) * kept as f64) * BT_MONDALE_RATE) as i64;
+        assert_eq!(
+            stolen, expected,
+            "the swiped tax (re-grossed from kept {kept}) must be emitted for the attacker"
+        );
+        return;
+    }
+    panic!("expected a taxed line clear while Mondale was active");
+}
+
+/// Keating also CREDITS the attacker: when it zeroes the victim, the seized
+/// funds are emitted as a `FundsStolen` event (the launcher banks the loot).
+#[test]
+fn keating_emits_the_seized_funds_for_the_attacker() {
+    let mut g = Game::new(2024);
+    let mut d = Driver::new();
+
+    assert!(
+        d.run_until(&mut g, |g| g.score().funds > 0, 6000),
+        "Ernie should earn funds to steal"
+    );
+
+    g.receive_weapon(WeaponToken::Keating);
+    let mut seized = None;
+    for _ in 0..3000 {
+        if g.is_game_over() {
+            break;
+        }
+        // Funds present just before this step's lock is the treasury Keating seizes.
+        let before_step = g.score().funds;
+        let evs = d.step(&mut g);
+        let gross: i64 = evs
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::Locked { funds, .. } if *funds > 0 => Some(*funds as i64),
+                _ => None,
+            })
+            .sum();
+        if let Some(amt) = evs.iter().find_map(|e| match e {
+            GameEvent::FundsStolen(amt) => Some(*amt),
+            _ => None,
+        }) {
+            // Keating fires at the lock: the victim's funds are (pre-step + the
+            // gross banked this same lock) before being zeroed.
+            assert_eq!(amt, before_step + gross, "the attacker is credited the full seized treasury");
+            seized = Some(amt);
+            break;
+        }
+    }
+    assert_eq!(g.score().funds, 0, "the victim is zeroed");
+    assert!(matches!(seized, Some(amt) if amt > 0), "Keating emitted a positive seizure");
+}

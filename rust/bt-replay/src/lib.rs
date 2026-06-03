@@ -61,6 +61,9 @@ pub enum Input {
     SetPaused(bool),
     ReceiveWeapon(i32),
     ReceiveOpScore { score: i64, lines: i64, funds: i64 },
+    /// Funds credited from the opponent (online Mondale/Keating): the relay
+    /// banks the amount the opponent's `FundsStolen` reported. Two-player only.
+    AddFunds(i64),
 }
 
 impl Input {
@@ -94,6 +97,7 @@ impl Input {
             Input::ReceiveOpScore { score, lines, funds } => {
                 g.receive_op_score(*score, *lines, *funds)
             }
+            Input::AddFunds(amount) => g.add_funds(*amount),
         }
     }
 }

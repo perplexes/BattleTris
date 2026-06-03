@@ -176,6 +176,8 @@ impl VsComputer {
                 GameEvent::Scored { score, lines, funds } => {
                     self.ai.receive_op_score(score, lines, funds)
                 }
+                // The player (victim) was taxed/robbed — pay the attacker (Ernie).
+                GameEvent::FundsStolen(amount) => self.ai.add_funds(amount),
                 GameEvent::GameOver => self.result = 2,
                 _ => {}
             }
@@ -187,6 +189,8 @@ impl VsComputer {
                 GameEvent::Scored { score, lines, funds } => {
                     self.player.receive_op_score(score, lines, funds)
                 }
+                // Ernie (victim) was taxed/robbed — pay the attacker (player).
+                GameEvent::FundsStolen(amount) => self.player.add_funds(amount),
                 // The AI's piece settled — ready a fresh one, and restart the
                 // per-move delay from this lock.
                 GameEvent::Locked { .. } => {
@@ -199,26 +203,34 @@ impl VsComputer {
         }
     }
 
-    /// Route a launched weapon from `attacker` to its target, honoring Mirror
-    /// and the cross-player weapons. Mirror is defensive (it activates on the
-    /// launcher); a victim shielded by Mirror reflects the weapon back, or — for
-    /// the nullified set — fizzles it. Everything else hits the opponent.
+    /// Route a launched weapon from `attacker` to its target, honoring Mirror.
+    ///
+    /// Mirror is OFFENSIVE, faithful to `BTWeaponManager.C:204-219`: launching
+    /// it is a normal attack that curses the OPPONENT (sets their
+    /// `BTActive[BT_MIRROR]`). While a player is mirror-cursed, every weapon
+    /// THEY launch is caught by their own curse — the nullify-9
+    /// ([`mirror_nullifies`], which includes Mirror itself so the curse can't
+    /// ping-pong, and the spies, satisfying D6) simply fizzle; everything else
+    /// backfires onto the cursed launcher (self-inflict). An un-cursed launch
+    /// hits the opponent. The net effect benefits the deployer: you Mirror your
+    /// opponent and watch their own arsenal turn on them.
     fn deliver(&mut self, token: WeaponToken, attacker: Side) {
-        if token == WeaponToken::Mirror {
-            // Defensive self-buff: launching Mirror arms the launcher.
-            self.game_mut(attacker).receive_weapon(WeaponToken::Mirror);
-            return;
-        }
-
-        let victim = attacker.other();
-        if self.game(victim).board().active.is_active(WeaponToken::Mirror) {
+        if self.game(attacker).weapon_active(WeaponToken::Mirror) {
             if mirror_nullifies(token) {
-                return; // simply fizzles against the mirror
+                return; // fizzles against the launcher's own mirror curse
             }
-            self.apply_weapon(token, attacker); // bounced back onto the attacker
+            // Backfires onto the cursed launcher. NOTE: the original applies this
+            // local BT_WPN_ON immediately (BTWeaponManager.C:204-219), whereas this
+            // queues it (apply_weapon -> receive_weapon) to land at the launcher's
+            // next lock — consistent with the port's "all weapons apply at lock"
+            // (weapq_) model. The one-piece timing gap is a known minor divergence
+            // to revisit with the client-server migration's ordered event stream.
+            self.apply_weapon(token, attacker);
             return;
         }
-        self.apply_weapon(token, victim);
+        // Mirror itself falls through here: a normal attack that curses the
+        // opponent (apply_weapon queues it; it activates at their next lock).
+        self.apply_weapon(token, attacker.other());
     }
 
     /// Apply `token` to `target` (Mirror already resolved by the caller). Swap
@@ -353,39 +365,98 @@ mod cross_player_tests {
         assert_eq!(vs.ai.arsenal_token(1), WeaponToken::Blind.index() as i32);
     }
 
+    /// Curse `side` by having the OTHER side deploy Mirror onto them, then lock
+    /// so it activates (the offensive Mirror is a normal attack on the opponent).
+    fn curse(vs: &mut VsComputer, side: Side) {
+        vs.deliver(WeaponToken::Mirror, side.other());
+        match side {
+            Side::Player => lock(&mut vs.player),
+            Side::Ai => lock(&mut vs.ai),
+        }
+        assert!(vs.game(side).weapon_active(WeaponToken::Mirror), "Mirror should be active");
+    }
+
     #[test]
-    fn mirror_nullifies_swap() {
+    fn launching_mirror_curses_the_opponent_not_the_launcher() {
         let mut vs = VsComputer::new(1, 0);
+        vs.deliver(WeaponToken::Mirror, Side::Player); // player launches Mirror at Ernie
+        lock(&mut vs.ai); // it activates on Ernie at his next lock
+
+        assert!(vs.ai.weapon_active(WeaponToken::Mirror), "Mirror curses the opponent (Ernie)");
+        assert!(!vs.player.weapon_active(WeaponToken::Mirror), "the launcher itself is not armed");
+    }
+
+    #[test]
+    fn a_cursed_launchers_swap_fizzles() {
+        let mut vs = VsComputer::new(1, 0);
+        curse(&mut vs, Side::Player);
         vs.player.board_mut().set(3, 20, Some(Cell::die(5)));
-        vs.ai.board_mut().set_active(WeaponToken::Mirror, true);
+        let (p0, a0) = (cell_count(&vs.player), cell_count(&vs.ai));
 
         vs.deliver(WeaponToken::Swap, Side::Player); // Swap is on the nullify list
 
-        assert_eq!(cell_count(&vs.player), 1, "player keeps its board");
-        assert_eq!(cell_count(&vs.ai), 0, "Ernie's board is untouched");
+        assert_eq!(cell_count(&vs.player), p0, "cursed Swap fizzles — player board unchanged");
+        assert_eq!(cell_count(&vs.ai), a0, "Ernie's board untouched");
     }
 
     #[test]
-    fn mirror_reflects_a_normal_weapon_back_to_attacker() {
+    fn a_cursed_launchers_weapon_backfires_onto_themselves() {
         let mut vs = VsComputer::new(1, 0);
-        vs.ai.board_mut().set_active(WeaponToken::Mirror, true);
+        curse(&mut vs, Side::Player);
+        let a0 = cell_count(&vs.ai);
 
-        // Player fires RiseUp at the mirror-shielded Ernie — it bounces back.
+        // Player launches RiseUp at Ernie; cursed, it backfires onto the player.
         vs.deliver(WeaponToken::RiseUp, Side::Player);
-        lock(&mut vs.player); // flush the reflected weapon onto the player
+        lock(&mut vs.player); // flush the backfired weapon onto the player
 
-        assert!(cell_count(&vs.player) >= 9, "the reflected RiseUp hit the player");
-        assert_eq!(cell_count(&vs.ai), 0, "Ernie (the attacker's target) was spared");
+        assert_eq!(cell_count(&vs.ai), a0, "Ernie (the intended target) was spared");
+        assert!(cell_count(&vs.player) >= 9, "the backfired RiseUp hit the player");
     }
 
     #[test]
-    fn launching_mirror_arms_the_launcher_not_the_opponent() {
+    fn an_uncursed_spy_activates_on_the_opponent() {
+        // Positive control so the D6 fizzle test below isn't vacuous.
         let mut vs = VsComputer::new(1, 0);
-        vs.deliver(WeaponToken::Mirror, Side::Player);
+        vs.deliver(WeaponToken::Ames, Side::Player);
+        lock(&mut vs.ai);
+        assert!(vs.ai.weapon_active(WeaponToken::Ames), "Ames activates on Ernie normally");
+    }
+
+    #[test]
+    fn d6_a_cursed_launchers_spy_fizzles() {
+        let mut vs = VsComputer::new(1, 0);
+        curse(&mut vs, Side::Player);
+
+        // Cursed, the player's spy is one of the nullify-9 — it fizzles entirely.
+        vs.deliver(WeaponToken::Ames, Side::Player);
+        lock(&mut vs.ai);
         lock(&mut vs.player);
 
-        assert!(vs.player.board().active.is_active(WeaponToken::Mirror), "Mirror armed on launcher");
-        assert!(!vs.ai.board().active.is_active(WeaponToken::Mirror), "Ernie is not armed");
+        assert!(!vs.ai.weapon_active(WeaponToken::Ames), "the spy did not reach Ernie");
+        assert!(!vs.player.weapon_active(WeaponToken::Ames), "nor did it self-inflict");
+    }
+
+    #[test]
+    fn keating_credits_the_attacker_in_the_relay() {
+        let mut vs = VsComputer::new(1, 0);
+        // Give Ernie a treasury (no line clears on this empty board, so it stays).
+        vs.ai.add_funds(500);
+        vs.ai.take_events(); // drop the bookkeeping Scored from add_funds
+        let p0 = vs.player.score().funds;
+
+        // Player Keatings Ernie; it lands at Ernie's next lock.
+        vs.deliver(WeaponToken::Keating, Side::Player);
+        vs.ai.begin_drop();
+        for _ in 0..400 {
+            vs.ai.tick(16); // drive Ernie to a lock WITHOUT draining his events
+            if vs.ai.score().funds == 0 {
+                break; // Keating flushed and zeroed him
+            }
+        }
+        assert_eq!(vs.ai.score().funds, 0, "Ernie was robbed");
+
+        vs.relay(); // routes Ernie's FundsStolen to the attacker (player)
+        assert_eq!(vs.player.score().funds, p0 + 500, "the attacker banked the seized 500");
     }
 
     #[test]

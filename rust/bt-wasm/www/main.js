@@ -173,9 +173,12 @@ function setupDataChannel(channel) {
         if (handleExchange(m)) {
             // consumed (swap/susan exchange)
         } else if (m.kind === 'weapon') {
-            receiveWeaponFromOpponent(m.token, m.reflected);
+            receiveWeaponFromOpponent(m.token);
+        } else if (m.kind === 'funds') {
+            game.add_funds(m.amount); // Mondale/Keating credit from the victim
         } else if (m.kind === 'score') {
             game.receive_op_score(m.score, m.lines, m.funds);
+            spyOnOpponentScore(); // line-based spy expiry + refresh
         } else if (m.kind === 'bazaarDone') {
             opponentBazaarDone = true;
             maybeLeaveBazaar();
@@ -296,8 +299,7 @@ function enterOnlineGame() {
     canvas.style.height = (height * CELL_SIZE * 1.6) + 'px';
     aiBoard.style.display = 'none';
     aiLabel.style.display = 'none';
-    spyType = -1; // drop any spy view from a previous match
-    spyGrid = null;
+    resetMatchState(); // drop any spy/bazaar/swap state from a previous match
 
     paused = false;
     gameEnded = false;
@@ -455,6 +457,7 @@ function startGame(newMode) {
     updateModeButtons();
     paused = false;
     gameEnded = false;
+    resetMatchState();
     gameOverOverlay.style.display = 'none';
     bazaarOverlay.style.display = 'none';
     lastFrameTime = performance.now();
@@ -503,15 +506,12 @@ function render() {
         drawBoard(aiCtx, aiGrid, width, height);
     } else if (spyType >= 0) {
         // A spy is up (online/2-tab): show the opponent's board on the same
-        // panel, refreshing once a second, until the spy's window lapses.
+        // panel. It expires on the opponent's line-clears (spyOnOpponentScore);
+        // here we just keep the view live with a ~1s re-snapshot fallback.
         const now = performance.now();
-        if (now >= spyDeadline) {
-            clearSpy();
-        } else {
-            if (now - spyLastReq > 1000) requestSpy();
-            aiBoard.style.display = spyHidden ? 'none' : 'block';
-            if (spyGrid && !spyHidden) drawBoard(aiCtx, spyGrid, width, height);
-        }
+        if (now - spyLastReq > 1000) requestSpy();
+        aiBoard.style.display = spyHidden ? 'none' : 'block';
+        if (spyGrid && !spyHidden) drawBoard(aiCtx, spyGrid, width, height);
     }
 }
 
@@ -688,6 +688,19 @@ let bazaarWasOpen = false;
 let localBazaarDone = false;
 let opponentBazaarDone = false;
 
+// Reset all per-match relay state when a new game starts, so a previous match's
+// half-finished bazaar handshake, spy view, or pending swap can't leak in.
+function resetMatchState() {
+    bazaarWasOpen = false;
+    localBazaarDone = false;
+    opponentBazaarDone = false;
+    swapPending = false;
+    susanPending = false;
+    spyType = -1;
+    spyGrid = null;
+    spyRemaining = 0;
+}
+
 function maybeLeaveBazaar() {
     if (localBazaarDone && opponentBazaarDone) {
         game.leave_bazaar();
@@ -724,9 +737,12 @@ function updateBazaarOverlay() {
     }
 }
 
-// Weapon token indices (from WeaponToken). Mirror Mirror is defensive: while
-// you hold it, the opponent's weapons reflect back, except these nine which
-// fizzle (the original's BTWeaponManager nullify list).
+// Weapon token indices (from WeaponToken). Mirror Mirror is OFFENSIVE
+// (BTWeaponManager.C:204-219): launching it curses your OPPONENT. While a
+// player is mirror-cursed, every weapon THEY launch is caught by the curse -
+// these nine simply fizzle (the original's nullify list), everything else
+// backfires onto the cursed launcher. The curse is resolved on the LAUNCH side,
+// so an incoming weapon is just applied (the sender already handled their curse).
 const SWAP_TOKEN = 5;
 const UPBYSIDE_TOKEN = 3;
 const BOTTLE_TOKEN = 24;
@@ -735,23 +751,34 @@ const MIRROR_TOKEN = 28;
 const MIRROR_NULLIFY = new Set([5, 13, 14, 17, 18, 19, 20, 26, 28]);
 // Swap, Mondale, Keating, Ames, Ace, Condor, NiceDay, Susan, Mirror.
 
+// Initiator guards for the two-way exchanges (the original's `swapper_`): while
+// one is outstanding, a simultaneous swap/susan from the opponent is a collision
+// - decline it so neither side double-imports and corrupts its board (D3).
+let swapPending = false;
+let susanPending = false;
+
 function sendToOpponent(msg) {
     if (gameEnded) return;
     if (mode === 'vsplayer' && broadcastChannel) broadcastChannel.postMessage(msg);
     else if (mode === 'online') dcSend(msg);
 }
 
-function sendWeaponToOpponent(token, reflected) {
-    sendToOpponent({ kind: 'weapon', token, reflected: !!reflected });
+function sendWeaponToOpponent(token) {
+    sendToOpponent({ kind: 'weapon', token });
 }
 
 // Swap and Lazy Susan are two-way exchanges over the channel: we send ours, the
 // opponent applies it and sends theirs back, and we apply that. Both clear
 // Bottle/Upbyside on a board swap. A Mirror-shielded opponent nullifies either.
 function initiateSwap() {
+    // Clear Bottle/Upbyside on OUR side before exporting, so the board we hand
+    // over is already cleaned (the original drops both on a swap, both sides).
+    clearBottleUpbyside();
+    swapPending = true;
     sendToOpponent({ kind: 'swap', board: Array.from(game.export_board()) });
 }
 function initiateSusan() {
+    susanPending = true;
     sendToOpponent({ kind: 'susan', arsenal: Array.from(game.export_arsenal()) });
 }
 function clearBottleUpbyside() {
@@ -764,22 +791,44 @@ function clearBottleUpbyside() {
 // out); the Condor is perfect. Token indices + obscure-fractions.
 const AMES_TOKEN = 17, ACE_TOKEN = 18, CONDOR_TOKEN = 19;
 const SPY_TOKENS = new Set([AMES_TOKEN, ACE_TOKEN, CONDOR_TOKEN]);
-const SPY_DROP = { 17: 0.40, 18: 0.15, 19: 0.0 };
+// Fraction of the opponent's cells that DROP OUT of the spy view (1 - report_prob
+// from BTRecon.C:58-62): Ames shows 50%, Ace 85%, the Condor satellite is perfect.
+const SPY_DROP = { 17: 0.50, 18: 0.15, 19: 0.0 };
 const EMPTY_ID = -2; // matches WasmGame render-grid EMPTY
 const aiBoardLabel = document.getElementById('aiBoardLabel');
 let spyType = -1;     // active spy token, or -1
-let spyDeadline = 0;  // performance.now() ms when the spy view expires
+let spyRemaining = 0; // lines of opponent clears left before the spy expires (BTRecon spy_on_)
+let spyOpLines = 0;   // opponent line count at the last decrement (to measure the delta)
 let spyGrid = null;   // latest (degraded) opponent grid
 let spyLastReq = 0;   // last spyRequest time
 let spyHidden = false; // Condor 'c' toggle
 
 function initiateSpy(token) {
+    // Duration is measured in OPPONENT line-clears (BTRecon.C:201-209), not
+    // seconds: the spy expires after the opponent clears `duration` lines.
+    // Relaunching ACCUMULATES the budget and switches the accuracy to the newest
+    // spy (BTRecon.C:171-179: `spy_on_ += duration; spy_token_ = token`).
+    if (spyType < 0) spyOpLines = game.op_lines(); // fresh spy: start counting now
+    spyRemaining += weapon_duration(token) || 20;
     spyType = token;
-    const dur = weapon_duration(token) || 20; // duration is in lines; use as ~seconds
-    spyDeadline = performance.now() + dur * 1000;
     spyHidden = false;
     if (aiBoardLabel) aiBoardLabel.textContent = 'Opponent (spy)';
     requestSpy();
+}
+
+// Decrement the spy's line budget by the opponent's new clears, and refresh the
+// view (the original re-snapshots on every BT_OP_SCORE). Called when an opponent
+// score update arrives.
+function spyOnOpponentScore() {
+    if (spyType < 0) return;
+    const opLines = game.op_lines();
+    const delta = opLines - spyOpLines;
+    if (delta > 0) {
+        spyRemaining -= delta;
+        spyOpLines = opLines;
+    }
+    if (spyRemaining <= 0) clearSpy();
+    else requestSpy(); // re-snapshot the opponent board
 }
 function requestSpy() {
     spyLastReq = performance.now();
@@ -807,7 +856,9 @@ function handleExchange(m) {
             if (spyType >= 0) spyGrid = degradeGrid(m.grid, spyType);
             return true;
         case 'swap': {
-            if (game.weapon_active && game.weapon_active(MIRROR_TOKEN)) {
+            // Collision guard (D3): if we also have a swap outstanding, both
+            // sides launched at once - decline so neither double-imports.
+            if (swapPending) {
                 sendToOpponent({ kind: 'swapAck', nullified: true });
             } else {
                 const mine = Array.from(game.export_board());
@@ -818,6 +869,7 @@ function handleExchange(m) {
             return true;
         }
         case 'swapAck': {
+            swapPending = false;
             if (!m.nullified) {
                 game.import_board(Int32Array.from(m.board));
                 clearBottleUpbyside();
@@ -825,7 +877,7 @@ function handleExchange(m) {
             return true;
         }
         case 'susan': {
-            if (game.weapon_active && game.weapon_active(MIRROR_TOKEN)) {
+            if (susanPending) {
                 sendToOpponent({ kind: 'susanAck', nullified: true });
             } else {
                 const mine = Array.from(game.export_arsenal());
@@ -835,6 +887,7 @@ function handleExchange(m) {
             return true;
         }
         case 'susanAck': {
+            susanPending = false;
             if (!m.nullified) game.import_arsenal(Int32Array.from(m.arsenal));
             return true;
         }
@@ -842,15 +895,11 @@ function handleExchange(m) {
     return false;
 }
 
-// An incoming weapon from the opponent, honoring our Mirror (online/2-tab; in
-// vs-Computer the engine relay does this instead). A reflected weapon is never
-// reflected again, so two Mirrors can't ping-pong forever.
-function receiveWeaponFromOpponent(token, reflected) {
-    if (!reflected && game.weapon_active && game.weapon_active(MIRROR_TOKEN)) {
-        if (MIRROR_NULLIFY.has(token)) return; // fizzles against the mirror
-        sendWeaponToOpponent(token, true);      // bounce it back at the attacker
-        return;
-    }
+// An incoming weapon from the opponent (online/2-tab; in vs-Computer the engine
+// relay does this instead). With the offensive Mirror, the sender already
+// resolved their own curse before launching, so we just apply what arrives -
+// including a Mirror, which curses us (game.receive_weapon sets BTActive[MIRROR]).
+function receiveWeaponFromOpponent(token) {
     game.receive_weapon(token);
 }
 
@@ -871,24 +920,37 @@ function processEvents() {
             Sound.weapon();
         } else if (tag === 3) {
             Sound.bazaar();
+        } else if (tag === 4) {
+            // Airslide: the piece tucked under a ledge.
+            Sound.airslide();
         } else if (tag === 5) {
             Sound.gameOver();
         } else if (tag === 6) {
-            // Idiot: a = reason (1 = near death, 2 = missed smiley).
-            if (a === 1) Sound.nearDeath();
+            // Idiot: a = reason (0 = bad move, 1 = near death, 2 = missed smiley).
+            if (a === 0) Sound.badMove();
+            else if (a === 1) Sound.nearDeath();
             else if (a === 2) Sound.missedSmiley();
         }
 
         if (tag === 1) {
-            // WeaponLaunched. Mirror is a defensive self-buff: arm it locally
-            // instead of sending it across. (vs-Computer routes weapons through
-            // the engine relay, so this block only fires for vsplayer/online.)
+            // WeaponLaunched. (vs-Computer routes weapons through the engine
+            // relay, so this block only fires for vsplayer/online.)
             if ((mode === 'vsplayer' || mode === 'online') && !gameEnded) {
-                if (a === MIRROR_TOKEN) game.receive_weapon(MIRROR_TOKEN); // self-buff
-                else if (a === SWAP_TOKEN) initiateSwap();
+                if (game.weapon_active && game.weapon_active(MIRROR_TOKEN)) {
+                    // We are mirror-cursed: our own launch is caught by the curse.
+                    // The nullify-9 (incl. Mirror itself and the spies - D6) fizzle;
+                    // everything else backfires onto us.
+                    if (!MIRROR_NULLIFY.has(a)) game.receive_weapon(a);
+                } else if (a === SWAP_TOKEN) initiateSwap();
                 else if (a === SUSAN_TOKEN) initiateSusan();
                 else if (SPY_TOKENS.has(a)) initiateSpy(a); // request opponent board
-                else sendWeaponToOpponent(a);
+                else sendWeaponToOpponent(a); // Mirror included: curses the opponent
+            }
+        } else if (tag === 7) {
+            // FundsStolen: we (the victim) were taxed/robbed - credit the
+            // attacker (the opponent banks it via game.add_funds).
+            if ((mode === 'vsplayer' || mode === 'online') && !gameEnded && a !== 0) {
+                sendToOpponent({ kind: 'funds', amount: a });
             }
         } else if (tag === 2) {
             // Scored: relay score update
@@ -995,14 +1057,17 @@ function handleBroadcastMessage(ev) {
     if (handleExchange(m)) {
         // consumed (swap/susan exchange)
     } else if (m.kind === 'weapon') {
-        // Opponent launched a weapon at us (honor our Mirror).
-        receiveWeaponFromOpponent(m.token, m.reflected);
+        // Opponent launched a weapon at us (the sender resolved their own curse).
+        receiveWeaponFromOpponent(m.token);
+    } else if (m.kind === 'funds') {
+        game.add_funds(m.amount); // Mondale/Keating credit from the victim
     } else if (m.kind === 'bazaarDone') {
         opponentBazaarDone = true;
         maybeLeaveBazaar();
     } else if (m.kind === 'score') {
         // Opponent score update
         game.receive_op_score(m.score, m.lines, m.funds);
+        spyOnOpponentScore(); // line-based spy expiry + refresh
     } else if (m.kind === 'dead') {
         // Opponent died; we win
         gameEnded = true;

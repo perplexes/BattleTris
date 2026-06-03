@@ -58,6 +58,14 @@ pub enum GameEvent {
     /// This player's score changed — the relay sends it to the opponent as
     /// `BT_OP_SCORE` (drives Lawyers' Delite, taxes, the bazaar trigger).
     Scored { score: i64, lines: i64, funds: i64 },
+    /// Funds this (victim) player just lost to the opponent and that the relay
+    /// must CREDIT to the attacker: Mondale's 30% cut of newly-banked funds, or
+    /// Keating's full seizure. Faithful to `BTScoreManager.C` (the original
+    /// reconstructs the attacker's gain from the victim's reported score; with
+    /// full information at the relay we emit the exact amount instead). The
+    /// attacker is always this player's opponent, so the relay routes it to
+    /// "the other side" — see `VsComputer::relay`.
+    FundsStolen(i64),
     /// Combined lines crossed a multiple of 20 — open the weapons bazaar
     /// (`BT_START_BAZ`).
     EnterBazaar,
@@ -317,9 +325,20 @@ impl Game {
 
             let clear = self.board.check_lines();
             self.score.lines += clear.lines as i64;
-            // BT_FUNDS: Mondale taxes the victim to (1 - 0.30) of funds earned.
+            // BT_FUNDS: Mondale taxes the victim to (1 - 0.30) of funds earned;
+            // the swiped 30% is credited to the attacker by the relay
+            // (`FundsStolen`), faithful to BTScoreManager.C:154-202.
             let gained = if self.weapons.is_active(WeaponToken::Mondale) {
-                (clear.funds as f64 * (1.0 - BT_MONDALE_RATE)) as i64
+                let kept = (clear.funds as f64 * (1.0 - BT_MONDALE_RATE)) as i64;
+                // The attacker's cut is reconstructed from the victim's already-
+                // TRUNCATED kept funds, exactly as BTScoreManager.C:154-160 does
+                // (`(1/(1-rate)) * kept_delta * rate`) — so it matches the original
+                // to the bean (the double-truncation can drop 1, like the original).
+                let tax = (((1.0 / (1.0 - BT_MONDALE_RATE)) * kept as f64) * BT_MONDALE_RATE) as i64;
+                if tax != 0 {
+                    self.events.push(GameEvent::FundsStolen(tax));
+                }
+                kept
             } else {
                 clear.funds as i64
             };
@@ -521,6 +540,22 @@ impl Game {
         self.update_bazaar();
     }
 
+    /// Credit (or debit) this player's funds directly — the relay's hook for
+    /// paying the attacker the funds a Mondale/Keating victim lost (see
+    /// [`GameEvent::FundsStolen`]). Emits a `Scored` so the gain propagates to
+    /// the opponent's mirror like any other funds change.
+    pub fn add_funds(&mut self, amount: i64) {
+        if amount == 0 {
+            return;
+        }
+        self.score.funds += amount;
+        self.events.push(GameEvent::Scored {
+            score: self.score.score,
+            lines: self.score.lines,
+            funds: self.score.funds,
+        });
+    }
+
     /// Buy `token` in the bazaar; honors Carter (price doubling). Returns true
     /// on success.
     pub fn buy_weapon(&mut self, token: WeaponToken) -> bool {
@@ -705,7 +740,19 @@ impl Game {
                     self.drop_time = self.base_drop_time;
                 }
             }
-            WeaponToken::Keating => self.score.funds = 0,
+            WeaponToken::Keating => {
+                // "...all taken away ... and given to you." Zero the victim and
+                // hand the seized funds to the attacker via the relay. NOTE: this
+                // snapshots the victim's funds at flush (next lock); the original
+                // snapshots `keating_ = op_funds` at launch (BTScoreManager.C:110).
+                // Same net effect unless the victim banks funds in that one-piece
+                // window — a known minor divergence (the port applies at lock).
+                let stolen = self.score.funds;
+                self.score.funds = 0;
+                if stolen != 0 {
+                    self.events.push(GameEvent::FundsStolen(stolen));
+                }
+            }
             WeaponToken::Reagan => self.score.funds = -self.score.funds,
             _ => {}
         }
