@@ -16,16 +16,20 @@
 //!
 //! Protocol (JSON text frames):
 //!   client -> server:
-//!     {"type":"queue","name":"alice","authoritative":true}
+//!     {"type":"queue","token":"<jwt>"}      (Find Match; or {"name":"alice"})
+//!     {"type":"available","value":true,"token":"<jwt>"}   (open to matches)
+//!     {"type":"challenge","target":"bob"}   (directed challenge)
 //!     {"type":"input","seq":N,"input":<bt_replay::Input>}   (a gameplay action)
 //!   server -> client:
 //!     {"type":"matchStart","side":"A|B","seed":N,"opponent":"bob",...}
 //!     {"type":"snapshot","tick":N,"ack":N,"result":...,"you":...,"opp":...,"keyframe"?:[..]}
 //!     {"type":"rating","mu":...,"sigma":...,"conservative":...,"won":true}
+//!     {"type":"players","players":[{"name":..,"status":"available|searching|ingame"}]}
 //!     {"type":"opponentLeft"}
 //!
-//! (The legacy WebRTC P2P relay — `signal`/`matched` — was removed with the
-//! migration to the server-authoritative model.)
+//! Every connected client speaks the server-authoritative protocol (sends
+//! `input`, renders `snapshot`); the server runs the only simulation. (The legacy
+//! WebRTC P2P relay — `signal`/`matched` — was removed with that migration.)
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -132,14 +136,12 @@ impl Status {
 struct Client {
     name: String,
     tx: mpsc::UnboundedSender<Message>,
+    /// The opponent connection while in a match — used to send `opponentLeft` if
+    /// this client disconnects mid-bout. Set in [`start_bout`], cleared at end.
     peer: Option<u64>,
     state: PlayerState,
-    /// Does this client speak the server-authoritative protocol (sends `input`,
-    /// renders `snapshot`)? Announced on `queue`. Every shipped client sets it;
-    /// a client that doesn't simply gets no match handoff.
-    authoritative: bool,
-    /// While in an authoritative match: the channel to the match's tick loop and
-    /// which side this client plays. `input` messages are forwarded here.
+    /// While in a match: the channel to the match's tick loop and which side this
+    /// client plays. `input` messages are forwarded here.
     bout: Option<(mpsc::Sender<BoutInput>, Side)>,
     /// Lobby presence. `None` until the client establishes a name (anonymous
     /// connections don't appear in the roster). See [`Status`].
@@ -398,11 +400,8 @@ fn clear_challenge(app: &mut App, challenger: u64) -> Option<u64> {
 
 /// Is `cid` a candidate the matcher may pair `id` with right now? Not `id`
 /// itself, not already in a bout, and "open to matches" — either explicitly
-/// queued (in `waiting`, the legacy Find-Match path) OR lobby-Available /
-/// -Searching (the unified presence switch: Available = challengeable AND
-/// auto-pairable). A queued client stays a candidate even if it never announced
-/// `authoritative` (legacy peer-link path); a presence candidate is by
-/// definition an authoritative lobby client.
+/// queued (in `waiting`, the Find-Match path) OR lobby-Available / -Searching
+/// (the unified presence switch: Available = challengeable AND auto-pairable).
 fn is_match_candidate(app: &App, id: u64, cid: u64) -> bool {
     if cid == id {
         return false;
@@ -421,10 +420,8 @@ fn is_match_candidate(app: &App, id: u64, cid: u64) -> bool {
 ///
 /// The candidate pool is everyone "open to matches" — explicitly queued
 /// (`waiting`) AND lobby-Available clients — so going Available auto-pairs you
-/// just like pressing Find Match. Peers are linked for whatever pair it picks
-/// (the legacy result/`opponentLeft` path needs that); it returns
-/// `Some(PendingBout)` only when BOTH sides are server-authoritative, which every
-/// shipped client is.
+/// just like pressing Find Match. Returns `Some(PendingBout)` (which the async
+/// caller spawns) when it finds an opponent.
 fn try_match(app: &mut App, id: u64) -> Option<PendingBout> {
     let my_rating = app.clients.get(&id).map(|c| c.state.rating)?;
     // Already in a bout? Don't re-match (would clobber the live binding).
@@ -459,35 +456,17 @@ fn try_match(app: &mut App, id: u64) -> Option<PendingBout> {
         }
     };
 
-    // Link peers for whatever we picked (legacy result + opponentLeft path).
-    app.waiting.retain(|&w| w != opp && w != id);
-    if let Some(c) = app.clients.get_mut(&opp) {
-        c.peer = Some(id);
-    }
-    if let Some(c) = app.clients.get_mut(&id) {
-        c.peer = Some(opp);
-    }
-
-    // opp = side A (first queued/available), id = side B. start_bout returns None
-    // (no handoff) unless both sides are authoritative — the peer link stands
-    // either way for the legacy client-reported-result path.
+    // opp = side A (first queued/available), id = side B.
     start_bout(app, opp, id, Some(quality))
 }
 
-/// Build a server-authoritative bout between two connected, authoritative
-/// clients: drop them from the queue, link peers, set both `InGame`, bind the
-/// input channel, send `matchStart`, and return the [`PendingBout`] the caller
-/// spawns. Shared by the auto-matcher ([`try_match`]) and the directed-challenge
-/// path. `quality` is the matchmaking quality if known (auto-match) else `None`
-/// (a hand-picked challenge has no quality figure). Returns `None` if either
-/// side vanished or isn't authoritative.
+/// Build a server-authoritative bout between two connected clients: drop them
+/// from the queue, link peers, set both `InGame`, bind the input channel, send
+/// `matchStart`, and return the [`PendingBout`] the caller spawns. Shared by the
+/// auto-matcher ([`try_match`]) and the directed-challenge path. `quality` is the
+/// matchmaking quality if known (auto-match) else `None` (a hand-picked challenge
+/// has no quality figure). Returns `None` only if a client vanished.
 fn start_bout(app: &mut App, a: u64, b: u64, quality: Option<f64>) -> Option<PendingBout> {
-    let both_authoritative = app.clients.get(&a).is_some_and(|c| c.authoritative)
-        && app.clients.get(&b).is_some_and(|c| c.authoritative);
-    if !both_authoritative {
-        return None;
-    }
-
     app.waiting.retain(|&w| w != a && w != b);
     // Drop any pending challenges involving either player — they're now in a
     // match, so a stale accept must not later kick off a second, unwanted bout.
@@ -735,55 +714,6 @@ async fn run_bout(state: Shared, pb: PendingBout) {
     maybe_broadcast_players(&mut app);
 }
 
-/// Settle a match result and update both players' ratings (idempotent per pair).
-fn settle_result(app: &mut App, id: u64, won: bool, lines: u32, op_lines: u32) {
-    let peer = match app.clients.get(&id).and_then(|c| c.peer) {
-        Some(p) => p,
-        None => return,
-    };
-    let key = id.min(peer);
-    if app.settled.contains(&key) {
-        return;
-    }
-    app.settled.insert(key);
-
-    let (a_name, a_state) = match app.clients.get(&id) {
-        Some(c) => (c.name.clone(), c.state),
-        None => return,
-    };
-    let (b_name, b_state) = match app.clients.get(&peer) {
-        Some(c) => (c.name.clone(), c.state),
-        None => return,
-    };
-
-    let outcome = MatchOutcome {
-        winner: if won { Winner::A } else { Winner::B },
-        a_lines: lines,
-        b_lines: op_lines,
-        a_quit: false,
-        b_quit: false,
-    };
-    let (na, nb) = rate_match(a_state, b_state, &outcome, &app.params);
-
-    app.store_rating(&a_name, na);
-    app.store_rating(&b_name, nb);
-    if let Some(c) = app.clients.get_mut(&id) {
-        c.state = na;
-    }
-    if let Some(c) = app.clients.get_mut(&peer) {
-        c.state = nb;
-    }
-    save_ratings(&app.ratings);
-
-    send(app, id, &rating_msg(&na, won));
-    send(app, peer, &rating_msg(&nb, !won));
-    println!(
-        "result: {a_name} {} {b_name} -> {:.2}±{:.2} / {:.2}±{:.2}",
-        if won { "beat" } else { "lost to" },
-        na.rating.mu, na.rating.sigma, nb.rating.mu, nb.rating.sigma
-    );
-}
-
 fn rating_msg(s: &PlayerState, won: bool) -> Value {
     json!({
         "type": "rating",
@@ -854,14 +784,11 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
         Some("queue") => {
             // Identity: prefer the token's signed name; a bare `name` is still
             // accepted (back-compat) but the token wins when both are present.
-            // New clients announce the authoritative protocol; old ones omit it
-            // and keep the WebRTC handoff untouched.
-            let authoritative = v.get("authoritative").and_then(|b| b.as_bool()).unwrap_or(false);
             let pending = {
                 let mut app = state.lock().await;
-                // Ignore a re-queue from a client already in an authoritative
-                // match (it would otherwise be matched into a second bout that
-                // could clobber this one's binding / settle the wrong pairing).
+                // Ignore a re-queue from a client already in a match (it would
+                // otherwise be matched into a second bout that could clobber this
+                // one's binding / settle the wrong pairing).
                 if app.clients.get(&id).is_some_and(|c| c.bout.is_some()) {
                     None
                 } else {
@@ -872,7 +799,6 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
                     if let Some(c) = app.clients.get_mut(&id) {
                         c.name = name;
                         c.state = st;
-                        c.authoritative = authoritative;
                         c.status = Some(Status::Searching); // Find Match -> Searching
                     }
                     let pb = try_match(&mut app, id);
@@ -910,8 +836,6 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
                     if let Some(c) = app.clients.get_mut(&id) {
                         c.name = name;
                         c.state = st;
-                        // `available` is the shipped lobby's authoritative client.
-                        c.authoritative = true;
                         c.status = go_available.then_some(Status::Available);
                     }
                     // An Available, named client is eligible for auto-pairing.
@@ -934,7 +858,6 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
             let from = resolve_name(&app, &v, &prior);
             if let Some(c) = app.clients.get_mut(&id) {
                 c.name = from.clone();
-                c.authoritative = true;
             }
             let target = v.get("target").and_then(|t| t.as_str()).unwrap_or("").to_string();
             match find_named_available(&app, &target) {
@@ -1027,17 +950,6 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
                 }
             }
         }
-        Some("result") => {
-            let won = v.get("won").and_then(|b| b.as_bool()).unwrap_or(false);
-            let lines = v.get("lines").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
-            let op_lines = v.get("opLines").and_then(|n| n.as_u64()).unwrap_or(0) as u32;
-            let mut app = state.lock().await;
-            // Authoritative matches are settled server-side by run_bout; ignore a
-            // client-reported result while it's in a bout (untrusted + double-settle).
-            if app.clients.get(&id).is_none_or(|c| c.bout.is_none()) {
-                settle_result(&mut app, id, won, lines, op_lines);
-            }
-        }
         _ => {}
     }
 }
@@ -1058,7 +970,7 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
         let st = a.rating_for("");
         a.clients.insert(
             id,
-            Client { name: String::new(), tx, peer: None, state: st, authoritative: false, bout: None, status: None },
+            Client { name: String::new(), tx, peer: None, state: st, bout: None, status: None },
         );
     }
 
@@ -1788,16 +1700,16 @@ mod tests {
         }
     }
 
-    /// Add a named client with NO lobby status (the pre-presence default): it
-    /// only becomes a match candidate via the explicit `waiting` queue, so the
-    /// `queue`-based matchmaking tests keep their old semantics. New presence
-    /// tests set `status` explicitly.
+    /// Add a named client with NO lobby status: it only becomes a match candidate
+    /// via the explicit `waiting` queue, so the `queue`-based matchmaking tests
+    /// stay isolated from the presence path. Presence tests set `status`
+    /// explicitly via [`set_present`].
     fn add_client(app: &mut App, id: u64, name: &str) -> mpsc::UnboundedReceiver<Message> {
         let (tx, rx) = mpsc::unbounded_channel();
         let state = app.rating_for(name);
         app.clients.insert(
             id,
-            Client { name: name.to_string(), tx, peer: None, state, authoritative: false, bout: None, status: None },
+            Client { name: name.to_string(), tx, peer: None, state, bout: None, status: None },
         );
         rx
     }
@@ -1824,12 +1736,10 @@ mod tests {
     }
 
     #[test]
-    fn authoritative_pair_starts_a_bout_instead_of_webrtc() {
+    fn a_matched_pair_starts_a_hosted_bout() {
         let mut app = test_app();
         let mut rx_a = add_client(&mut app, 1, "alice");
         let mut rx_b = add_client(&mut app, 2, "bob");
-        app.clients.get_mut(&1).unwrap().authoritative = true;
-        app.clients.get_mut(&2).unwrap().authoritative = true;
 
         assert!(try_match(&mut app, 1).is_none(), "alice queues, no opponent yet");
         let pending = try_match(&mut app, 2).expect("bob matches alice -> a hosted bout");
@@ -1839,11 +1749,11 @@ mod tests {
             app.clients[&1].bout.is_some() && app.clients[&2].bout.is_some(),
             "both clients are bound to the bout's input channel"
         );
-        // Authoritative clients get `matchStart` (with a seed), NOT WebRTC `matched`.
-        let ta = drained_types(&mut rx_a);
-        let tb = drained_types(&mut rx_b);
-        assert!(ta.contains(&"matchStart".to_string()) && !ta.contains(&"matched".to_string()));
-        assert!(tb.contains(&"matchStart".to_string()));
+        // Both get `matchStart` (with a seed); both go InGame.
+        assert!(drained_types(&mut rx_a).contains(&"matchStart".to_string()));
+        assert!(drained_types(&mut rx_b).contains(&"matchStart".to_string()));
+        assert_eq!(app.clients[&1].status, Some(Status::InGame));
+        assert_eq!(app.clients[&2].status, Some(Status::InGame));
     }
 
 
@@ -1898,28 +1808,24 @@ mod tests {
     }
 
     #[test]
-    fn settle_rates_once_notifies_both_and_is_idempotent() {
+    fn settle_bout_rates_once_notifies_both_and_is_idempotent() {
         std::env::set_var("RATINGS_FILE", std::env::temp_dir().join("bt_glue_ratings.json"));
         let mut app = test_app();
         let mut rx_a = add_client(&mut app, 1, "alice");
         let mut rx_b = add_client(&mut app, 2, "bob");
-        try_match(&mut app, 1);
-        try_match(&mut app, 2);
-        let _ = drained_types(&mut rx_a); // clear the 'matched' frames
-        let _ = drained_types(&mut rx_b);
+        let (sa, sb) = (app.clients[&1].state, app.clients[&2].state);
 
         let exp_before = app.clients[&1].state.experience;
-        settle_result(&mut app, 1, true, 30, 12); // alice beats bob
+        settle_bout(&mut app, 100, 1, "alice", sa, 2, "bob", sb, true, 30, 12); // alice beats bob
 
         assert_eq!(app.clients[&1].state.experience, exp_before + 1, "rated exactly once");
         assert!(app.clients[&1].state.rating.conservative(3.0) > 0.0);
         assert!(drained_types(&mut rx_a).contains(&"rating".to_string()), "winner notified");
         assert!(drained_types(&mut rx_b).contains(&"rating".to_string()), "loser notified");
 
-        // Settling the same pairing again must be a no-op (the dedup the relay
-        // depends on when both clients report the result).
+        // Settling the same match id again must be a no-op (the double-settle guard).
         let exp = app.clients[&1].state.experience;
-        settle_result(&mut app, 2, false, 12, 30);
+        settle_bout(&mut app, 100, 1, "alice", sa, 2, "bob", sb, true, 30, 12);
         assert_eq!(app.clients[&1].state.experience, exp, "second settle changes nothing");
     }
 
@@ -2086,11 +1992,9 @@ mod tests {
 
     // --- presence / roster ---------------------------------------------------
 
-    /// Mark a client authoritative + give it a lobby status (the presence path).
+    /// Give a client a lobby status (the presence path).
     fn set_present(app: &mut App, id: u64, status: Status) {
-        let c = app.clients.get_mut(&id).unwrap();
-        c.authoritative = true;
-        c.status = Some(status);
+        app.clients.get_mut(&id).unwrap().status = Some(status);
     }
 
     #[test]
