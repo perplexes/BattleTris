@@ -418,6 +418,7 @@ async fn run_bout(state: Shared, pb: PendingBout) {
 
     // `Some(a_won)` = settle with A as winner/loser; `None` = both gone, nothing to rate.
     let mut frame: u64 = 0;
+    let mut want_keyframe = true; // send one on the very first frame
     let outcome: Option<bool> = loop {
         ticker.tick().await;
         // Drain queued inputs (the channel is bounded, so this is O(cap)).
@@ -425,6 +426,11 @@ async fn run_bout(state: Shared, pb: PendingBout) {
             bout.apply_input(side, &input, seq);
         }
         bout.tick(bout::TICK_MS);
+        // A cross-player effect this tick (weapon/funds/bazaar) is something the
+        // clients couldn't predict — push a prompt keyframe on the next send.
+        if bout.take_dirty() {
+            want_keyframe = true;
+        }
 
         if bout.is_over() {
             // Final frame carries a keyframe so both clients settle on the end state.
@@ -433,11 +439,14 @@ async fn run_bout(state: Shared, pb: PendingBout) {
             break Some(bout.result() == 1); // 1 = A won
         }
         // Snapshots go out at ~30Hz (every other 16ms tick) — this is also where a
-        // client disconnect is detected (the send fails). A full reconciliation
-        // keyframe rides every ~32nd tick (~2Hz) and the very first frame, so a
-        // client gets an authoritative anchor immediately and steady corrections.
+        // client disconnect is detected (the send fails). A reconciliation keyframe
+        // rides the first frame, the ~2Hz heartbeat, and any frame after an
+        // unpredictable cross-player event, so corrections are prompt.
         if frame % 2 == 0 {
-            let kf = frame % 32 == 0;
+            let kf = want_keyframe || frame % 32 == 0;
+            if kf {
+                want_keyframe = false;
+            }
             let a_ok = tx_a.send(Message::Text(bout.snapshot_message(Side::A, kf))).is_ok();
             let b_ok = tx_b.send(Message::Text(bout.snapshot_message(Side::B, kf))).is_ok();
             match (a_ok, b_ok) {

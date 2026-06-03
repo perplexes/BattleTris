@@ -97,6 +97,11 @@ pub struct Versus {
     b: Game,
     /// 0 = ongoing, 1 = A won (B topped out), 2 = B won (A topped out).
     result: i32,
+    /// Set whenever this tick produced something a CLIENT can't predict from its
+    /// own inputs — a cross-player weapon delivery, a funds tax/steal, or a bazaar
+    /// entry. The host reads it via [`Versus::take_dirty`] to push a prompt
+    /// reconciliation keyframe instead of waiting for the periodic heartbeat.
+    dirty: bool,
 }
 
 impl Versus {
@@ -107,7 +112,15 @@ impl Versus {
             a: Game::new(seed_a),
             b: Game::new(seed_b),
             result: 0,
+            dirty: false,
         }
+    }
+
+    /// Take (and clear) the "client can't predict this" flag — set by the last
+    /// tick's cross-player relay (weapon, funds, bazaar entry). The server uses
+    /// it to send a prompt keyframe rather than wait for the periodic one.
+    pub fn take_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.dirty)
     }
 
     pub fn game(&self, side: Side) -> &Game {
@@ -159,11 +172,18 @@ impl Versus {
     fn relay(&mut self) {
         for e in self.a.take_events() {
             match e {
-                GameEvent::WeaponLaunched(t) => deliver_weapon(&mut self.a, &mut self.b, t),
+                GameEvent::WeaponLaunched(t) => {
+                    deliver_weapon(&mut self.a, &mut self.b, t);
+                    self.dirty = true;
+                }
                 GameEvent::Scored { score, lines, funds } => {
                     self.b.receive_op_score(score, lines, funds)
                 }
-                GameEvent::FundsStolen(amount) => self.b.add_funds(amount),
+                GameEvent::FundsStolen(amount) => {
+                    self.b.add_funds(amount);
+                    self.dirty = true;
+                }
+                GameEvent::EnterBazaar => self.dirty = true,
                 // A topped out → B wins. Latch: a simultaneous double-KO keeps the
                 // first result (whoever's GameOver this relay pass saw first),
                 // rather than letting the second event overwrite it.
@@ -173,11 +193,18 @@ impl Versus {
         }
         for e in self.b.take_events() {
             match e {
-                GameEvent::WeaponLaunched(t) => deliver_weapon(&mut self.b, &mut self.a, t),
+                GameEvent::WeaponLaunched(t) => {
+                    deliver_weapon(&mut self.b, &mut self.a, t);
+                    self.dirty = true;
+                }
                 GameEvent::Scored { score, lines, funds } => {
                     self.a.receive_op_score(score, lines, funds)
                 }
-                GameEvent::FundsStolen(amount) => self.a.add_funds(amount),
+                GameEvent::FundsStolen(amount) => {
+                    self.a.add_funds(amount);
+                    self.dirty = true;
+                }
+                GameEvent::EnterBazaar => self.dirty = true,
                 GameEvent::GameOver if self.result == 0 => self.result = 1, // B topped out → A wins
                 _ => {}
             }
@@ -296,5 +323,17 @@ mod tests {
             }
         }
         assert!(cell_count(v.game(Side::B)) >= 9, "B received A's RiseUp");
+    }
+
+    #[test]
+    fn a_cross_player_weapon_marks_the_match_dirty() {
+        let mut v = Versus::new(1, 2);
+        assert!(!v.take_dirty(), "clean at the start");
+        v.game_mut(Side::A).grant_weapon(WeaponToken::RiseUp);
+        v.game_mut(Side::A).launch_weapon(0);
+        v.tick(16); // relay delivers the weapon to B
+        assert!(v.take_dirty(), "a delivered weapon marks the match dirty");
+        v.tick(16);
+        assert!(!v.take_dirty(), "and it clears after being taken");
     }
 }

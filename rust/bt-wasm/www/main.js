@@ -210,16 +210,30 @@ function predict(kind, arg) {
 }
 
 function sendInput(repr) {
+    // Only queue when we can actually send: if the socket is gone the input can
+    // never be acked, so queuing it would grow unackedInputs forever (the local
+    // prediction has already applied it; the match is effectively over anyway).
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
     inputSeq += 1;
     unackedInputs.push({ seq: inputSeq, repr });
-    if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'input', seq: inputSeq, input: repr }));
-    }
+    ws.send(JSON.stringify({ type: 'input', seq: inputSeq, input: repr }));
+}
+
+// The bazaar barrier is server-authoritative online (authSelf.in_bazaar is prompt
+// every frame); local modes use the engine flag. Used to gate input + replay so
+// the client never sends/replays a non-shopping action the server would reject.
+function inBazaar() {
+    return (authoritative && authSelf) ? authSelf.in_bazaar : game.is_in_bazaar();
 }
 
 // Re-apply a not-yet-acked input to the (just-restored) local game, WITHOUT
 // re-sending it — the reconciliation replay on top of a keyframe.
 function applyReprToGame(repr) {
+    // After a keyframe restore the game reflects the authoritative bazaar state.
+    // While in the bazaar the server only accepts Buy/Sell, so replay only those
+    // (re-applying movement/drop/launch here would drift from the server).
+    const shopping = repr && (repr.BuyWeapon !== undefined || repr.SellWeapon !== undefined);
+    if (game.is_in_bazaar() && !shopping) return;
     if (repr === 'MoveLeft') game.move_left();
     else if (repr === 'MoveRight') game.move_right();
     else if (repr === 'Rotate') game.rotate();
@@ -394,6 +408,14 @@ function findMatch() {
 
     ws.onclose = () => {
         if (!gameEnded) setOnlineStatus('Disconnected from server.');
+        // A dropped socket during an authoritative match ends it (the server is
+        // the only source of truth) — don't keep predicting a zombie game.
+        if (authoritative && !gameEnded) {
+            gameEnded = true;
+            gameOverText.textContent = 'Disconnected from server.';
+            gameOverOverlay.style.display = 'flex';
+        }
+        unackedInputs = [];
         if (searching) {
             searching = false;
             modeOnlineBtn.classList.remove('searching');
@@ -1246,7 +1268,7 @@ canvas.addEventListener('touchstart', (e) => {
     if (e.changedTouches.length === 0) return;
     e.preventDefault();
 
-    if (!game || gameEnded || game.is_game_over() || game.is_in_bazaar()) return;
+    if (!game || gameEnded || game.is_game_over() || inBazaar()) return;
     if (mode === 'online' && onlinePaused) return;
 
     const touch = e.changedTouches[0];
@@ -1365,7 +1387,7 @@ function setupTouchButton(btnId, action, repeatInterval) {
     let delayTimer = null;
 
     function fireAction() {
-        if (!game || gameEnded || game.is_game_over() || game.is_in_bazaar()) return;
+        if (!game || gameEnded || game.is_game_over() || inBazaar()) return;
         if (mode === 'online' && onlinePaused) return;
         Sound.resume(); // touch is the gesture that unlocks Web Audio
         markActive();
@@ -1435,7 +1457,7 @@ function handleKeyDown(e) {
 
     // The bazaar freezes the match (its own Add/Remove/Done buttons drive it);
     // ignore gameplay keys so a held Space can't slam pieces or inflate score.
-    if (game.is_in_bazaar()) return;
+    if (inBazaar()) return;
 
     const key = e.key;
 

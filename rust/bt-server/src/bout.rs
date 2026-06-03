@@ -168,6 +168,13 @@ impl Bout {
         self.tick += 1;
     }
 
+    /// Take (and clear) the "a client can't have predicted this" flag from the
+    /// last tick (a delivered weapon / funds tax / bazaar entry) — the server
+    /// pushes a prompt keyframe when it's set.
+    pub fn take_dirty(&mut self) -> bool {
+        self.versus.take_dirty()
+    }
+
     /// 0 = ongoing, 1 = A won, 2 = B won.
     pub fn result(&self) -> i32 {
         self.versus.result()
