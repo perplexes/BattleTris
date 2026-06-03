@@ -7,8 +7,55 @@
 //! wall-clock waiting.
 
 use bt_ai::{VsComputer, AI_LEVELS};
+use bt_core::constants::BT_BOARD_HGT;
 
 const DT: i32 = 16; // ~60fps, the front-end's fixed step
+
+/// Regression: a Comatose (level 0, 4000ms/move) Ernie must NOT score the
+/// instant the match starts. The port used to steer + hard-drop the AI's first
+/// piece inside `VsComputer::new`, banking the *human* hard-drop bonus
+/// (`BT_BOARD_HGT - y` = 28) before the first tick — so a do-nothing Ernie
+/// showed 28 points immediately. Faithfully, the original `BTComputer`
+/// schedules its first move one `delay_` later (BTComputer.C, `addTimeout`)
+/// and banks a flat `BT_BOARD_HGT / 2` (= 14) per piece (BTComputer.C:1255),
+/// never the human drop bonus.
+#[test]
+fn comatose_ernie_does_not_score_immediately() {
+    let mut vs = VsComputer::new(12_345, 0); // Comatose: 4000ms / move
+    vs.player_mut().set_paused(true); // isolate Ernie
+
+    // Right after construction: nothing placed, zero score.
+    assert_eq!(
+        vs.ai().score().score,
+        0,
+        "Ernie must not score before its first move (no constructor placement)"
+    );
+
+    // ...and still zero a couple seconds in, well under the 4000ms delay.
+    for _ in 0..(2000 / DT as usize) {
+        vs.tick(DT);
+    }
+    assert_eq!(
+        vs.ai().score().score,
+        0,
+        "Comatose Ernie is idle (score 0) until its first throttled move"
+    );
+
+    // Run until Ernie finally commits its first piece, then check the award.
+    let mut first_score = 0;
+    for _ in 0..(6000 / DT as usize) {
+        vs.tick(DT);
+        if vs.ai().score().score > 0 {
+            first_score = vs.ai().score().score;
+            break;
+        }
+    }
+    assert_eq!(
+        first_score,
+        (BT_BOARD_HGT / 2) as i64,
+        "Ernie's per-piece score is the flat BT_BOARD_HGT/2, not the 28-pt human hard-drop bonus"
+    );
+}
 
 /// Advance the AI (with the human paused so it can't top out and end the match
 /// early) until the human is pulled into the bazaar. The human enters when the

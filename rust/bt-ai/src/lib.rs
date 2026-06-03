@@ -16,7 +16,7 @@
 //!
 //! * [`Computer`] — drives a [`bt_core::Game`] turn-by-turn: `take_turn`
 //!   queries the current piece, finds the best placement, then steers the game
-//!   with `rotate()` / `move_left()` / `move_right()` / `begin_drop()`.
+//!   with `rotate()` / `move_left()` / `move_right()` / `ai_begin_drop()`.
 //!
 //! ## Eval formula (from BTCBoard.C / BTComputer.C)
 //!
@@ -440,7 +440,9 @@ impl Computer {
     ///    `best.orientation` (capped at `orientations` iterations).
     /// 2. Calls `game.move_left()` / `game.move_right()` until the piece's `x`
     ///    matches `best.x` (capped to avoid infinite loops).
-    /// 3. Calls `game.begin_drop()` to hard-drop.
+    /// 3. Calls `game.ai_begin_drop()` to hard-drop — the computer's flat
+    ///    `BT_BOARD_HGT / 2` placement score (BTComputer.C:1255), NOT the
+    ///    human's variable hard-drop bonus.
     ///
     /// No-ops if `game.is_game_over()` or there is no current piece.
     pub fn take_turn(&mut self, game: &mut Game) {
@@ -486,7 +488,9 @@ impl Computer {
         }
 
         // --- Hard drop ---
-        game.begin_drop();
+        // Use the computer's placement scoring (flat BT_BOARD_HGT/2), not the
+        // human hard-drop bonus the human `begin_drop` would award.
+        game.ai_begin_drop();
     }
 }
 

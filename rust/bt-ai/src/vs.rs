@@ -36,7 +36,7 @@ pub struct VsComputer {
     place_accum: i32,
     launch_accum: i32,
     /// True once Ernie has steered the current piece into its drop. `take_turn`
-    /// only fires on a *fresh* piece: it ends with `begin_drop` (a fast-drop
+    /// only fires on a *fresh* piece: it ends with `ai_begin_drop` (a fast-drop
     /// that takes several ticks to land, not an instant placement), so without
     /// this gate a short `place_period` would re-fire on the still-falling
     /// piece and steer it mid-flight into a self-topping tower. The original
@@ -55,7 +55,14 @@ impl VsComputer {
     /// original's Ernie-difficulty slider; out-of-range clamps to the table.
     pub fn new(seed: u64, level: usize) -> VsComputer {
         let idx = level.min(AI_LEVELS.len() - 1);
-        let mut vs = VsComputer {
+        // Ernie's first move is throttled like every other one: the original
+        // `BTComputer` schedules it one `delay_` after `BT_START`
+        // (BTComputer.C, `addTimeout(delay_, ...)`), it does NOT place at t=0.
+        // Placing in the constructor made even a Comatose (4000ms) Ernie bank
+        // its first piece — and the score that comes with it — before the first
+        // tick, which read as "Ernie scores instantly". `ai_committed` starts
+        // false so the first `take_turn` waits `place_accum >= place_period`.
+        VsComputer {
             player: Game::new(seed),
             ai: Game::new(seed ^ 0x9E37_79B9_7F4A_7C15),
             computer: Computer::new(),
@@ -65,12 +72,7 @@ impl VsComputer {
             ai_committed: false,
             result: 0,
             events: Vec::new(),
-        };
-        if vs.ai.current_piece().is_some() {
-            vs.computer.take_turn(&mut vs.ai);
-            vs.ai_committed = true;
         }
-        vs
     }
 
     /// Advance the match by `dt_ms` of virtual time.

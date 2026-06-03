@@ -402,19 +402,43 @@ impl Game {
         }
     }
 
-    /// `BTGame::beginDrop` — engage fast drop and award the hard-drop bonus.
+    /// `BTGame::beginDrop` — engage fast drop and award the human hard-drop
+    /// bonus (`BT_BOARD_HGT - y_`, BTGame.C:729): the further the piece still
+    /// had to fall, the more it's worth.
     pub fn begin_drop(&mut self) {
+        if self.engage_fast_drop() {
+            self.score.score += (BT_BOARD_HGT - self.y) as i64;
+        }
+    }
+
+    /// Ernie's placement scoring (`BTComputer::run`, BTComputer.C:1255). The
+    /// computer engages the *same* fast drop for motion but does NOT earn the
+    /// human hard-drop bonus — it banks a flat `BT_BOARD_HGT / 2` per piece,
+    /// once, regardless of how far the piece fell. Keeping Ernie off the human
+    /// scoring curve is why this is separate from [`Game::begin_drop`]; without
+    /// it the AI inherited the full `BT_BOARD_HGT - 0 = 28` bonus every piece.
+    pub fn ai_begin_drop(&mut self) {
+        if self.engage_fast_drop() {
+            self.score.score += (BT_BOARD_HGT / 2) as i64;
+        }
+    }
+
+    /// Shared `beginDrop` motion: switch the falling piece to the fast cadence.
+    /// Returns `true` only when this call *newly* engages the fast drop (so the
+    /// caller awards its score bonus exactly once); `false` while paused / in
+    /// the bazaar / after game over, or when fast drop is already engaged.
+    fn engage_fast_drop(&mut self) -> bool {
         if self.paused || self.in_bazaar || self.phase == Phase::Over {
-            return;
+            return false;
         }
         self.dropping = true;
         if self.drop_time == self.fast_drop_time {
-            return;
+            return false;
         }
         self.drop_time = self.fast_drop_time;
-        self.score.score += (BT_BOARD_HGT - self.y) as i64;
         // Re-arm the drop timer for the faster cadence.
         self.drop_accum = 0;
+        true
     }
 
     /// Soft drop: advance the piece down exactly one cell (or begin the lock
