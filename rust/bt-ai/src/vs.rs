@@ -24,6 +24,32 @@ pub const AI_LEVELS: [i32; 15] = [
 /// Ms between Ernie's weapon launches.
 pub const AI_LAUNCH_PERIOD_MS: i32 = 4000;
 
+/// Which side of the match a weapon came from / is headed to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Side {
+    Player,
+    Ai,
+}
+
+impl Side {
+    fn other(self) -> Side {
+        match self {
+            Side::Player => Side::Ai,
+            Side::Ai => Side::Player,
+        }
+    }
+}
+
+/// Weapons a Mirror simply nullifies (rather than reflecting back), per the
+/// original `BTWeaponManager.C:204-216` switch and the Mirror description.
+fn mirror_nullifies(token: WeaponToken) -> bool {
+    use WeaponToken::*;
+    matches!(
+        token,
+        Swap | Mondale | Keating | Ames | Ace | Condor | NiceDay | Susan | Mirror
+    )
+}
+
 /// A single-tab game vs the computer opponent (Ernie). Owns the player's game
 /// plus the AI's game and relays weapons / scores between them internally.
 #[derive(Clone, Debug)]
@@ -146,7 +172,7 @@ impl VsComputer {
     fn relay(&mut self) {
         for e in self.player.take_events() {
             match e {
-                GameEvent::WeaponLaunched(t) => self.ai.receive_weapon(t),
+                GameEvent::WeaponLaunched(t) => self.deliver(t, Side::Player),
                 GameEvent::Scored { score, lines, funds } => {
                     self.ai.receive_op_score(score, lines, funds)
                 }
@@ -157,7 +183,7 @@ impl VsComputer {
         }
         for e in self.ai.take_events() {
             match e {
-                GameEvent::WeaponLaunched(t) => self.player.receive_weapon(t),
+                GameEvent::WeaponLaunched(t) => self.deliver(t, Side::Ai),
                 GameEvent::Scored { score, lines, funds } => {
                     self.player.receive_op_score(score, lines, funds)
                 }
@@ -170,6 +196,59 @@ impl VsComputer {
                 GameEvent::GameOver => self.result = 1,
                 _ => {}
             }
+        }
+    }
+
+    /// Route a launched weapon from `attacker` to its target, honoring Mirror
+    /// and the cross-player weapons. Mirror is defensive (it activates on the
+    /// launcher); a victim shielded by Mirror reflects the weapon back, or — for
+    /// the nullified set — fizzles it. Everything else hits the opponent.
+    fn deliver(&mut self, token: WeaponToken, attacker: Side) {
+        if token == WeaponToken::Mirror {
+            // Defensive self-buff: launching Mirror arms the launcher.
+            self.game_mut(attacker).receive_weapon(WeaponToken::Mirror);
+            return;
+        }
+
+        let victim = attacker.other();
+        if self.game(victim).board().active.is_active(WeaponToken::Mirror) {
+            if mirror_nullifies(token) {
+                return; // simply fizzles against the mirror
+            }
+            self.apply_weapon(token, attacker); // bounced back onto the attacker
+            return;
+        }
+        self.apply_weapon(token, victim);
+    }
+
+    /// Apply `token` to `target` (Mirror already resolved by the caller). Swap
+    /// and Susan act on both boards at once; every other weapon is queued on the
+    /// target and lands at its next lock.
+    fn apply_weapon(&mut self, token: WeaponToken, target: Side) {
+        match token {
+            WeaponToken::Swap => {
+                let (p, a) = (&mut self.player, &mut self.ai);
+                p.swap_board_with(a);
+            }
+            WeaponToken::Susan => {
+                let (p, a) = (&mut self.player, &mut self.ai);
+                p.swap_arsenal_with(a);
+            }
+            _ => self.game_mut(target).receive_weapon(token),
+        }
+    }
+
+    fn game(&self, side: Side) -> &Game {
+        match side {
+            Side::Player => &self.player,
+            Side::Ai => &self.ai,
+        }
+    }
+
+    fn game_mut(&mut self, side: Side) -> &mut Game {
+        match side {
+            Side::Player => &mut self.player,
+            Side::Ai => &mut self.ai,
         }
     }
 
@@ -196,5 +275,127 @@ impl VsComputer {
     /// Take the queued player-side events (for the host to render). Cleared.
     pub fn drain_events(&mut self) -> Vec<GameEvent> {
         std::mem::take(&mut self.events)
+    }
+}
+
+#[cfg(test)]
+mod cross_player_tests {
+    //! The cross-player weapons (Swap / Susan / Mirror) live in the relay, so
+    //! these drive `deliver` directly with in-module access to both games.
+    use super::*;
+    use bt_core::cell::Cell;
+
+    fn cell_count(g: &Game) -> usize {
+        let b = g.board();
+        (0..b.height)
+            .flat_map(|y| (0..b.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| b.get(x, y).is_some())
+            .count()
+    }
+
+    fn lock(g: &mut Game) {
+        g.begin_drop();
+        for _ in 0..400 {
+            g.tick(16);
+            if g.is_game_over()
+                || g.take_events().iter().any(|e| matches!(e, GameEvent::Locked { .. }))
+            {
+                return;
+            }
+        }
+    }
+
+    #[test]
+    fn swap_exchanges_the_two_boards() {
+        let mut vs = VsComputer::new(1, 0);
+        vs.player.board_mut().set(3, 20, Some(Cell::die(5)));
+        assert_eq!(cell_count(&vs.player), 1);
+        assert_eq!(cell_count(&vs.ai), 0);
+
+        vs.deliver(WeaponToken::Swap, Side::Player);
+
+        assert_eq!(cell_count(&vs.player), 0, "player gave its board away");
+        assert_eq!(
+            vs.ai.board().get(3, 20).map(|c| c.value()),
+            Some(5),
+            "Ernie received the player's board"
+        );
+    }
+
+    #[test]
+    fn swap_drops_bottle_and_upbyside_on_both_sides() {
+        let mut vs = VsComputer::new(1, 0);
+        // Arm Bottle on the player and Upbyside on Ernie via the normal flush.
+        vs.player.receive_weapon(WeaponToken::Bottle);
+        lock(&mut vs.player);
+        vs.ai.receive_weapon(WeaponToken::Upbyside);
+        lock(&mut vs.ai);
+        assert!(vs.player.board().active.is_active(WeaponToken::Bottle));
+        assert!(vs.ai.board().active.is_active(WeaponToken::Upbyside));
+
+        vs.deliver(WeaponToken::Swap, Side::Player);
+
+        assert!(!vs.player.board().active.is_active(WeaponToken::Bottle), "Swap cleared Bottle");
+        assert!(!vs.ai.board().active.is_active(WeaponToken::Upbyside), "Swap cleared Upbyside");
+    }
+
+    #[test]
+    fn susan_exchanges_arsenals() {
+        let mut vs = VsComputer::new(1, 0);
+        vs.player.grant_weapon(WeaponToken::RiseUp);
+        vs.player.grant_weapon(WeaponToken::Blind);
+        assert_eq!(vs.ai.arsenal_token(0), -1);
+
+        vs.deliver(WeaponToken::Susan, Side::Player);
+
+        assert_eq!(vs.player.arsenal_token(0), -1, "player arsenal emptied");
+        assert_eq!(vs.ai.arsenal_token(0), WeaponToken::RiseUp.index() as i32);
+        assert_eq!(vs.ai.arsenal_token(1), WeaponToken::Blind.index() as i32);
+    }
+
+    #[test]
+    fn mirror_nullifies_swap() {
+        let mut vs = VsComputer::new(1, 0);
+        vs.player.board_mut().set(3, 20, Some(Cell::die(5)));
+        vs.ai.board_mut().set_active(WeaponToken::Mirror, true);
+
+        vs.deliver(WeaponToken::Swap, Side::Player); // Swap is on the nullify list
+
+        assert_eq!(cell_count(&vs.player), 1, "player keeps its board");
+        assert_eq!(cell_count(&vs.ai), 0, "Ernie's board is untouched");
+    }
+
+    #[test]
+    fn mirror_reflects_a_normal_weapon_back_to_attacker() {
+        let mut vs = VsComputer::new(1, 0);
+        vs.ai.board_mut().set_active(WeaponToken::Mirror, true);
+
+        // Player fires RiseUp at the mirror-shielded Ernie — it bounces back.
+        vs.deliver(WeaponToken::RiseUp, Side::Player);
+        lock(&mut vs.player); // flush the reflected weapon onto the player
+
+        assert!(cell_count(&vs.player) >= 9, "the reflected RiseUp hit the player");
+        assert_eq!(cell_count(&vs.ai), 0, "Ernie (the attacker's target) was spared");
+    }
+
+    #[test]
+    fn launching_mirror_arms_the_launcher_not_the_opponent() {
+        let mut vs = VsComputer::new(1, 0);
+        vs.deliver(WeaponToken::Mirror, Side::Player);
+        lock(&mut vs.player);
+
+        assert!(vs.player.board().active.is_active(WeaponToken::Mirror), "Mirror armed on launcher");
+        assert!(!vs.ai.board().active.is_active(WeaponToken::Mirror), "Ernie is not armed");
+    }
+
+    #[test]
+    fn mirror_nullify_set_is_exactly_the_originals_nine() {
+        use WeaponToken::*;
+        for t in [Swap, Mondale, Keating, Ames, Ace, Condor, NiceDay, Susan, Mirror] {
+            assert!(mirror_nullifies(t), "{t:?} should be nullified");
+        }
+        for t in [RiseUp, Speedy, Bottle, Force, Gimp, FlipOut, Hatter] {
+            assert!(!mirror_nullifies(t), "{t:?} should reflect, not nullify");
+        }
     }
 }

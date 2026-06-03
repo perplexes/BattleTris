@@ -169,6 +169,11 @@ impl Game {
     pub fn board(&self) -> &Board {
         &self.board
     }
+    /// Mutable board access — for the cross-player relay (Swap), sandbox/test
+    /// setup, and tooling. Normal gameplay goes through the typed methods.
+    pub fn board_mut(&mut self) -> &mut Board {
+        &mut self.board
+    }
     pub fn score(&self) -> Score {
         self.score
     }
@@ -545,6 +550,46 @@ impl Game {
     /// Leave the bazaar and resume play (`BTGame::leaveBazaar`).
     pub fn leave_bazaar(&mut self) {
         self.in_bazaar = false;
+    }
+
+    // ---- cross-player weapon primitives -----------------------------------
+    // Swap / Susan / Mirror act across BOTH players, so the relay (VsComputer
+    // or the online layer) drives them through these. A lone Game can't reach
+    // its opponent, so the orchestration lives one level up.
+
+    /// Force a weapon off now: revert its effect (if active) and zero its
+    /// remaining duration. Used by Swap, which cancels Bottle and Upbyside on
+    /// both boards (BTGame.C:494-528).
+    pub fn force_weapon_off(&mut self, token: WeaponToken) {
+        if self.weapons.is_active(token) {
+            self.apply_weapon_off(token);
+        }
+        self.remaining[token.index()] = 0;
+    }
+
+    /// Swap Meet (`BTGame.C:492-534`): exchange this game's board grid with
+    /// `other`'s, after both sides drop Bottle and Upbyside. Only the grid
+    /// moves — active flags, durations, funds, score and the falling piece all
+    /// stay with their player.
+    pub fn swap_board_with(&mut self, other: &mut Game) {
+        for t in [WeaponToken::Bottle, WeaponToken::Upbyside] {
+            self.force_weapon_off(t);
+            other.force_weapon_off(t);
+        }
+        self.board.swap_cells(&mut other.board);
+    }
+
+    /// Lazy Susan (`BTWeaponManager.C:104-110`): exchange arsenals between the
+    /// two players.
+    pub fn swap_arsenal_with(&mut self, other: &mut Game) {
+        std::mem::swap(&mut self.arsenal, &mut other.arsenal);
+    }
+
+    /// Add one `token` to the arsenal directly (no bazaar / no funds). For a
+    /// sandbox/debug mode and for driving weapon launches in tests. Returns
+    /// false if the arsenal is full of distinct kinds.
+    pub fn grant_weapon(&mut self, token: WeaponToken) -> bool {
+        self.arsenal.buy(token)
     }
 
     /// Effective bazaar price for `token` — doubled while Carter is active

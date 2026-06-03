@@ -437,6 +437,19 @@ impl Board {
         self.active.set(token, on);
     }
 
+    /// Swap Meet: exchange this board's grid with `other`'s. Only the cells
+    /// move; the active flags, `upside`, `computer` and idiot state stay put
+    /// (Swap clears Bottle/Upbyside separately, at the game level). Dimensions
+    /// must match.
+    pub fn swap_cells(&mut self, other: &mut Board) {
+        debug_assert_eq!(
+            (self.width, self.height),
+            (other.width, other.height),
+            "swap_cells requires equal dimensions"
+        );
+        std::mem::swap(&mut self.cells, &mut other.cells);
+    }
+
     fn swap(&mut self, x1: i32, y1: i32, x2: i32, y2: i32) {
         let a = self.get(x1, y1);
         let b = self.get(x2, y2);
