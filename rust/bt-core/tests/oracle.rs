@@ -129,6 +129,26 @@ fn line_clear_funds_are_value_times_lines() {
     assert_eq!(lc.funds, 18, "value(9) * lines(2) — multiplicative, not 9+2");
 }
 
+/// NiceDay's gift: clearing a line containing an un-landed happy face banks its
+/// 150 (BT_HAPPY_VAL). NiceDay forces a happy piece (piece_manager); placed and
+/// cleared, that cell's 150 flows into `value`, hence funds = value * lines.
+/// This pins the gameplay funds path end-to-end.
+#[test]
+fn happy_face_in_a_cleared_line_banks_150() {
+    let mut b = Board::standard(false);
+    let w = b.width;
+    let bottom = b.height - 1;
+    for x in 0..w {
+        b.set(x, bottom, Some(Cell::color(2)));
+    }
+    b.set(0, bottom, Some(Cell::happy()));
+
+    let lc = b.check_lines();
+    assert_eq!(lc.lines, 1);
+    assert_eq!(lc.value, BT_HAPPY_VAL, "the happy face contributes 150");
+    assert_eq!(lc.funds, BT_HAPPY_VAL, "150 * 1 line");
+}
+
 /// Per-box `value()` constants, from the `BTBox` subclasses (BTBox.H):
 /// plain box = 0, die = its pips (1..=6), un-landed happy = BT_HAPPY_VAL (150).
 #[test]
