@@ -1,19 +1,18 @@
 /* The original score/arsenal/stats/list text is X11 `lucidatypewriter`
-   (bt_fonts.txt) — a SANS Lucida monospace. We fill that slot with Go Mono:
-   designed by Bigelow & Holmes (the same designers as Lucida), a clean sans
-   monospace, and BSD-licensed/freely redistributable (license in
-   assets/fonts/LICENSE-gomono.txt). The libre Luxi Mono was wrong — it's a
-   slab-SERIF monospace (PANOSE bSerifStyle 6). 'lucidatypewriter' is just the
-   alias name for this original-typewriter slot. */
+   (bt_fonts.txt) — a SANS Lucida monospace. We fill that slot with DejaVu Sans
+   Mono: a clean humanist SANS monospace, freely redistributable (Bitstream Vera
+   / public-domain DejaVu changes; license in assets/fonts/LICENSE-dejavu.txt).
+   (Earlier tries were wrong: Luxi Mono and Go Mono are both slab-serif monos.)
+   'lucidatypewriter' is just the alias name for this original-typewriter slot. */
 @font-face {
     font-family: 'lucidatypewriter';
-    src: url('assets/fonts/Go-Mono.ttf') format('truetype');
+    src: url('assets/fonts/DejaVuSansMono.ttf') format('truetype');
     font-weight: normal;
     font-display: swap;
 }
 @font-face {
     font-family: 'lucidatypewriter';
-    src: url('assets/fonts/Go-Mono-Bold.ttf') format('truetype');
+    src: url('assets/fonts/DejaVuSansMono-Bold.ttf') format('truetype');
     font-weight: bold;
     font-display: swap;
 }
@@ -26,7 +25,7 @@
 
 body {
     font-family: Helvetica;
-    background-color: #bfbfbf;
+    background-color: #cccccc;
     padding: 12px 20px;
 }
 
@@ -40,7 +39,7 @@ body {
 .lobby-card {
     display: flex;
     gap: 18px;
-    background-color: #bfbfbf;                 /* gray75 window */
+    background-color: #cccccc;                 /* gray75 window */
     border: 3px solid #808080;
     border-top-color: #ffffff; border-left-color: #ffffff;
     border-bottom-color: #000000; border-right-color: #000000;
@@ -320,7 +319,7 @@ body {
 
 /* ─── Arsenal panel (right, desktop) ─────────────────────────────────────── */
 .arsenal-panel {
-    background-color: #bfbfbf;
+    background-color: #cccccc;
     border: 3px solid #808080;
     padding: 15px;
     width: 200px;
@@ -390,7 +389,7 @@ body {
 }
 
 .ai-board-panel {
-    background-color: #bfbfbf;
+    background-color: #cccccc;
     border: 3px solid #808080;
     padding: 15px;
     width: 200px;
@@ -433,7 +432,7 @@ body {
 }
 
 .bazaar-panel {
-    background-color: #bfbfbf;
+    background-color: #cccccc;
     border: 5px solid #808080;
     border-top-color: #ffffff;
     border-left-color: #ffffff;
@@ -498,7 +497,7 @@ body {
     font-weight: bold;
     font-size: 11px;
     color: #000;
-    background-color: #bfbfbf;
+    background-color: #cccccc;
     padding: 3px 6px;
     border-bottom: 1px solid #808080;
     flex-shrink: 0;
@@ -731,7 +730,7 @@ body {
         gap: 8px 14px;
         justify-content: center;
         padding: 6px 8px;
-        background-color: #bfbfbf;
+        background-color: #cccccc;
         border: 2px solid #808080;
         border-right-color: #000;
         border-bottom-color: #000;
@@ -797,7 +796,7 @@ body {
         gap: 4px;
         justify-content: center;
         padding: 4px;
-        background-color: #bfbfbf;
+        background-color: #cccccc;
         border: 2px solid #808080;
         border-right-color: #000;
         border-bottom-color: #000;
@@ -848,7 +847,7 @@ body {
         left: 0;
         right: 0;
         z-index: 100;
-        background-color: #bfbfbf;
+        background-color: #cccccc;
         border-top: 3px solid #808080;
         box-shadow: 0 -2px 6px rgba(0, 0, 0, 0.4);
         padding: 6px 8px;
@@ -999,7 +998,7 @@ body {
 }
 
 .bug-panel {
-    background-color: #bfbfbf;
+    background-color: #cccccc;
     border: 3px solid #808080;
     border-right-color: #000;
     border-bottom-color: #000;
@@ -1150,7 +1149,7 @@ body {
     gap: 10px;
     flex-wrap: wrap;
     justify-content: center;
-    background-color: #bfbfbf;
+    background-color: #cccccc;
     border: 2px solid #808080;
     border-right-color: #000;
     border-bottom-color: #000;
@@ -1453,7 +1452,7 @@ body {
     padding: 5px 8px;
     font-weight: bold; font-size: 13px; color: #0000ff;
     border-bottom: 1px solid #808080;
-    background-color: #bfbfbf;
+    background-color: #cccccc;
 }
 .lobby-list {
     flex: 1; overflow-y: auto;
