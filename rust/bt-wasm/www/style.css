@@ -1,17 +1,19 @@
 /* The original score/arsenal/stats/list text is X11 `lucidatypewriter`
-   (bt_fonts.txt). We embed Luxi Mono — Bigelow & Holmes' own freely-
-   redistributable Lucida monospace (X.Org font-bh-ttf; license in
-   assets/fonts/LICENSE-luxi.txt) — so the monospace matches the original's
-   Lucida look without redistributing a proprietary font. */
+   (bt_fonts.txt) — a SANS Lucida monospace. We fill that slot with Go Mono:
+   designed by Bigelow & Holmes (the same designers as Lucida), a clean sans
+   monospace, and BSD-licensed/freely redistributable (license in
+   assets/fonts/LICENSE-gomono.txt). The libre Luxi Mono was wrong — it's a
+   slab-SERIF monospace (PANOSE bSerifStyle 6). 'lucidatypewriter' is just the
+   alias name for this original-typewriter slot. */
 @font-face {
     font-family: 'lucidatypewriter';
-    src: url('assets/fonts/luximr.ttf') format('truetype');
+    src: url('assets/fonts/Go-Mono.ttf') format('truetype');
     font-weight: normal;
     font-display: swap;
 }
 @font-face {
     font-family: 'lucidatypewriter';
-    src: url('assets/fonts/luximb.ttf') format('truetype');
+    src: url('assets/fonts/Go-Mono-Bold.ttf') format('truetype');
     font-weight: bold;
     font-display: swap;
 }
