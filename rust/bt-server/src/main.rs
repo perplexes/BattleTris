@@ -780,6 +780,92 @@ mod tests {
         assert_eq!(na.experience, 1);
     }
 
+    // --- matchmaking / settlement glue (the "between-the-game" layer) --------
+
+    fn test_app() -> App {
+        App {
+            clients: HashMap::new(),
+            waiting: Vec::new(),
+            last_active: HashMap::new(),
+            last_broadcast_players: 0,
+            ratings: HashMap::new(),
+            settled: HashSet::new(),
+            params: Ts2Params::default(),
+            db: std::sync::Arc::new(std::sync::Mutex::new(mem_db())),
+        }
+    }
+
+    fn add_client(app: &mut App, id: u64, name: &str) -> mpsc::UnboundedReceiver<Message> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let state = app.rating_for(name);
+        app.clients.insert(id, Client { name: name.to_string(), tx, peer: None, state });
+        rx
+    }
+
+    fn drained_types(rx: &mut mpsc::UnboundedReceiver<Message>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(Message::Text(t)) = rx.try_recv() {
+            if let Ok(v) = serde_json::from_str::<Value>(&t) {
+                if let Some(ty) = v.get("type").and_then(|x| x.as_str()) {
+                    out.push(ty.to_string());
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_lone_player_is_queued_not_matched() {
+        let mut app = test_app();
+        let _rx = add_client(&mut app, 1, "solo");
+        try_match(&mut app, 1);
+        assert_eq!(app.waiting, vec![1], "queued while waiting for an opponent");
+        assert_eq!(app.clients[&1].peer, None);
+    }
+
+    #[test]
+    fn two_waiting_players_get_paired_with_offer_and_answer() {
+        let mut app = test_app();
+        let mut rx_a = add_client(&mut app, 1, "alice");
+        let mut rx_b = add_client(&mut app, 2, "bob");
+
+        try_match(&mut app, 1); // alice queues
+        try_match(&mut app, 2); // bob matches alice
+
+        assert!(app.waiting.is_empty(), "both leave the queue on a match");
+        assert_eq!(app.clients[&1].peer, Some(2), "peers linked");
+        assert_eq!(app.clients[&2].peer, Some(1));
+        // The WebRTC handshake is bootstrapped: one offer side, one answer side.
+        assert!(drained_types(&mut rx_a).contains(&"matched".to_string()));
+        assert!(drained_types(&mut rx_b).contains(&"matched".to_string()));
+    }
+
+    #[test]
+    fn settle_rates_once_notifies_both_and_is_idempotent() {
+        std::env::set_var("RATINGS_FILE", std::env::temp_dir().join("bt_glue_ratings.json"));
+        let mut app = test_app();
+        let mut rx_a = add_client(&mut app, 1, "alice");
+        let mut rx_b = add_client(&mut app, 2, "bob");
+        try_match(&mut app, 1);
+        try_match(&mut app, 2);
+        let _ = drained_types(&mut rx_a); // clear the 'matched' frames
+        let _ = drained_types(&mut rx_b);
+
+        let exp_before = app.clients[&1].state.experience;
+        settle_result(&mut app, 1, true, 30, 12); // alice beats bob
+
+        assert_eq!(app.clients[&1].state.experience, exp_before + 1, "rated exactly once");
+        assert!(app.clients[&1].state.rating.conservative(3.0) > 0.0);
+        assert!(drained_types(&mut rx_a).contains(&"rating".to_string()), "winner notified");
+        assert!(drained_types(&mut rx_b).contains(&"rating".to_string()), "loser notified");
+
+        // Settling the same pairing again must be a no-op (the dedup the relay
+        // depends on when both clients report the result).
+        let exp = app.clients[&1].state.experience;
+        settle_result(&mut app, 2, false, 12, 30);
+        assert_eq!(app.clients[&1].state.experience, exp, "second settle changes nothing");
+    }
+
     #[test]
     fn ratings_round_trip_through_json() {
         let mut m = HashMap::new();
