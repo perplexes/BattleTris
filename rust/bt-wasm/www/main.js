@@ -296,6 +296,8 @@ function enterOnlineGame() {
     canvas.style.height = (height * CELL_SIZE * 1.6) + 'px';
     aiBoard.style.display = 'none';
     aiLabel.style.display = 'none';
+    spyType = -1; // drop any spy view from a previous match
+    spyGrid = null;
 
     paused = false;
     gameEnded = false;
@@ -499,6 +501,17 @@ function render() {
     if (mode === 'vscomputer') {
         const aiGrid = game.render_ai_grid();
         drawBoard(aiCtx, aiGrid, width, height);
+    } else if (spyType >= 0) {
+        // A spy is up (online/2-tab): show the opponent's board on the same
+        // panel, refreshing once a second, until the spy's window lapses.
+        const now = performance.now();
+        if (now >= spyDeadline) {
+            clearSpy();
+        } else {
+            if (now - spyLastReq > 1000) requestSpy();
+            aiBoard.style.display = spyHidden ? 'none' : 'block';
+            if (spyGrid && !spyHidden) drawBoard(aiCtx, spyGrid, width, height);
+        }
     }
 }
 
@@ -746,9 +759,53 @@ function clearBottleUpbyside() {
     game.force_weapon_off(UPBYSIDE_TOKEN);
 }
 
+// Spies (Ames/Ace/Condor): launching one requests the opponent's board for
+// display on the aiBoard panel. The cheaper spies are unreliable (cells drop
+// out); the Condor is perfect. Token indices + obscure-fractions.
+const AMES_TOKEN = 17, ACE_TOKEN = 18, CONDOR_TOKEN = 19;
+const SPY_TOKENS = new Set([AMES_TOKEN, ACE_TOKEN, CONDOR_TOKEN]);
+const SPY_DROP = { 17: 0.40, 18: 0.15, 19: 0.0 };
+const EMPTY_ID = -2; // matches WasmGame render-grid EMPTY
+const aiBoardLabel = document.getElementById('aiBoardLabel');
+let spyType = -1;     // active spy token, or -1
+let spyDeadline = 0;  // performance.now() ms when the spy view expires
+let spyGrid = null;   // latest (degraded) opponent grid
+let spyLastReq = 0;   // last spyRequest time
+let spyHidden = false; // Condor 'c' toggle
+
+function initiateSpy(token) {
+    spyType = token;
+    const dur = weapon_duration(token) || 20; // duration is in lines; use as ~seconds
+    spyDeadline = performance.now() + dur * 1000;
+    spyHidden = false;
+    if (aiBoardLabel) aiBoardLabel.textContent = 'Opponent (spy)';
+    requestSpy();
+}
+function requestSpy() {
+    spyLastReq = performance.now();
+    sendToOpponent({ kind: 'spyRequest' });
+}
+function degradeGrid(grid, token) {
+    const drop = SPY_DROP[token] || 0;
+    if (drop <= 0) return grid;
+    return grid.map((id) => (id !== EMPTY_ID && Math.random() < drop ? EMPTY_ID : id));
+}
+function clearSpy() {
+    spyType = -1;
+    spyGrid = null;
+    if (mode !== 'vscomputer') aiBoard.style.display = 'none';
+}
+
 // Handle the cross-player exchange messages. Returns true if it consumed `m`.
 function handleExchange(m) {
     switch (m.kind) {
+        case 'spyRequest':
+            // The opponent is spying us; send our current board.
+            sendToOpponent({ kind: 'spyBoard', grid: Array.from(game.render_grid()) });
+            return true;
+        case 'spyBoard':
+            if (spyType >= 0) spyGrid = degradeGrid(m.grid, spyType);
+            return true;
         case 'swap': {
             if (game.weapon_active && game.weapon_active(MIRROR_TOKEN)) {
                 sendToOpponent({ kind: 'swapAck', nullified: true });
@@ -830,6 +887,7 @@ function processEvents() {
                 if (a === MIRROR_TOKEN) game.receive_weapon(MIRROR_TOKEN); // self-buff
                 else if (a === SWAP_TOKEN) initiateSwap();
                 else if (a === SUSAN_TOKEN) initiateSusan();
+                else if (SPY_TOKENS.has(a)) initiateSpy(a); // request opponent board
                 else sendWeaponToOpponent(a);
             }
         } else if (tag === 2) {
@@ -1158,6 +1216,12 @@ function handleKeyDown(e) {
     // Count this as activity only for keys that actually drive the game (so a
     // stray Tab/Shift doesn't mark you "online").
     if (GAMEPLAY_KEYS.has(key)) markActive();
+
+    // Condor is a hold-'c' toggle: flip the spy view on/off (BTGame::condor).
+    if ((key === 'c' || key === 'C') && spyType === CONDOR_TOKEN) {
+        spyHidden = !spyHidden;
+        return;
+    }
 
     // Arrow keys and pause
     switch (key) {
