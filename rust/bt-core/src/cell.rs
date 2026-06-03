@@ -140,4 +140,59 @@ impl Cell {
             *landed = true;
         }
     }
+
+    /// Encode as `[tag, a, b, hidden]` for cross-player board transfer (Swap and
+    /// the spies send a whole grid over the wire). Round-trips via [`Cell::decode`].
+    pub fn encode(&self) -> [i32; 4] {
+        let h = self.hidden as i32;
+        match self.kind {
+            CellKind::Color(c) => [1, c, 0, h],
+            CellKind::Die(v) => [2, v as i32, 0, h],
+            CellKind::Happy { landed } => [3, landed as i32, 0, h],
+            CellKind::Structure => [4, 0, 0, h],
+            CellKind::Gimp(v) => [5, v, 0, h],
+            CellKind::Invisible { id, value } => [6, id, value, h],
+        }
+    }
+
+    /// Decode `[tag, a, b, hidden]`; `tag == 0` is an empty square (`None`).
+    pub fn decode(q: [i32; 4]) -> Option<Cell> {
+        let kind = match q[0] {
+            1 => CellKind::Color(q[1]),
+            2 => CellKind::Die(q[1] as u8),
+            3 => CellKind::Happy { landed: q[1] != 0 },
+            4 => CellKind::Structure,
+            5 => CellKind::Gimp(q[1]),
+            6 => CellKind::Invisible { id: q[1], value: q[2] },
+            _ => return None,
+        };
+        Some(Cell { kind, hidden: q[3] != 0 })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cell_encode_decode_round_trips_every_kind() {
+        let cases = [
+            Cell::color(3),
+            Cell::die(6),
+            Cell::happy(),
+            Cell::structure(),
+            Cell::gimp(5),
+            Cell::new(CellKind::Invisible { id: 7, value: 42 }),
+            {
+                let mut c = Cell::die(4);
+                c.hide();
+                c
+            },
+        ];
+        for c in cases {
+            assert_eq!(Cell::decode(c.encode()), Some(c), "{c:?} must round-trip");
+        }
+        // tag 0 decodes to an empty square.
+        assert_eq!(Cell::decode([0, 0, 0, 0]), None);
+    }
 }

@@ -160,6 +160,25 @@ impl WasmGame {
     pub fn weapon_active(&self, token: i32) -> bool {
         WeaponToken::from_index(token).map_or(false, |t| self.inner.weapon_active(t))
     }
+    /// Force a weapon off (online Swap clears Bottle/Upbyside on both sides).
+    pub fn force_weapon_off(&mut self, token: i32) {
+        if let Some(t) = WeaponToken::from_index(token) {
+            self.inner.force_weapon_off(t);
+        }
+    }
+    /// Cross-player board/arsenal transfer for online Swap, Susan, and spies.
+    pub fn export_board(&self) -> Vec<i32> {
+        self.inner.export_board()
+    }
+    pub fn import_board(&mut self, data: Vec<i32>) {
+        self.inner.import_board(&data);
+    }
+    pub fn export_arsenal(&self) -> Vec<i32> {
+        self.inner.export_arsenal()
+    }
+    pub fn import_arsenal(&mut self, data: Vec<i32>) {
+        self.inner.import_arsenal(&data);
+    }
     /// Buy a weapon by token index; returns true on success.
     pub fn buy_weapon(&mut self, token: i32) -> bool {
         match WeaponToken::from_index(token) {

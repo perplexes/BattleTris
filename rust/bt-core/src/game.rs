@@ -13,6 +13,7 @@
 
 use crate::arsenal::Arsenal;
 use crate::board::Board;
+use crate::cell::Cell;
 use crate::constants::*;
 use crate::piece::Piece;
 use crate::piece_manager::PieceManager;
@@ -598,6 +599,69 @@ impl Game {
     /// false if the arsenal is full of distinct kinds.
     pub fn grant_weapon(&mut self, token: WeaponToken) -> bool {
         self.arsenal.buy(token)
+    }
+
+    // ---- cross-player serialization (online Swap / Susan / spy) ------------
+    // The online layer has no shared engine, so these ship a board grid or
+    // arsenal over the data channel. Each round-trips its export/import.
+
+    /// Encode the board grid as a flat `[tag,a,b,hidden]` quad per cell,
+    /// row-major (`Cell::encode`). Used to send a board to the opponent for
+    /// Swap (exchange) or a spy (display).
+    pub fn export_board(&self) -> Vec<i32> {
+        let mut out = Vec::with_capacity((self.board.width * self.board.height * 4) as usize);
+        for y in 0..self.board.height {
+            for x in 0..self.board.width {
+                out.extend_from_slice(&self.board.get(x, y).map(|c| c.encode()).unwrap_or([0; 4]));
+            }
+        }
+        out
+    }
+
+    /// Replace the board grid from an `export_board` encoding. Only the cells
+    /// move (Swap clears Bottle/Upbyside separately, at the relay). Wrong-length
+    /// input is ignored.
+    pub fn import_board(&mut self, data: &[i32]) {
+        let (w, h) = (self.board.width, self.board.height);
+        if data.len() != (w * h * 4) as usize {
+            return;
+        }
+        let mut i = 0;
+        for y in 0..h {
+            for x in 0..w {
+                let cell = Cell::decode([data[i], data[i + 1], data[i + 2], data[i + 3]]);
+                self.board.set(x, y, cell);
+                i += 4;
+            }
+        }
+    }
+
+    /// Encode the arsenal as `[token_index, quantity]` per slot (10 slots;
+    /// empty = `[-1, 0]`) for Lazy Susan.
+    pub fn export_arsenal(&self) -> Vec<i32> {
+        let mut out = Vec::with_capacity(20);
+        for i in 0..10 {
+            out.push(self.arsenal.token(i).map(|t| t.index() as i32).unwrap_or(-1));
+            out.push(self.arsenal.quantity(i) as i32);
+        }
+        out
+    }
+
+    /// Rebuild the arsenal from an `export_arsenal` encoding.
+    pub fn import_arsenal(&mut self, data: &[i32]) {
+        if data.len() != 20 {
+            return;
+        }
+        let mut a = Arsenal::new();
+        for slot in 0..10 {
+            let qty = data[slot * 2 + 1];
+            if let Some(t) = WeaponToken::from_index(data[slot * 2]) {
+                for _ in 0..qty {
+                    a.buy(t);
+                }
+            }
+        }
+        self.arsenal = a;
     }
 
     /// Effective bazaar price for `token` — doubled while Carter is active

@@ -170,7 +170,9 @@ function setupDataChannel(channel) {
 
     channel.onmessage = (ev) => {
         const m = JSON.parse(ev.data);
-        if (m.kind === 'weapon') {
+        if (handleExchange(m)) {
+            // consumed (swap/susan exchange)
+        } else if (m.kind === 'weapon') {
             receiveWeaponFromOpponent(m.token, m.reflected);
         } else if (m.kind === 'score') {
             game.receive_op_score(m.score, m.lines, m.funds);
@@ -709,18 +711,78 @@ function updateBazaarOverlay() {
     }
 }
 
-// Mirror Mirror is defensive: while you hold it, the opponent's weapons reflect
-// back to them, except these nine which simply fizzle (the original's
-// BTWeaponManager nullify list). Token indices from WeaponToken.
+// Weapon token indices (from WeaponToken). Mirror Mirror is defensive: while
+// you hold it, the opponent's weapons reflect back, except these nine which
+// fizzle (the original's BTWeaponManager nullify list).
+const SWAP_TOKEN = 5;
+const UPBYSIDE_TOKEN = 3;
+const BOTTLE_TOKEN = 24;
+const SUSAN_TOKEN = 26;
 const MIRROR_TOKEN = 28;
 const MIRROR_NULLIFY = new Set([5, 13, 14, 17, 18, 19, 20, 26, 28]);
 // Swap, Mondale, Keating, Ames, Ace, Condor, NiceDay, Susan, Mirror.
 
-function sendWeaponToOpponent(token, reflected) {
+function sendToOpponent(msg) {
     if (gameEnded) return;
-    const msg = { kind: 'weapon', token, reflected: !!reflected };
     if (mode === 'vsplayer' && broadcastChannel) broadcastChannel.postMessage(msg);
     else if (mode === 'online') dcSend(msg);
+}
+
+function sendWeaponToOpponent(token, reflected) {
+    sendToOpponent({ kind: 'weapon', token, reflected: !!reflected });
+}
+
+// Swap and Lazy Susan are two-way exchanges over the channel: we send ours, the
+// opponent applies it and sends theirs back, and we apply that. Both clear
+// Bottle/Upbyside on a board swap. A Mirror-shielded opponent nullifies either.
+function initiateSwap() {
+    sendToOpponent({ kind: 'swap', board: Array.from(game.export_board()) });
+}
+function initiateSusan() {
+    sendToOpponent({ kind: 'susan', arsenal: Array.from(game.export_arsenal()) });
+}
+function clearBottleUpbyside() {
+    game.force_weapon_off(BOTTLE_TOKEN);
+    game.force_weapon_off(UPBYSIDE_TOKEN);
+}
+
+// Handle the cross-player exchange messages. Returns true if it consumed `m`.
+function handleExchange(m) {
+    switch (m.kind) {
+        case 'swap': {
+            if (game.weapon_active && game.weapon_active(MIRROR_TOKEN)) {
+                sendToOpponent({ kind: 'swapAck', nullified: true });
+            } else {
+                const mine = Array.from(game.export_board());
+                game.import_board(Int32Array.from(m.board));
+                clearBottleUpbyside();
+                sendToOpponent({ kind: 'swapAck', board: mine });
+            }
+            return true;
+        }
+        case 'swapAck': {
+            if (!m.nullified) {
+                game.import_board(Int32Array.from(m.board));
+                clearBottleUpbyside();
+            }
+            return true;
+        }
+        case 'susan': {
+            if (game.weapon_active && game.weapon_active(MIRROR_TOKEN)) {
+                sendToOpponent({ kind: 'susanAck', nullified: true });
+            } else {
+                const mine = Array.from(game.export_arsenal());
+                game.import_arsenal(Int32Array.from(m.arsenal));
+                sendToOpponent({ kind: 'susanAck', arsenal: mine });
+            }
+            return true;
+        }
+        case 'susanAck': {
+            if (!m.nullified) game.import_arsenal(Int32Array.from(m.arsenal));
+            return true;
+        }
+    }
+    return false;
 }
 
 // An incoming weapon from the opponent, honoring our Mirror (online/2-tab; in
@@ -764,12 +826,11 @@ function processEvents() {
             // WeaponLaunched. Mirror is a defensive self-buff: arm it locally
             // instead of sending it across. (vs-Computer routes weapons through
             // the engine relay, so this block only fires for vsplayer/online.)
-            if (mode === 'vsplayer' && broadcastChannel && !gameEnded) {
-                if (a === MIRROR_TOKEN) game.receive_weapon(MIRROR_TOKEN);
-                else broadcastChannel.postMessage({ kind: 'weapon', token: a });
-            } else if (mode === 'online' && !gameEnded) {
-                if (a === MIRROR_TOKEN) game.receive_weapon(MIRROR_TOKEN);
-                else dcSend({ kind: 'weapon', token: a });
+            if ((mode === 'vsplayer' || mode === 'online') && !gameEnded) {
+                if (a === MIRROR_TOKEN) game.receive_weapon(MIRROR_TOKEN); // self-buff
+                else if (a === SWAP_TOKEN) initiateSwap();
+                else if (a === SUSAN_TOKEN) initiateSusan();
+                else sendWeaponToOpponent(a);
             }
         } else if (tag === 2) {
             // Scored: relay score update
@@ -873,7 +934,9 @@ function handleBroadcastMessage(ev) {
 
     const m = ev.data;
 
-    if (m.kind === 'weapon') {
+    if (handleExchange(m)) {
+        // consumed (swap/susan exchange)
+    } else if (m.kind === 'weapon') {
         // Opponent launched a weapon at us (honor our Mirror).
         receiveWeaponFromOpponent(m.token, m.reflected);
     } else if (m.kind === 'bazaarDone') {
