@@ -758,19 +758,22 @@ body {
     .ai-board-wrapper { padding: 3px; }
     .ai-label { font-size: 11px; margin-top: 0; margin-bottom: 4px; }
 
-    /* Two boards (vs-Computer / spy): side by side, both sized by height to fit. */
-    .game-area.two-boards {
-        flex-direction: row;
-        align-items: flex-start;
-        justify-content: center;
-        gap: 6px;
+    /* Two boards (vs-Computer / spy): the player's board stays CENTERED at full
+       size (the default 56vh single-board layout); Ernie's / the spy board sits
+       HALF-SIZE (28vh) off to the right, absolutely positioned so it doesn't push
+       the weapon buttons down. */
+    .game-area.two-boards { position: relative; }
+    .game-area.two-boards .game-right {
+        position: absolute;
+        top: 0;
+        right: 2px;
+        width: auto;
+        margin: 0;
+        z-index: 2;
     }
-    .game-area.two-boards .center-panel { width: auto; }
-    .game-area.two-boards #gameCanvas,
     .game-area.two-boards #aiGridCanvas {
-        height: 46vh !important;
+        height: 28vh !important;
         width: auto !important;
-        max-width: 47vw;
     }
 
     /* Center panel: full width, centered */
