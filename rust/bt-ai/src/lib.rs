@@ -684,4 +684,32 @@ mod tests {
         );
     }
 
+    // --- Oracle: AI heuristic penalty weights (BTComputer.C:39-54) -----------
+
+    /// Pin the board-eval penalty/bonus weights to the original's `levels`-time
+    /// `BTCPenalties` (set in `BTComputer::BTComputer`, BTComputer.C:45-54). The
+    /// eval *structure* here is a faithful-in-spirit approximation, but these
+    /// weights are the exact numbers the 1994 AI used — drift in them silently
+    /// changes how Ernie plays.
+    #[test]
+    fn eval_penalty_weights_match_btcomputer() {
+        assert_eq!(OPEN_HOLE_PENALTY, 7_000.0, "BT_OPEN_HOLE_PENALTY (BTComputer.C:45)");
+        assert_eq!(CLOSED_HOLE_PENALTY, 10_000.0, "BT_CLOSED_HOLE_PENALTY (BTComputer.C:46)");
+        assert_eq!(HEIGHT_PENALTY, 30_000.0, "BT_HEIGHT_PENALTY (BTComputer.C:48)");
+        assert_eq!(COVERED_HOLE_PENALTY, 3_000.0, "BT_COVERED_HOLE_PENALTY (BTComputer.C:50)");
+        assert_eq!(LINE_BONUS, 5_000.0, "BT_LINE_BONUS (BTComputer.C:51)");
+        assert_eq!(VARIANCE_PENALTY, 50.0, "BT_VARIANCE_PENALTY (BTComputer.C:54)");
+        assert_eq!(MIDLINE, 14, "BT_MIDLINE (BTComputer.C:39)");
+    }
+
+    /// Ernie's difficulty ladder — the per-move delays (ms) from
+    /// `BTComputer.C:86-102` `levels[]`, Comatose (4000) … Bionic (0).
+    #[test]
+    fn difficulty_ladder_matches_btcomputer() {
+        assert_eq!(
+            AI_LEVELS,
+            [4000, 3000, 2000, 1500, 1250, 1000, 750, 550, 400, 350, 300, 225, 100, 10, 0],
+            "levels[].timeout (BTComputer.C:86-102)"
+        );
+    }
 }
