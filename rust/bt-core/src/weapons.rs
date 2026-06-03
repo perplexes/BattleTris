@@ -126,6 +126,17 @@ impl ActiveFlags {
     pub fn clear(&mut self) {
         self.counts = [0; BT_MAX_WEAPONS];
     }
+
+    /// The raw per-weapon active counts — for full-game keyframe serialization
+    /// (client-server reconciliation). Pair with [`ActiveFlags::set_raw`].
+    pub fn raw(&self) -> [i32; BT_MAX_WEAPONS] {
+        self.counts
+    }
+
+    /// Restore the raw counts captured by [`ActiveFlags::raw`].
+    pub fn set_raw(&mut self, counts: [i32; BT_MAX_WEAPONS]) {
+        self.counts = counts;
+    }
 }
 
 /// Weapon metadata, mirroring `BTWeapon` (`usr/src/game/BTWeapon.H`) and the

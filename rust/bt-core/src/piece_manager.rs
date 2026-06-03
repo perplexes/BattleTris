@@ -29,6 +29,21 @@ pub struct PieceManager {
 }
 
 impl PieceManager {
+    /// Raw internal state — for full-game keyframe serialization (client-server
+    /// reconciliation). `(keep_prob, hap_on, broken, old_piece)`. Pair with
+    /// [`PieceManager::set_raw`].
+    pub fn raw(&self) -> ([f64; 19], i32, bool, i32) {
+        (self.keep_prob, self.hap_on, self.broken, self.old_piece)
+    }
+
+    /// Restore the raw internal state captured by [`PieceManager::raw`].
+    pub fn set_raw(&mut self, keep_prob: [f64; 19], hap_on: i32, broken: bool, old_piece: i32) {
+        self.keep_prob = keep_prob;
+        self.hap_on = hap_on;
+        self.broken = broken;
+        self.old_piece = old_piece;
+    }
+
     /// `BTPieceManager::BTPieceManager` — install the default keep
     /// probabilities (standard pieces 0.21, die 1.0, happy & long-dong 0.02,
     /// weird/4x4 0.0).

@@ -38,6 +38,17 @@ impl Rng {
         Rng { state }
     }
 
+    /// The raw 48-bit LCG state — for full-game keyframe serialization (the
+    /// client-server reconciliation snapshot). Pair with [`Rng::from_raw`].
+    pub fn raw(&self) -> u64 {
+        self.state
+    }
+
+    /// Rebuild from a raw state captured by [`Rng::raw`].
+    pub fn from_raw(state: u64) -> Rng {
+        Rng { state }
+    }
+
     /// Advance the 48-bit LCG state and return the new value.
     /// POSIX drand48 step: X = (A * X + C) mod 2^48
     /// where A = 0x5DEECE66D, C = 0xB.

@@ -15,7 +15,7 @@ use crate::arsenal::Arsenal;
 use crate::board::Board;
 use crate::cell::Cell;
 use crate::constants::*;
-use crate::piece::Piece;
+use crate::piece::{Piece, PieceKind};
 use crate::piece_manager::PieceManager;
 use crate::rng::Rng;
 use crate::weapons::{weapon_table, ActiveFlags, WeaponToken, BT_MAX_WEAPONS};
@@ -698,6 +698,230 @@ impl Game {
         self.arsenal = a;
     }
 
+    // ---- full-game keyframe (client-server reconciliation) ----------------
+    // Server-authoritative online play needs a COMPLETE engine snapshot the
+    // client can restore and then re-simulate its unacked inputs on top of.
+    // `export_board` alone is only a render view — it omits the falling piece,
+    // phase/timers, the RNG + piece-manager state, and the weapon flags/pending
+    // queue, all of which drive the deterministic stream. `snapshot`/`restore`
+    // capture the whole `Game` as a flat `i64` codec (no serde — bt-core stays
+    // dependency-free), versioned for forward-compat.
+
+    /// Keyframe format version (bump on any layout change).
+    pub const KEYFRAME_VERSION: i64 = 1;
+
+    /// Serialize the entire game state to a flat `i64` keyframe.
+    pub fn snapshot(&self) -> Vec<i64> {
+        let phase = match self.phase {
+            Phase::Falling => 0,
+            Phase::Sliding => 1,
+            Phase::Over => 2,
+        };
+        let mut o: Vec<i64> = vec![Self::KEYFRAME_VERSION];
+        for v in [
+            self.x, self.y, self.def_x, self.def_y, self.delta_y, self.left_x, self.right_x,
+            self.base_drop_time, self.fast_drop_time, self.drop_time, self.slide_time,
+            self.dropping as i32, self.sliding, phase,
+            self.drop_accum, self.slide_accum, self.paused as i32,
+            self.hatter_accum, self.slick_accum, self.slick_dir,
+            self.in_bazaar as i32, self.lines_til_baz,
+        ] {
+            o.push(v as i64);
+        }
+        o.extend_from_slice(&[
+            self.score.score, self.score.op_score, self.score.lines,
+            self.score.op_lines, self.score.funds, self.score.op_funds,
+        ]);
+        o.push(self.rng.raw() as i64);
+        let (kp, hap_on, broken, old_piece) = self.pieces.raw();
+        for f in kp {
+            o.push(f.to_bits() as i64);
+        }
+        o.push(hap_on as i64);
+        o.push(broken as i64);
+        o.push(old_piece as i64);
+        for cnt in self.weapons.raw() {
+            o.push(cnt as i64);
+        }
+        for r in self.remaining {
+            o.push(r as i64);
+        }
+        for a in self.export_arsenal() {
+            o.push(a as i64);
+        }
+        match &self.current {
+            Some(p) => {
+                o.push(1);
+                o.push(p.kind.id() as i64);
+                for v in [p.x, p.y, p.color, p.rot as i32, p.orientation, p.orientations, p.state] {
+                    o.push(v as i64);
+                }
+                for col in 0..BT_PIECE_WIDTH {
+                    for row in 0..BT_PIECE_HEIGHT {
+                        let q = p.cells[col][row].map(|c| c.encode()).unwrap_or([0; 4]);
+                        for v in q {
+                            o.push(v as i64);
+                        }
+                    }
+                }
+            }
+            None => o.push(0),
+        }
+        o.push(self.pending.len() as i64);
+        for t in &self.pending {
+            o.push(t.index() as i64);
+        }
+        for v in self.export_board() {
+            o.push(v as i64);
+        }
+        o
+    }
+
+    /// Restore the entire game state from a [`Self::snapshot`] keyframe. Reads
+    /// into locals first and only commits if the keyframe is well-formed and
+    /// fully consumed, so a malformed/truncated keyframe leaves `self` untouched
+    /// and returns `false` (never panics — the cursor is bounds-checked).
+    pub fn restore(&mut self, data: &[i64]) -> bool {
+        let mut c = Cur { d: data, i: 0, ok: true };
+        if c.next() != Self::KEYFRAME_VERSION {
+            return false;
+        }
+        let x = c.next() as i32;
+        let y = c.next() as i32;
+        let def_x = c.next() as i32;
+        let def_y = c.next() as i32;
+        let delta_y = c.next() as i32;
+        let left_x = c.next() as i32;
+        let right_x = c.next() as i32;
+        let base_drop_time = c.next() as i32;
+        let fast_drop_time = c.next() as i32;
+        let drop_time = c.next() as i32;
+        let slide_time = c.next() as i32;
+        let dropping = c.next() != 0;
+        let sliding = c.next() as i32;
+        let phase = match c.next() {
+            0 => Phase::Falling,
+            1 => Phase::Sliding,
+            2 => Phase::Over,
+            _ => return false,
+        };
+        let drop_accum = c.next() as i32;
+        let slide_accum = c.next() as i32;
+        let paused = c.next() != 0;
+        let hatter_accum = c.next() as i32;
+        let slick_accum = c.next() as i32;
+        let slick_dir = c.next() as i32;
+        let in_bazaar = c.next() != 0;
+        let lines_til_baz = c.next() as i32;
+        let score = Score {
+            score: c.next(),
+            op_score: c.next(),
+            lines: c.next(),
+            op_lines: c.next(),
+            funds: c.next(),
+            op_funds: c.next(),
+        };
+        let rng_state = c.next() as u64;
+        let mut kp = [0.0f64; 19];
+        for k in kp.iter_mut() {
+            *k = f64::from_bits(c.next() as u64);
+        }
+        let hap_on = c.next() as i32;
+        let broken = c.next() != 0;
+        let old_piece = c.next() as i32;
+        let mut counts = [0i32; BT_MAX_WEAPONS];
+        for cnt in counts.iter_mut() {
+            *cnt = c.next() as i32;
+        }
+        let mut remaining = [0i32; BT_MAX_WEAPONS];
+        for r in remaining.iter_mut() {
+            *r = c.next() as i32;
+        }
+        let mut arsenal_flat = [0i32; 20];
+        for a in arsenal_flat.iter_mut() {
+            *a = c.next() as i32;
+        }
+        let current = if c.next() != 0 {
+            let kind = match PieceKind::from_id(c.next() as i32) {
+                Some(k) => k,
+                None => return false,
+            };
+            let px = c.next() as i32;
+            let py = c.next() as i32;
+            let color = c.next() as i32;
+            let rot = c.next() as usize;
+            let orientation = c.next() as i32;
+            let orientations = c.next() as i32;
+            let state = c.next() as i32;
+            let mut cells: [[Option<Cell>; BT_PIECE_HEIGHT]; BT_PIECE_WIDTH] =
+                [[None; BT_PIECE_HEIGHT]; BT_PIECE_WIDTH];
+            for col in 0..BT_PIECE_WIDTH {
+                for row in 0..BT_PIECE_HEIGHT {
+                    let q = [c.next() as i32, c.next() as i32, c.next() as i32, c.next() as i32];
+                    cells[col][row] = Cell::decode(q);
+                }
+            }
+            Some(Piece { kind, x: px, y: py, color, rot, orientation, orientations, state, cells })
+        } else {
+            None
+        };
+        let pending_len = c.next();
+        if !(0..=1024).contains(&pending_len) {
+            return false;
+        }
+        let mut pending = Vec::with_capacity(pending_len as usize);
+        for _ in 0..pending_len {
+            match WeaponToken::from_index(c.next() as i32) {
+                Some(t) => pending.push(t),
+                None => return false,
+            }
+        }
+        let board_len = (self.board.width * self.board.height * 4) as usize;
+        let mut board_flat = Vec::with_capacity(board_len);
+        for _ in 0..board_len {
+            board_flat.push(c.next() as i32);
+        }
+        // Reject a malformed (short) or trailing-garbage keyframe before committing.
+        if !c.ok || c.i != data.len() {
+            return false;
+        }
+
+        // Commit.
+        self.x = x;
+        self.y = y;
+        self.def_x = def_x;
+        self.def_y = def_y;
+        self.delta_y = delta_y;
+        self.left_x = left_x;
+        self.right_x = right_x;
+        self.base_drop_time = base_drop_time;
+        self.fast_drop_time = fast_drop_time;
+        self.drop_time = drop_time;
+        self.slide_time = slide_time;
+        self.dropping = dropping;
+        self.sliding = sliding;
+        self.phase = phase;
+        self.drop_accum = drop_accum;
+        self.slide_accum = slide_accum;
+        self.paused = paused;
+        self.hatter_accum = hatter_accum;
+        self.slick_accum = slick_accum;
+        self.slick_dir = slick_dir;
+        self.in_bazaar = in_bazaar;
+        self.lines_til_baz = lines_til_baz;
+        self.score = score;
+        self.rng = Rng::from_raw(rng_state);
+        self.pieces.set_raw(kp, hap_on, broken, old_piece);
+        self.weapons.set_raw(counts);
+        self.remaining = remaining;
+        self.import_arsenal(&arsenal_flat);
+        self.import_board(&board_flat);
+        self.current = current;
+        self.pending = pending;
+        self.events.clear();
+        true
+    }
+
     /// Effective bazaar price for `token` — doubled while Carter is active
     /// (the original displays and charges the doubled price).
     pub fn bazaar_price(&self, token: WeaponToken) -> i32 {
@@ -860,6 +1084,30 @@ impl Game {
     }
 }
 
+/// A bounds-checked forward cursor over an `i64` keyframe (see [`Game::restore`]).
+/// A read past the end flips `ok` to false and yields 0, so a malformed/truncated
+/// keyframe is rejected rather than panicking.
+struct Cur<'a> {
+    d: &'a [i64],
+    i: usize,
+    ok: bool,
+}
+
+impl Cur<'_> {
+    fn next(&mut self) -> i64 {
+        match self.d.get(self.i) {
+            Some(&v) => {
+                self.i += 1;
+                v
+            }
+            None => {
+                self.ok = false;
+                0
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -908,5 +1156,82 @@ mod tests {
         assert_eq!(g.y, y0, "the piece must not fall while frozen");
         assert_eq!(g.score().score, score0, "score must not change while frozen");
         assert!(g.take_events().is_empty(), "no events while frozen");
+    }
+
+    #[test]
+    fn keyframe_round_trips_exactly() {
+        let mut g = Game::new(0xBEEF);
+        for i in 0..200 {
+            match i {
+                50 => g.move_left(),
+                70 => g.rotate(),
+                90 => g.begin_drop(),
+                120 => g.receive_weapon(WeaponToken::Bottle),
+                _ => {}
+            }
+            g.tick(16);
+        }
+        let snap = g.snapshot();
+        let mut h = Game::new(1); // a DIFFERENT seed — restore must overwrite everything
+        assert!(h.restore(&snap), "restore accepts a valid keyframe");
+        assert_eq!(h.snapshot(), snap, "the restored game re-serializes identically");
+    }
+
+    #[test]
+    fn keyframe_enables_deterministic_continuation() {
+        // The reason this codec exists: restore a mid-game keyframe into a fresh
+        // engine and the two must stay bit-identical when driven the same way —
+        // including the RNG-advancing weapon that naive board-snapping can't track.
+        let mut a = Game::new(0x1234);
+        for i in 0..150 {
+            match i {
+                40 => a.move_right(),
+                80 => a.begin_drop(),
+                110 => a.receive_weapon(WeaponToken::RiseUp),
+                _ => {}
+            }
+            a.tick(16);
+        }
+        let mut b = Game::new(0x9999); // different seed; the keyframe overrides it
+        assert!(b.restore(&a.snapshot()));
+
+        for i in 0..300 {
+            match i {
+                30 => {
+                    a.move_left();
+                    b.move_left();
+                }
+                60 => {
+                    a.rotate();
+                    b.rotate();
+                }
+                100 => {
+                    a.begin_drop();
+                    b.begin_drop();
+                }
+                _ => {}
+            }
+            a.tick(16);
+            b.tick(16);
+        }
+        assert_eq!(a.snapshot(), b.snapshot(), "continuation from a keyframe is deterministic");
+    }
+
+    #[test]
+    fn restore_rejects_malformed_keyframes_without_mutating() {
+        let good = Game::new(7).snapshot();
+        let mut g = Game::new(7);
+        let before = g.snapshot();
+
+        assert!(!g.restore(&[]), "empty rejected");
+        assert!(!g.restore(&good[..good.len() - 1]), "truncated rejected");
+        let mut wrong_ver = good.clone();
+        wrong_ver[0] = 999;
+        assert!(!g.restore(&wrong_ver), "wrong version rejected");
+        let mut trailing = good.clone();
+        trailing.push(123);
+        assert!(!g.restore(&trailing), "trailing garbage rejected");
+
+        assert_eq!(g.snapshot(), before, "self is untouched after every rejected restore");
     }
 }
