@@ -20,6 +20,7 @@ pub mod game;
 pub mod piece;
 pub mod piece_manager;
 pub mod rng;
+pub mod versus;
 pub mod weapons;
 
 pub use arsenal::Arsenal;
@@ -29,4 +30,5 @@ pub use game::{Game, GameEvent, Score};
 pub use piece::{Piece, PieceKind};
 pub use piece_manager::PieceManager;
 pub use rng::Rng;
+pub use versus::{deliver_weapon, mirror_nullifies, Versus};
 pub use weapons::{ActiveFlags, WeaponToken};

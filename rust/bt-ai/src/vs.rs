@@ -32,22 +32,13 @@ enum Side {
 }
 
 impl Side {
+    #[cfg(test)]
     fn other(self) -> Side {
         match self {
             Side::Player => Side::Ai,
             Side::Ai => Side::Player,
         }
     }
-}
-
-/// Weapons a Mirror simply nullifies (rather than reflecting back), per the
-/// original `BTWeaponManager.C:204-216` switch and the Mirror description.
-fn mirror_nullifies(token: WeaponToken) -> bool {
-    use WeaponToken::*;
-    matches!(
-        token,
-        Swap | Mondale | Keating | Ames | Ace | Condor | NiceDay | Susan | Mirror
-    )
 }
 
 /// A single-tab game vs the computer opponent (Ernie). Owns the player's game
@@ -203,64 +194,23 @@ impl VsComputer {
         }
     }
 
-    /// Route a launched weapon from `attacker` to its target, honoring Mirror.
-    ///
-    /// Mirror is OFFENSIVE, faithful to `BTWeaponManager.C:204-219`: launching
-    /// it is a normal attack that curses the OPPONENT (sets their
-    /// `BTActive[BT_MIRROR]`). While a player is mirror-cursed, every weapon
-    /// THEY launch is caught by their own curse — the nullify-9
-    /// ([`mirror_nullifies`], which includes Mirror itself so the curse can't
-    /// ping-pong, and the spies, satisfying D6) simply fizzle; everything else
-    /// backfires onto the cursed launcher (self-inflict). An un-cursed launch
-    /// hits the opponent. The net effect benefits the deployer: you Mirror your
-    /// opponent and watch their own arsenal turn on them.
+    /// Route a launched weapon from `attacker` to its target via the shared
+    /// offensive-Mirror relay in [`bt_core::versus::deliver_weapon`] — the exact
+    /// same logic the server's authoritative human-vs-human match uses, so the
+    /// two modes can never drift apart. (Mirror is offensive: launching it curses
+    /// the opponent; a cursed launcher's own weapons backfire or fizzle.)
     fn deliver(&mut self, token: WeaponToken, attacker: Side) {
-        if self.game(attacker).weapon_active(WeaponToken::Mirror) {
-            if mirror_nullifies(token) {
-                return; // fizzles against the launcher's own mirror curse
-            }
-            // Backfires onto the cursed launcher. NOTE: the original applies this
-            // local BT_WPN_ON immediately (BTWeaponManager.C:204-219), whereas this
-            // queues it (apply_weapon -> receive_weapon) to land at the launcher's
-            // next lock — consistent with the port's "all weapons apply at lock"
-            // (weapq_) model. The one-piece timing gap is a known minor divergence
-            // to revisit with the client-server migration's ordered event stream.
-            self.apply_weapon(token, attacker);
-            return;
-        }
-        // Mirror itself falls through here: a normal attack that curses the
-        // opponent (apply_weapon queues it; it activates at their next lock).
-        self.apply_weapon(token, attacker.other());
-    }
-
-    /// Apply `token` to `target` (Mirror already resolved by the caller). Swap
-    /// and Susan act on both boards at once; every other weapon is queued on the
-    /// target and lands at its next lock.
-    fn apply_weapon(&mut self, token: WeaponToken, target: Side) {
-        match token {
-            WeaponToken::Swap => {
-                let (p, a) = (&mut self.player, &mut self.ai);
-                p.swap_board_with(a);
-            }
-            WeaponToken::Susan => {
-                let (p, a) = (&mut self.player, &mut self.ai);
-                p.swap_arsenal_with(a);
-            }
-            _ => self.game_mut(target).receive_weapon(token),
+        match attacker {
+            Side::Player => bt_core::deliver_weapon(&mut self.player, &mut self.ai, token),
+            Side::Ai => bt_core::deliver_weapon(&mut self.ai, &mut self.player, token),
         }
     }
 
+    #[cfg(test)]
     fn game(&self, side: Side) -> &Game {
         match side {
             Side::Player => &self.player,
             Side::Ai => &self.ai,
-        }
-    }
-
-    fn game_mut(&mut self, side: Side) -> &mut Game {
-        match side {
-            Side::Player => &mut self.player,
-            Side::Ai => &mut self.ai,
         }
     }
 
@@ -458,15 +408,5 @@ mod cross_player_tests {
         vs.relay(); // routes Ernie's FundsStolen to the attacker (player)
         assert_eq!(vs.player.score().funds, p0 + 500, "the attacker banked the seized 500");
     }
-
-    #[test]
-    fn mirror_nullify_set_is_exactly_the_originals_nine() {
-        use WeaponToken::*;
-        for t in [Swap, Mondale, Keating, Ames, Ace, Condor, NiceDay, Susan, Mirror] {
-            assert!(mirror_nullifies(t), "{t:?} should be nullified");
-        }
-        for t in [RiseUp, Speedy, Bottle, Force, Gimp, FlipOut, Hatter] {
-            assert!(!mirror_nullifies(t), "{t:?} should reflect, not nullify");
-        }
-    }
+    // (The Mirror nullify-set is now owned + tested in bt_core::versus.)
 }
