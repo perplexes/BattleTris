@@ -43,7 +43,7 @@ use axum::response::{IntoResponse, Redirect};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use bt_core::versus::Side;
-use bt_replay::{Input, Replay, VersusReplay};
+use bt_replay::{Input, Replay, ReplayPlayer, VersusReplay, VersusReplayPlayer};
 use bt_trueskill::ts2::{rate_match, MatchOutcome, PlayerState, Ts2Params, Winner};
 use bt_trueskill::{quality_1v1, Rating};
 use futures_util::{SinkExt, StreamExt};
@@ -750,11 +750,19 @@ async fn run_bout(state: Shared, pb: PendingBout) {
                 .db
                 .lock()
                 .ok()
-                .and_then(|conn| db_insert_versus(&conn, &id, &replay, &json, now_secs()).ok())
+                .and_then(|conn| {
+                    let total_lines = bout.lines(Side::A) as i64 + bout.lines(Side::B) as i64;
+                    db_insert_versus(&conn, &id, &replay, &json, now_secs(), &name_a, &name_b, total_lines).ok()
+                })
                 .is_some();
             if stored {
                 println!("stored online replay {id} ({} ticks)", replay.tick_count);
             }
+            // Tell both clients the replay id so the game-over screen can offer a
+            // "Watch replay" button (best-effort — a disconnected client ignores it).
+            let msg = json!({ "type": "matchReplay", "id": id }).to_string();
+            let _ = tx_a.send(Message::Text(msg.clone()));
+            let _ = tx_b.send(Message::Text(msg));
         }
     }
     // Both players went back to Available (or left) — refresh the lobby roster.
@@ -1148,7 +1156,10 @@ CREATE TABLE IF NOT EXISTS replays (
     engine_sha  TEXT NOT NULL,
     created_at  INTEGER NOT NULL,
     json        TEXT NOT NULL,
-    title       TEXT
+    title       TEXT,
+    name_a      TEXT,
+    name_b      TEXT,
+    lines       INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_replays_created ON replays(created_at);
 CREATE TABLE IF NOT EXISTS counters (
@@ -1178,6 +1189,13 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     // EXISTS won't add the column, so ALTER it in; ignore the duplicate-column
     // error when it's already there.
     let _ = conn.execute("ALTER TABLE replays ADD COLUMN title TEXT", []);
+    // Player names per online match (for the library's "Alice vs Bob" + profile
+    // links); same idempotent-ALTER migration. Older rows keep NULL names.
+    let _ = conn.execute("ALTER TABLE replays ADD COLUMN name_a TEXT", []);
+    let _ = conn.execute("ALTER TABLE replays ADD COLUMN name_b TEXT", []);
+    // Total lines cleared in the recording (shown in the library). Backfilled
+    // for pre-existing rows by `backfill_lines`.
+    let _ = conn.execute("ALTER TABLE replays ADD COLUMN lines INTEGER", []);
     Ok(())
 }
 
@@ -1195,7 +1213,51 @@ fn open_db() -> Connection {
     // `execute_batch` ignores the row PRAGMA journal_mode returns.
     let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
     init_schema(&conn).expect("init replay schema");
+    backfill_lines(&conn);
     conn
+}
+
+/// Total lines cleared across all boards of a single-board (practice / vs-Computer)
+/// recording — deterministically replayed to the end.
+fn single_replay_lines(r: &Replay) -> i64 {
+    let mut p = ReplayPlayer::new(r.clone());
+    p.run_to_end();
+    let mut lines = p.player().score().lines;
+    if let Some(ai) = p.ai() {
+        lines += ai.score().lines;
+    }
+    lines
+}
+
+/// Total lines cleared across both boards of an online (versus) recording.
+fn versus_replay_lines(r: &VersusReplay) -> i64 {
+    let mut p = VersusReplayPlayer::new(r.clone());
+    p.run_to_end();
+    p.game(true).score().lines + p.game(false).score().lines
+}
+
+/// One-time backfill of the `lines` column for rows recorded before it existed
+/// (best-effort: malformed JSON is skipped). After the first run no rows are
+/// NULL, so subsequent startups are no-ops.
+fn backfill_lines(conn: &Connection) {
+    let rows: Vec<(String, String)> = match conn.prepare("SELECT id, json FROM replays WHERE lines IS NULL") {
+        Ok(mut stmt) => stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .and_then(|m| m.collect())
+            .unwrap_or_default(),
+        Err(_) => return,
+    };
+    for (id, json) in rows {
+        // A versus recording carries seed_a/seed_b; everything else is single-board.
+        let lines = if let Ok(vr) = VersusReplay::from_json(&json) {
+            versus_replay_lines(&vr)
+        } else if let Ok(r) = Replay::from_json(&json) {
+            single_replay_lines(&r)
+        } else {
+            continue;
+        };
+        let _ = conn.execute("UPDATE replays SET lines = ?1 WHERE id = ?2", rusqlite::params![lines, id]);
+    }
 }
 
 /// Insert a recording (no-op if its content id already exists). Returns rows
@@ -1203,8 +1265,8 @@ fn open_db() -> Connection {
 fn db_insert(conn: &Connection, id: &str, r: &Replay, json: &str, created_at: i64) -> rusqlite::Result<usize> {
     conn.execute(
         "INSERT OR IGNORE INTO replays
-            (id, mode, seed, ai_level, tick_count, inputs, engine_sha, created_at, json, title)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            (id, mode, seed, ai_level, tick_count, inputs, engine_sha, created_at, json, title, lines)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         rusqlite::params![
             id,
             format!("{:?}", r.mode),
@@ -1216,6 +1278,7 @@ fn db_insert(conn: &Connection, id: &str, r: &Replay, json: &str, created_at: i6
             created_at,
             json,
             r.title,
+            single_replay_lines(r),
         ],
     )
 }
@@ -1229,11 +1292,14 @@ fn db_insert_versus(
     r: &VersusReplay,
     json: &str,
     created_at: i64,
+    name_a: &str,
+    name_b: &str,
+    lines: i64,
 ) -> rusqlite::Result<usize> {
     conn.execute(
         "INSERT OR IGNORE INTO replays
-            (id, mode, seed, ai_level, tick_count, inputs, engine_sha, created_at, json, title)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            (id, mode, seed, ai_level, tick_count, inputs, engine_sha, created_at, json, title, name_a, name_b, lines)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         rusqlite::params![
             id,
             "Online",
@@ -1245,6 +1311,9 @@ fn db_insert_versus(
             created_at,
             json,
             r.title,
+            name_a,
+            name_b,
+            lines,
         ],
     )
 }
@@ -1487,12 +1556,15 @@ fn player_record_json(p: &PlayerStats) -> Value {
 /// browse page needs.
 fn db_list(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Value>> {
     let mut stmt = conn.prepare(
-        "SELECT id, mode, seed, ai_level, tick_count, inputs, engine_sha, created_at, title
+        "SELECT id, mode, seed, ai_level, tick_count, inputs, engine_sha, created_at, title, name_a, name_b, lines
          FROM replays ORDER BY created_at DESC, id DESC LIMIT ?1",
     )?;
     let rows = stmt.query_map([limit], |row| {
         let ai_level: Option<i64> = row.get(3)?;
         let title: Option<String> = row.get(8)?;
+        let name_a: Option<String> = row.get(9)?;
+        let name_b: Option<String> = row.get(10)?;
+        let lines: Option<i64> = row.get(11)?;
         Ok(json!({
             "id": row.get::<_, String>(0)?,
             "mode": row.get::<_, String>(1)?,
@@ -1503,6 +1575,9 @@ fn db_list(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Value>> {
             "engine_sha": row.get::<_, String>(6)?,
             "mtime": row.get::<_, i64>(7)?,
             "title": title,
+            "name_a": name_a,
+            "name_b": name_b,
+            "lines": lines,
         }))
     })?;
     rows.collect()

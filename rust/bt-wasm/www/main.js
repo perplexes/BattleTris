@@ -50,6 +50,10 @@ const fundsValue = document.getElementById('fundsValue');
 const linesToBazaarValue = document.getElementById('linesToBazaarValue');
 const gameOverOverlay = document.getElementById('gameOverOverlay');
 const gameOverText = document.getElementById('gameOverText');
+const watchReplayBtn = document.getElementById('watchReplayBtn');
+// The just-finished online match's stored replay id (sent by the server at
+// match end) — drives the game-over "Watch replay" button.
+let lastMatchReplayId = null;
 const newGameBtn = document.getElementById('newGameBtn');
 const bazaarOverlay = document.getElementById('bazaarOverlay');
 const bazaarFunds = document.getElementById('bazaarFunds');
@@ -587,6 +591,9 @@ function enterAuthoritativeGame(msg) {
     authOpp = null;
     authSpying = false;
     authSpyBoard = null;
+    // Fresh match: no stored replay yet (the server sends matchReplay at the end).
+    lastMatchReplayId = null;
+    if (watchReplayBtn) watchReplayBtn.style.display = 'none';
 
     const width = game.width();
     const height = game.height();
@@ -700,6 +707,11 @@ async function onSignalMessage(ev) {
             ` μ-3σ ~ ${conservative}`
         );
 
+    } else if (msg.type === 'matchReplay') {
+        // The server stored this match — reveal the "Watch replay" button on the
+        // (already-showing or upcoming) game-over screen.
+        lastMatchReplayId = msg.id;
+        showWatchReplayBtn();
     } else if (msg.type === 'opponentLeft') {
         setOnlineStatus('Opponent left.');
         if (!gameEnded) {
@@ -707,6 +719,13 @@ async function onSignalMessage(ev) {
             gameOverText.textContent = 'Opponent left.';
             gameOverOverlay.style.display = 'flex';
         }
+    }
+}
+
+// Show the game-over "Watch replay" button iff we have a stored replay id.
+function showWatchReplayBtn() {
+    if (watchReplayBtn) {
+        watchReplayBtn.style.display = lastMatchReplayId ? '' : 'none';
     }
 }
 
@@ -733,6 +752,10 @@ async function initGame() {
 //   ?screen=bazaar&baz=oppready (preview the "Your opponent is waiting..." prompt)
 function applyScreenFromUrl() {
     const p = new URLSearchParams(location.search);
+    // ?player=<name> opens a player's profile (stats panel) in the lobby — the
+    // target of the replay-library name links.
+    const player = p.get('player');
+    if (player) selectPlayer(player);
     const screen = p.get('screen');
     if (!screen) return;
     switch (screen) {
@@ -1566,11 +1589,16 @@ function leaveToLobby() {
     game = null;
     gameOverOverlay.style.display = 'none';
     bazaarOverlay.style.display = 'none';
+    lastMatchReplayId = null;
+    if (watchReplayBtn) watchReplayBtn.style.display = 'none';
     showLobby();
     if (forfeiting && ws) { try { ws.close(); } catch (_) {} }
 }
 const leaveGameTop = document.getElementById('leaveGameTop');
 if (backToLobbyBtn) backToLobbyBtn.addEventListener('click', leaveToLobby);
+if (watchReplayBtn) watchReplayBtn.addEventListener('click', () => {
+    if (lastMatchReplayId) location.href = '/replay/' + lastMatchReplayId;
+});
 if (leaveGameBtn) leaveGameBtn.addEventListener('click', leaveToLobby);
 if (leaveGameTop) leaveGameTop.addEventListener('click', leaveToLobby);
 

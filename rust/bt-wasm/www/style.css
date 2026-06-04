@@ -166,8 +166,10 @@ body {
     bottom: 0;
     background-color: rgba(0, 0, 0, 0.75);
     display: none;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
+    gap: 24px;
     z-index: 10;
 }
 
@@ -177,6 +179,14 @@ body {
     color: #ff0000;
     text-shadow: 3px 3px 0 #8b0000;
     letter-spacing: 4px;
+}
+
+/* Game-over actions row (Watch replay / Back to lobby). */
+.game-over-buttons {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    justify-content: center;
 }
 
 /* ─── Score box (BTGame score_box: blue lucidatypewriter on gray66) ────────── */
@@ -1390,6 +1400,27 @@ body.bazaar-open #touchControls { display: none !important; }
     margin-left: auto;
     font-weight: bold;
     color: #044;
+    text-decoration: none;
+}
+.library-watch:hover { text-decoration: underline; }
+
+/* "Alice vs Bob" matchup with profile links. */
+.library-matchup {
+    font-family: 'lucidatypewriter';
+    font-weight: bold;
+    font-size: 14px;
+    min-width: 180px;
+}
+.library-player {
+    color: #006;                 /* period-blue link */
+    text-decoration: none;
+}
+.library-player:hover { text-decoration: underline; }
+.library-vs {
+    color: #777;
+    font-weight: normal;
+    font-style: italic;
+    margin: 0 2px;
 }
 
 /* ─── Leaderboard ────────────────────────────────────────────────────────── */

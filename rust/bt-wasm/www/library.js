@@ -34,21 +34,46 @@ function fmtAge(mtime) {
         { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]
     ));
 
+    // A player name as a link to their profile (the lobby stats panel).
+    const playerLink = (n) => n
+        ? `<a class="library-player" href="/www/?player=${encodeURIComponent(n)}">${esc(n)}</a>`
+        : '';
+
     for (const r of replays) {
-        const a = document.createElement('a');
-        a.className = 'library-item';
-        a.href = '/replay/' + r.id;
+        const item = document.createElement('div');
+        item.className = 'library-item';
+        item.style.cursor = 'pointer';
         const lvl = (r.ai_level !== null && r.ai_level !== undefined) ? ` (Ernie ${r.ai_level})` : '';
         const title = r.title ? `<span class="library-title">${esc(r.title)}</span>` : '';
-        a.innerHTML =
+        // Online matches that recorded both names get a "Alice vs Bob" matchup of
+        // profile links; everything else gets a plain-English match descriptor.
+        const hasNames = !!(r.name_a || r.name_b);
+        const matchup = hasNames
+            ? `<span class="library-matchup">${playerLink(r.name_a)} <span class="library-vs">vs</span> ${playerLink(r.name_b)}</span>`
+            : '';
+        let modeLabel = '';
+        if (!hasNames) {
+            if (r.mode === 'Practice') modeLabel = 'User practice';
+            else if (r.mode === 'VsComputer') modeLabel = 'User vs Computer' + lvl;
+            else if (r.mode === 'Online') modeLabel = 'User vs User';
+            else modeLabel = r.mode;
+        }
+        const modeSpan = modeLabel ? `<span class="library-mode">${modeLabel}</span>` : '';
+        const lines = (r.lines !== null && r.lines !== undefined)
+            ? `${r.lines} line${r.lines === 1 ? '' : 's'} cleared` : '';
+        item.innerHTML =
+            matchup +
+            modeSpan +
             title +
-            `<span class="library-mode">${r.mode}${lvl}</span>` +
-            `<span class="library-stat">${r.tick_count} ticks</span>` +
-            `<span class="library-stat">${r.inputs} inputs</span>` +
-            `<span class="library-stat">seed ${r.seed}</span>` +
-            `<span class="library-stat library-sha">${r.engine_sha}</span>` +
+            `<span class="library-stat">${lines}</span>` +
             `<span class="library-age">${fmtAge(r.mtime)}</span>` +
-            `<span class="library-watch">Watch &#9654;</span>`;
-        listEl.appendChild(a);
+            `<a class="library-watch" href="/replay/${r.id}">Watch &#9654;</a>`;
+        // Click anywhere on the row watches the replay — except on a real link
+        // (a player profile or the Watch link), which navigates on its own.
+        item.addEventListener('click', (e) => {
+            if (e.target.closest('a')) return;
+            location.href = '/replay/' + r.id;
+        });
+        listEl.appendChild(item);
     }
 })();
