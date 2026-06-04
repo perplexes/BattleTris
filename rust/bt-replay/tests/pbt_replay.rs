@@ -273,10 +273,12 @@ proptest! {
         // instead of `self.replay.dt_ms` diverges from a live run recorded at a
         // different dt. The old hardcoded DT=16 couldn't tell them apart.
         dt in 8i32..40,
+        // A non-empty engine SHA so a `to_replay` that drops/blanks it is caught.
+        sha in "[a-f0-9]{7,40}",
     ) {
         let seed32 = seed as u32;
         let mut g = Game::new(seed);
-        let mut rec = Recorder::new(seed32, Mode::Practice, None, dt, "pbt");
+        let mut rec = Recorder::new(seed32, Mode::Practice, None, dt, &sha);
 
         for o in &ops {
             if g.is_game_over() { break; }
@@ -290,7 +292,16 @@ proptest! {
         let live = fingerprint(&g);
 
         let replay = rec.to_replay();
-        prop_assert_eq!(replay.dt_ms, dt, "the recorder must preserve the recorded dt_ms");
+        // The exported HEADER must carry the recorder's metadata, not defaults —
+        // a `to_replay` with `version: 0` / `engine_sha: String::new()` /
+        // `mode/seed` drift is caught here.
+        prop_assert_eq!(replay.version, REPLAY_VERSION, "to_replay must stamp the current REPLAY_VERSION");
+        prop_assert_eq!(replay.dt_ms, dt, "to_replay must preserve dt_ms");
+        prop_assert_eq!(&replay.engine_sha, &sha, "to_replay must preserve the engine SHA");
+        prop_assert_eq!(replay.mode, Mode::Practice, "to_replay must preserve the mode");
+        prop_assert_eq!(replay.seed, seed32, "to_replay must preserve the seed");
+        prop_assert_eq!(replay.ai_level, None, "Practice mode has no ai_level");
+
         let mut player = ReplayPlayer::new(replay);
         player.run_to_end();
 
@@ -356,6 +367,67 @@ proptest! {
             "vs-computer replay diverged on ERNIE's board");
         prop_assert_eq!(player.result(), live_result,
             "vs-computer replay diverged on the match result");
+    }
+
+    // ── (b‴) BACKWARD seek on a VS-COMPUTER replay rebuilds in VsComputer mode ─
+    //
+    // `ReplayPlayer::seek` rebuilds from `self.replay.clone()` for a backward seek.
+    // The single-player seek tests only use Practice replays, so a rebuild that
+    // forced `Mode::Practice` (dropping the VsComputer engine + Ernie) would slip
+    // through. Here we record a real VsComputer match, seek forward to `hi` then
+    // BACK to `lo`, and compare BOTH the human AND Ernie boards to a fresh player
+    // stepped straight to `lo` — the rebuild MUST stay VsComputer.
+    #[test]
+    fn vs_computer_backward_seek_rebuilds_in_mode(
+        seed in any::<u32>(),
+        level in 0u32..(bt_ai::AI_LEVELS.len() as u32),
+        script in prop::collection::vec((0u32..300u32, vs_computer_input()), 0..32),
+        x in 0u32..300,
+        y in 0u32..300,
+    ) {
+        use bt_ai::VsComputer;
+        let total = 300u32;
+        let mut sorted = script.clone();
+        sorted.sort_by_key(|(t, _)| *t);
+
+        // Record a VsComputer match.
+        let mut vs = VsComputer::new(seed as u64, level as usize);
+        let mut rec = Recorder::new(seed, Mode::VsComputer, Some(level), DT, "pbt");
+        let mut si = 0usize;
+        for t in 0..total {
+            while si < sorted.len() && sorted[si].0 == t {
+                sorted[si].1.clone().apply_to_game(vs.player_mut());
+                rec.record(sorted[si].1.clone());
+                si += 1;
+            }
+            vs.tick(DT);
+            let _ = vs.drain_events();
+            rec.on_tick();
+        }
+        let replay = rec.to_replay();
+
+        let hi = x.max(y).min(replay.tick_count);
+        let lo = x.min(y).min(replay.tick_count);
+
+        // Forward to hi, then BACK to lo (the rebuild path).
+        let mut p = ReplayPlayer::new(replay.clone());
+        p.seek(hi);
+        p.seek(lo);
+
+        // Fresh player stepped straight to lo.
+        let mut q = ReplayPlayer::new(replay.clone());
+        for _ in 0..lo { if !q.step() { break; } }
+
+        prop_assert_eq!(p.tick_index(), q.tick_index(),
+            "vs-computer backward-seek tick_index mismatch (hi={}, lo={})", hi, lo);
+        prop_assert_eq!(fingerprint(p.player()), fingerprint(q.player()),
+            "vs-computer backward-seek HUMAN board mismatch");
+        // The rebuild must stay VsComputer (Ernie present), and his board must match.
+        let p_ai = p.ai().expect("backward-seek must keep the VsComputer engine (Ernie present)");
+        let q_ai = q.ai().expect("stepped VsComputer player must have Ernie");
+        prop_assert_eq!(fingerprint(p_ai), fingerprint(q_ai),
+            "vs-computer backward-seek ERNIE board mismatch (hi={}, lo={})", hi, lo);
+        prop_assert_eq!(p.result(), q.result(), "vs-computer backward-seek result mismatch");
     }
 
     // ── (b) seek(n) == n × step() ───────────────────────────────────────────

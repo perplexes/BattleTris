@@ -846,9 +846,22 @@ mod tests {
 
             // Export. The exported frames must EXACTLY equal what the test observed
             // being ACCEPTED — same tick, side, AND input payload (slot/token).
-            let exported = b.to_replay(TICK_MS, "pbt");
+            // The bout ticks at TICK_MS internally, so to_replay must be given the
+            // same dt for a faithful replay; we pass a DISTINCTIVE engine_sha so a
+            // blank/dropped one is caught.
+            let engine_sha = "pbt-sha-7f3a9c";
+            let exported = b.to_replay(TICK_MS, engine_sha);
             prop_assert_eq!(&exported.frames, &expected_frames,
                 "to_replay must export every accepted input verbatim (tick/side/input)");
+            // The HEADER metadata must reflect the export args + match state — a
+            // `to_replay` with `version: 0`, blank `engine_sha`, a wrong `dt_ms`, or
+            // a stale `tick_count` is caught here.
+            prop_assert_eq!(exported.version, REPLAY_VERSION, "to_replay must stamp REPLAY_VERSION");
+            prop_assert_eq!(exported.dt_ms, TICK_MS, "to_replay must record the given dt_ms");
+            prop_assert_eq!(&exported.engine_sha, engine_sha, "to_replay must record the given engine_sha");
+            prop_assert_eq!(exported.tick_count, b.tick_count() as u32, "to_replay tick_count must equal the bout's tick count");
+            prop_assert_eq!(exported.seed_a, seed_a as u32, "to_replay must record seed_a");
+            prop_assert_eq!(exported.seed_b, seed_b as u32, "to_replay must record seed_b");
 
             // Replay (through JSON too — the on-disk form).
             let replay = bt_replay::VersusReplay::from_json(&exported.to_json())
@@ -1066,6 +1079,74 @@ mod tests {
         // It's a real full-state keyframe: it restores into a fresh engine.
         let mut g = bt_core::Game::new(999);
         assert!(g.restore_bytes(&kf), "the keyframe restores a full game");
+    }
+
+    // -----------------------------------------------------------------------
+    // Property (j): `snapshot_for` reports the REAL client-visible state, not
+    //   fresh-zero defaults. The existing snapshot test only checks a brand-new
+    //   bout, so a `snapshot_for` that hardcoded `opp.score: 0`, `opp.lines: 0`,
+    //   `in_bazaar: false`, `lines_til_bazaar: 0`, or `you.funds: 0` survived. We
+    //   drive non-trivial state (a side clears lines + banks funds; the other may
+    //   enter the bazaar) and assert each snapshot field matches the engine from
+    //   BOTH points of view. Also pins the settlement accessors score()/funds()/
+    //   lines() against the same engine state.
+    // -----------------------------------------------------------------------
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(24))]
+
+        #[test]
+        fn snapshot_and_settlement_reflect_real_engine_state(
+            seed_a in any::<u64>(),
+            seed_b in any::<u64>(),
+            clear_side_idx in 0usize..2,
+            extra_funds in 1i64..100_000,
+        ) {
+            let mut b = Bout::new(seed_a, seed_b);
+            let clear_side = if clear_side_idx == 0 { Side::A } else { Side::B };
+            // Make `clear_side` clear lines (banks score+lines+funds), and credit
+            // some extra funds so funds is non-zero on that side.
+            let cleared = force_side_clears(&mut b, clear_side, 3);
+            prop_assume!(cleared > 0 && !b.is_over());
+            b.versus.game_mut(clear_side).add_funds(extra_funds);
+            // Force the OTHER side into the bazaar so `in_bazaar` / `lines_til_bazaar`
+            // are NON-trivial (else those assertions are vacuous — both default
+            // to false/20 and a hardcoded mutant would slip through).
+            force_into_bazaar(&mut b, clear_side.other());
+            prop_assert!(b.versus.game(clear_side.other()).is_in_bazaar(),
+                "the other side must be in the bazaar (non-vacuity for in_bazaar)");
+
+            // For BOTH sides, the snapshot must mirror the engine exactly.
+            for side in [Side::A, Side::B] {
+                let snap = b.snapshot_for(side, false);
+                let me = b.versus.game(side);
+                let them = b.versus.game(side.other());
+                prop_assert_eq!(snap.you.funds, me.score().funds,
+                    "you.funds must mirror the engine ({:?})", side);
+                prop_assert_eq!(snap.you.in_bazaar, me.is_in_bazaar(),
+                    "you.in_bazaar must mirror the engine ({:?})", side);
+                prop_assert_eq!(snap.you.lines_til_bazaar, me.lines_til_bazaar(),
+                    "you.lines_til_bazaar must mirror the engine ({:?})", side);
+                prop_assert_eq!(snap.opp.score, them.score().score,
+                    "opp.score must mirror the OPPONENT's engine score ({:?})", side);
+                prop_assert_eq!(snap.opp.lines, them.score().lines,
+                    "opp.lines must mirror the OPPONENT's engine lines ({:?})", side);
+                prop_assert_eq!(snap.opp.game_over, them.is_game_over(),
+                    "opp.game_over must mirror the opponent ({:?})", side);
+            }
+
+            // Non-vacuity: the clearing side genuinely has non-zero lines/score and
+            // funds, so a hardcoded-zero accessor really diverges.
+            let cs = b.versus.game(clear_side).score();
+            prop_assert!(cs.lines > 0 && cs.funds > 0, "the clearing side must have banked lines + funds");
+
+            // Settlement accessors mirror the engine.
+            for side in [Side::A, Side::B] {
+                let g = b.versus.game(side);
+                prop_assert_eq!(b.score(side), g.score().score, "Bout::score(side) must mirror the engine");
+                prop_assert_eq!(b.funds(side), g.score().funds, "Bout::funds(side) must mirror the engine");
+                prop_assert_eq!(b.lines(side) as i64, g.score().lines, "Bout::lines(side) must mirror the engine");
+            }
+        }
     }
 
     #[test]

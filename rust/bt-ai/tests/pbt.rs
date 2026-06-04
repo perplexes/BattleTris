@@ -386,6 +386,55 @@ proptest! {
     }
 }
 
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    /// `VsComputer`'s difficulty `level` must actually CHANGE Ernie's placement
+    /// cadence (`place_period = AI_LEVELS[level]`): a faster level places pieces
+    /// more often, so after a fixed tick budget a fast Ernie has committed strictly
+    /// MORE pieces (more board cells) than a slow one — under the SAME seed. A
+    /// mutant that ignores the level (`let idx = 0`) makes every difficulty behave
+    /// identically, so the two boards become equal and this fails. (The
+    /// record→replay property can't catch this — live and replay route through the
+    /// same constructor, so both make the identical mistake.)
+    #[test]
+    fn vs_computer_level_changes_ernie_cadence(seed in any::<u64>()) {
+        use bt_ai::VsComputer;
+        // Ernie's PLACEMENT count is monotone in its score: each committed drop adds
+        // a flat `BT_BOARD_HGT/2` via `ai_begin_drop` (independent of line clears,
+        // which only change cell COUNT — so score, not cells, is the robust cadence
+        // proxy here).
+        fn ai_score(vs: &VsComputer) -> i64 { vs.ai().score().score }
+
+        // Slow Ernie (level 0 = Comatose, 4000ms/place) vs fast Ernie (the last
+        // level = Bionic, 0ms/place). Same seed -> same piece stream + decisions,
+        // so the ONLY difference is how many pieces each has had time to place.
+        let slow_level = 0usize;
+        let fast_level = bt_ai::AI_LEVELS.len() - 1;
+        let mut slow = VsComputer::new(seed, slow_level);
+        let mut fast = VsComputer::new(seed, fast_level);
+
+        // Run a fixed budget of ticks. Don't touch the human side (so only Ernie's
+        // cadence drives the divergence).
+        for _ in 0..400 {
+            if slow.result() != 0 && fast.result() != 0 { break; }
+            slow.tick(16);
+            fast.tick(16);
+            let _ = slow.drain_events();
+            let _ = fast.drain_events();
+        }
+
+        let (slow_score, fast_score) = (ai_score(&slow), ai_score(&fast));
+        // The Bionic Ernie must have placed strictly more pieces than the Comatose
+        // one in the same budget (~6.4s of ticks): 4000ms/place allows <=1 or 2
+        // placements; 0ms places essentially every drop, banking far more score.
+        prop_assert!(fast_score > slow_score,
+            "a faster difficulty must place more pieces (higher AI score): \
+             fast(level {})={} vs slow(level {})={}",
+            fast_level, fast_score, slow_level, slow_score);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // (c) Computer::take_turn never panics and advances game state
 // ---------------------------------------------------------------------------
