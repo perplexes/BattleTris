@@ -1,0 +1,27 @@
+# Region bots for BattleTris — a separate fly app whose machines each run one
+# headless bt-bot that connects to the main `battletris` app over the private
+# 6PN network and plays real authoritative matches. One machine per region; the
+# bot reads FLY_REGION to pick its name + geo, so the same image yields a
+# distinctly-named bot per region (Tokyo-Ernie, London-Ernie, …).
+#
+# Deploy + place machines (one per region) — see the header of Dockerfile.bot:
+#   fly deploy -c fly.bots.toml --dockerfile Dockerfile.bot --remote-only
+#   fly scale count 1 --region nrt,lhr,gru,syd,sjc -a battletris-bots
+#
+# Requires the SAME BT_JWT_SECRET as the server so the bots' self-minted tokens
+# verify:  fly secrets set BT_JWT_SECRET=<value> -a battletris-bots
+app = "battletris-bots"
+primary_region = "sjc"
+
+[build]
+  dockerfile = "Dockerfile.bot"
+
+[env]
+  # The server over fly's private network (plaintext ws, real cross-geo latency).
+  BT_BOT_WS = "ws://battletris.internal:8080/ws"
+
+# A worker: no [http_service] / [[services]] — the bot only dials OUT, so there's
+# nothing to serve. fly keeps the machine running and restarts it if it exits.
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

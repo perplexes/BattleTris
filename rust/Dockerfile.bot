@@ -1,0 +1,23 @@
+# syntax=docker/dockerfile:1
+#
+# Builds a fully-static (musl) bt-bot and ships it on Chainguard's distroless
+# `static` image. The bot makes only OUTBOUND websocket connections — to the
+# server over fly's private 6PN network (ws://battletris.internal:8080), in
+# plaintext — so there's no inbound port and no TLS, which keeps the static
+# binary free of any C deps (no openssl/ring/aws-lc). One image; each fly machine
+# becomes a distinctly-named bot from its FLY_REGION.
+
+FROM rust:1-bookworm AS builder
+WORKDIR /build
+
+RUN rustup target add x86_64-unknown-linux-musl \
+ && apt-get update && apt-get install -y --no-install-recommends musl-tools \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY . .
+RUN cargo build -p bt-bot --release --target x86_64-unknown-linux-musl
+
+# ---- runtime: Chainguard distroless static (nonroot, no shell) ----
+FROM cgr.dev/chainguard/static:latest AS runtime
+COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/bt-bot /app/bt-bot
+ENTRYPOINT ["/app/bt-bot"]
