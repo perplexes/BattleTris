@@ -6,8 +6,33 @@
 //!   (c) Computer::take_turn never panics and actually changes game state.
 
 use bt_ai::{best_placement, eval_board, Computer, Placement};
-use bt_core::{Board, Game, Piece, PieceKind};
+use bt_core::{Board, Cell, Game, Piece, PieceKind};
 use proptest::prelude::*;
+
+// ---------------------------------------------------------------------------
+// INDEPENDENT eval_board characterization.
+//
+// `best_placement_attains_global_minimum_score` recomputes the minimum with the
+// SAME `eval_board`, so a mutant `eval_board -> 0.0` (or any monotone rescaling)
+// passes it — both the candidate score and the recomputed min collapse together.
+// These pin the MEANING of eval_board WITHOUT routing through best_placement, by
+// constructing two hand-built boards that differ in exactly one structural way
+// and asserting the score moves the RIGHT direction. A constant/zeroed eval, a
+// dropped term, or a flipped sign breaks at least one of them.
+// ---------------------------------------------------------------------------
+
+/// A solid (color) cell for stacking test boards.
+fn brick() -> Cell {
+    Cell::color(1)
+}
+
+/// Fill column `x` of `board` solidly from row `top_y` down to the floor.
+fn fill_column_from(board: &mut Board, x: i32, top_y: i32) {
+    for y in top_y..board.height {
+        board.set(x, y, Some(brick()));
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 // Strategies
@@ -209,6 +234,158 @@ proptest! {
     }
 }
 
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    /// A board with a BURIED HOLE scores strictly WORSE (higher) than the same
+    /// board with the hole filled. We hold the column TOP constant across both
+    /// boards (so variance + height penalties are identical), so the ONLY delta
+    /// is the hole penalty. Kills `eval_board -> 0.0`, a dropped hole term, or a
+    /// hole penalty whose sign rewards holes.
+    #[test]
+    fn buried_hole_scores_strictly_worse(
+        cx in 0i32..10,
+        // Stack height above the hole (>=1 so the hole is genuinely covered).
+        cover in 1i32..6,
+    ) {
+        let h = 28;
+        // hole sits just under the cover; floor cell stays filled so the top of
+        // the column is identical in both boards.
+        let top_y = h - cover - 2;       // topmost filled row (same in both)
+        let hole_y = h - cover - 1;      // the cell we toggle
+        prop_assume!(top_y >= 0 && hole_y < h - 1);
+
+        // no_hole: column solid from top_y to floor (no empty cells below top).
+        let mut no_hole = Board::standard(false);
+        fill_column_from(&mut no_hole, cx, top_y);
+
+        // with_hole: same, but punch out hole_y (covered by >=1 brick above it).
+        let mut with_hole = no_hole.clone();
+        with_hole.set(cx, hole_y, None);
+
+        // Sanity: tops are identical (top filled cell unchanged).
+        prop_assert!(with_hole.occupied(cx, top_y) && no_hole.occupied(cx, top_y),
+            "column top must be filled in both boards");
+        prop_assert!(!with_hole.occupied(cx, hole_y), "the hole must actually be empty");
+
+        let s_no_hole = eval_board(&no_hole);
+        let s_with_hole = eval_board(&with_hole);
+        prop_assert!(
+            s_with_hole > s_no_hole + 1.0,
+            "a buried hole must raise the score: with_hole={} vs no_hole={} (col {}, cover {})",
+            s_with_hole, s_no_hole, cx, cover
+        );
+    }
+
+    /// A LOWER, FLATTER stack scores better (lower) than a TALLER, ROUGHER one.
+    /// Two sub-claims in one construction:
+    ///  * Lower is better: a 1-high single-column stack vs an H-high one (same
+    ///    column) — the taller stack has the larger height + variance penalties.
+    ///  * No full rows in either (only one column filled), so the line bonus
+    ///    never confounds it.
+    #[test]
+    fn taller_stack_scores_worse(
+        cx in 0i32..10,
+        tall in 6i32..24,
+    ) {
+        let h = 28;
+        // short: just the floor cell in column cx.
+        let mut short = Board::standard(false);
+        short.set(cx, h - 1, Some(brick()));
+        // tall: column cx filled `tall` rows high (top at h-tall).
+        let mut taller = Board::standard(false);
+        fill_column_from(&mut taller, cx, h - tall);
+
+        prop_assert!(
+            eval_board(&taller) > eval_board(&short) + 1.0,
+            "taller stack must score worse: tall={} short={} (col {}, height {})",
+            eval_board(&taller), eval_board(&short), cx, tall
+        );
+    }
+
+    /// A FLAT full-width-but-one stack scores better than a ROUGH one of the same
+    /// max height (variance term). Both leave column 9 empty so NO row is ever
+    /// complete (no line bonus) and neither has holes (each column is solid from
+    /// its own top to the floor). Same global top (max height k), so the height
+    /// penalty is identical — only the variance differs.
+    #[test]
+    fn rough_surface_scores_worse_than_flat(
+        k in 4i32..18,
+    ) {
+        let h = 28;
+        let flat_top = h - k;
+        // flat: columns 0..=8 all filled to the same height; column 9 empty.
+        let mut flat = Board::standard(false);
+        for x in 0..9 {
+            fill_column_from(&mut flat, x, flat_top);
+        }
+        // rough: columns 0..=8 alternate between max height k and a low stub
+        // (height 1), so the surface is jagged. Same MAX height (a full-k column
+        // exists), column 9 empty. No holes (each column solid to the floor).
+        let mut rough = Board::standard(false);
+        for x in 0..9 {
+            let col_top = if x % 2 == 0 { flat_top } else { h - 1 };
+            fill_column_from(&mut rough, x, col_top);
+        }
+        // Confirm the max height matches (so global top, hence height_pen, agrees).
+        prop_assert!(rough.occupied(0, flat_top), "rough must reach the flat max height");
+
+        prop_assert!(
+            eval_board(&rough) > eval_board(&flat) + 1.0,
+            "a rough surface must score worse than a flat one of equal max height: \
+             rough={} flat={} (k={})",
+            eval_board(&rough), eval_board(&flat), k
+        );
+    }
+
+    /// A board with a COMPLETED line scores better (lower) than the same board
+    /// one cell short of completing it. Construction: a SOLID block of `rows`
+    /// full rows sitting on the floor (so there are no holes underneath) vs the
+    /// same block with one corner cell of the TOP row removed — nothing is above
+    /// it, so the incomplete board just has one fewer complete line (and no
+    /// covered hole at the gap). The block is tall enough that its top is ABOVE
+    /// the midline (top_row < MIDLINE = 14), where `eval_board` rewards each
+    /// cleared line with a POSITIVE bonus it SUBTRACTS — so the completed board,
+    /// with one extra line, must score strictly lower. (Below the midline the
+    /// original deliberately PENALISES sub-tetris clears, so this property
+    /// targets the rewarding branch.) Kills a dropped/sign-flipped line bonus.
+    #[test]
+    fn completing_a_line_scores_better(
+        rows in 15i32..24,
+        gap in 0i32..10,
+    ) {
+        let w = 10;
+        let h = 28;
+        let top_row = h - rows; // topmost full row of the block (< MIDLINE)
+        prop_assert!(top_row < 14, "block top must be above the midline for the rewarding branch");
+        // complete: a solid block of `rows` full rows resting on the floor.
+        let mut complete = Board::standard(false);
+        for y in top_row..h {
+            for x in 0..w {
+                complete.set(x, y, Some(brick()));
+            }
+        }
+        // incomplete: remove the gap cell from the TOP row — nothing is above it,
+        // so it's not a covered hole; the column's top simply drops by one and
+        // that row is no longer complete.
+        let mut incomplete = complete.clone();
+        incomplete.set(gap, top_row, None);
+
+        // Sanity: complete has `rows` full rows; incomplete has one fewer.
+        let full_rows = |b: &Board| (0..h).filter(|&y| (0..w).all(|x| b.occupied(x, y))).count();
+        prop_assert_eq!(full_rows(&complete), rows as usize, "complete must have all rows full");
+        prop_assert_eq!(full_rows(&incomplete), (rows - 1) as usize,
+            "incomplete must have exactly one fewer full row");
+
+        prop_assert!(
+            eval_board(&complete) < eval_board(&incomplete),
+            "a completed line must score better than an incomplete one: \
+             complete={} incomplete={} (rows {}, gap {})",
+            eval_board(&complete), eval_board(&incomplete), rows, gap
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // (c) Computer::take_turn never panics and advances game state
 // ---------------------------------------------------------------------------
@@ -284,5 +461,57 @@ proptest! {
             piece_x_before, piece_x_after,
             piece_orient_before, piece_orient_after,
         );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// `take_turn` must actually STEER the piece to `best_placement`'s target,
+    /// not just hard-drop it where it spawned. "Anything changed" (above) is too
+    /// weak: a driver that calls `ai_begin_drop()` without any rotate/move passes
+    /// it (the falling piece still moves down). Here we compute the target
+    /// independently, and on a board where the target (x, orientation) DIFFERS
+    /// from the spawn pose, we assert the piece reached EXACTLY that pose BEFORE
+    /// the drop tick (begin_drop only engages the fast cadence — it doesn't move
+    /// the piece until the next tick). A "skip the alignment" mutant leaves the
+    /// piece at spawn and fails.
+    #[test]
+    fn take_turn_steers_piece_to_best_placement(
+        seed in any::<u64>(),
+        pre_ticks in 0u64..500u64,
+    ) {
+        let mut g = Game::new(seed);
+        for _ in 0..pre_ticks {
+            if g.is_game_over() { break; }
+            g.tick(16);
+        }
+        if g.is_game_over() { return Ok(()); }
+        let Some(piece) = g.current_piece().cloned() else { return Ok(()); };
+
+        // Independent target (same search the driver uses).
+        let target = best_placement(g.board(), &piece);
+        let (spawn_x, spawn_o) = (piece.x, piece.orientation);
+
+        // Only interesting when the AI must MOVE/ROTATE off the spawn pose.
+        prop_assume!((target.x, target.orientation) != (spawn_x, spawn_o));
+
+        let mut ernie = Computer::new();
+        ernie.take_turn(&mut g);
+
+        // Right after take_turn (no tick yet) the piece must sit at the target —
+        // the driver rotated then slid it there. (If the slide were blocked the
+        // target wouldn't have been an enterable/reachable best_placement; the
+        // companion enterability property guards that.)
+        let Some(after) = g.current_piece() else { return Ok(()); };
+        prop_assert_eq!(
+            (after.x, after.orientation),
+            (target.x, target.orientation),
+            "take_turn did not steer to best_placement: spawn=({},{}) target=({},{}) got=({},{})",
+            spawn_x, spawn_o, target.x, target.orientation, after.x, after.orientation
+        );
+        // And it genuinely left the spawn pose (non-vacuity).
+        prop_assert_ne!((after.x, after.orientation), (spawn_x, spawn_o),
+            "take_turn left the piece at its spawn pose despite a differing target");
     }
 }

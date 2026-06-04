@@ -209,18 +209,39 @@ proptest! {
     }
 
     // -----------------------------------------------------------------------
-    // (c4) No panics on arbitrary byte-string secrets (any length, any bytes).
+    // (c4) ANY byte-string secret round-trips: for every generated secret — empty,
+    //      arbitrary binary, non-alpha — `verify_token_with(s, issue_token_with(s,
+    //      name, iat))` must return `Some(name)`, not merely "no panic". The old
+    //      no-panic-only check let a mutant that REJECTS non-alpha (or empty)
+    //      secrets pass — issuing/verifying both silently failing in the same way.
+    //      Here we DEMAND the name comes back, so a secret-validation regression
+    //      that breaks signing/verification for binary secrets is caught.
     // -----------------------------------------------------------------------
     #[test]
-    fn verify_with_arbitrary_secret_never_panics(
-        raw in "[a-zA-Z]{1,20}",
+    fn arbitrary_secret_round_trips_to_the_name(
+        // `valid_name` survives sanitization to itself, so the recovered name is
+        // exactly `name` (no re-sanitize surprise).
+        name in valid_name(),
         secret in prop::collection::vec(any::<u8>(), 0..64),
     ) {
-        let Some(clean) = sanitize_name(&raw) else {
-            return Ok(());
-        };
-        let token = issue_token_with(&secret, &clean, IAT);
-        let _ = verify_token_with(&secret, &token);
+        let token = issue_token_with(&secret, &name, IAT);
+        prop_assert_eq!(
+            verify_token_with(&secret, &token),
+            Some(name.clone()),
+            "issue+verify under secret of len {} must recover the name {:?}",
+            secret.len(), name
+        );
+    }
+
+    /// The EMPTY secret specifically must also round-trip (a common edge a
+    /// "reject empty key" mutant would break). Covered as a dedicated case so the
+    /// random `0..64` strategy isn't relied on to hit length 0 often.
+    #[test]
+    fn empty_secret_round_trips(name in valid_name()) {
+        let secret: Vec<u8> = Vec::new();
+        let token = issue_token_with(&secret, &name, IAT);
+        prop_assert_eq!(verify_token_with(&secret, &token), Some(name.clone()),
+            "the empty secret must still sign+verify the name {:?}", name);
     }
 
     // -----------------------------------------------------------------------

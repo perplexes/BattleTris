@@ -378,6 +378,24 @@ mod tests {
         ]
     }
 
+    /// Strategy: EVERY legal client input variant (the exact set
+    /// `is_legal_client_input` admits). Used to prove each one is ACCEPTED — so
+    /// dropping any single arm from the allow-list (e.g. removing `Rotate`) is
+    /// caught.
+    fn legal_client_input() -> impl Strategy<Value = Input> {
+        prop_oneof![
+            Just(Input::MoveLeft),
+            Just(Input::MoveRight),
+            Just(Input::Rotate),
+            Just(Input::SoftDrop),
+            Just(Input::BeginDrop),
+            (0u32..10u32).prop_map(Input::LaunchWeapon),
+            (0i32..34i32).prop_map(Input::BuyWeapon),
+            (0i32..34i32).prop_map(Input::SellWeapon),
+            Just(Input::LeaveBazaar),
+        ]
+    }
+
     /// Strategy: legal client inputs that must NEVER change a player's funds via
     /// the `apply_input` call itself (funds may only change later, in the engine
     /// tick, from line clears). Excludes SoftDrop (can trigger a lock+clear in
@@ -515,6 +533,49 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Property (b'): EVERY legal client input variant is ACCEPTED outside the
+    //   bazaar and advances `ack`. The existing acceptance test only ever feeds
+    //   `MoveLeft`, so removing any OTHER arm from `is_legal_client_input` (e.g.
+    //   `Rotate`, `SoftDrop`, `LaunchWeapon`, `LeaveBazaar`) still passed — the
+    //   accepted path for those variants was unproven. A fresh Bout (no ticks ->
+    //   never in the bazaar) with a fresh seq must accept each variant and move
+    //   that side's ack to the applied seq.
+    // -----------------------------------------------------------------------
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn every_legal_client_input_is_accepted_outside_bazaar(
+            seed_a in any::<u64>(),
+            seed_b in any::<u64>(),
+            side_idx in 0usize..2,
+            seq in 1u64..=u64::MAX,
+            input in legal_client_input(),
+        ) {
+            let mut b = Bout::new(seed_a, seed_b);
+            let side = if side_idx == 0 { Side::A } else { Side::B };
+
+            // Cross-check: the gate function itself must admit this variant.
+            prop_assert!(is_legal_client_input(&input),
+                "legal_client_input() produced a variant the gate rejects: {:?}", input);
+            // Fresh Bout is never in the bazaar, so a fresh-seq legal input is accepted.
+            prop_assert!(!b.versus.game(side).is_in_bazaar(), "fresh bout must not be in the bazaar");
+
+            let ack_before = b.snapshot_for(side, false).ack;
+            let accepted = b.apply_input(side, &input, seq);
+            prop_assert!(accepted,
+                "legal client input {:?} (seq {}, ack {}) was rejected outside the bazaar",
+                input, seq, ack_before);
+
+            // ack advanced to this seq for THIS side (and only this side).
+            prop_assert_eq!(b.snapshot_for(side, false).ack, seq,
+                "ack must advance to the applied seq for {:?}", input);
+            prop_assert_eq!(b.snapshot_for(side.other(), false).ack, 0,
+                "the other side's ack must be untouched by {:?}", input);
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Property (c): INJECTION ORACLE. A non-economic legal input (move / rotate /
     //   drop / launch) must NEVER change a player's funds when applied — funds
     //   may only move later, inside the engine tick, from real line clears. So a
@@ -619,6 +680,73 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property (d): `Bout::to_replay` REPLAYS BIT-EXACT. The server records every
+    //   accepted client input (stamped with the tick) and exports the match as a
+    //   VersusReplay; a VersusReplayPlayer must reconstruct BOTH boards and the
+    //   result exactly. `to_replay` had ZERO coverage, so a mutant that dropped a
+    //   frame, mis-stamped its tick, swapped the side field, or used the wrong
+    //   seed sailed through. Here we drive a real bout with random accepted inputs
+    //   + ticks, export, replay, and compare.
+    // -----------------------------------------------------------------------
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(96))]
+
+        #[test]
+        fn to_replay_reconstructs_the_match_bit_exact(
+            seed_a in any::<u64>(),
+            seed_b in any::<u64>(),
+            // (side, input, then this many ticks) — interleave inputs with ticks
+            // so frames land on varied ticks.
+            steps in prop::collection::vec(
+                (0usize..2, legal_client_input(), 0u32..8),
+                0..200,
+            ),
+        ) {
+            use bt_replay::VersusReplayPlayer;
+
+            // NOTE: no out-of-band arsenal grants — the replay reconstructs the
+            // match from the SEEDS + the recorded INPUT stream alone, so any state
+            // change that didn't come through a recorded input (a direct
+            // grant_weapon) would legitimately diverge. LaunchWeapon is therefore a
+            // no-op here on both sides (its acceptance is covered separately); what
+            // this property pins is that the recorded inputs + ticks replay exactly.
+            let mut b = Bout::new(seed_a, seed_b);
+            let mut next_seq = [1u64, 1u64];
+
+            for (side_idx, input, ticks) in steps {
+                if b.is_over() { break; }
+                let side = if side_idx == 0 { Side::A } else { Side::B };
+                let seq = next_seq[side_idx];
+                next_seq[side_idx] += 1;
+                let _ = b.apply_input(side, &input, seq);
+                for _ in 0..ticks {
+                    if b.is_over() { break; }
+                    b.tick(16);
+                }
+            }
+
+            let live_a = b.versus.game(Side::A).export_board();
+            let live_b = b.versus.game(Side::B).export_board();
+            let live_result = b.result();
+
+            // Export + replay.
+            let replay = b.to_replay(TICK_MS, "pbt");
+            // Round-trip through JSON too (the on-disk form), then replay.
+            let replay = bt_replay::VersusReplay::from_json(&replay.to_json())
+                .expect("to_replay JSON must parse");
+            let mut player = VersusReplayPlayer::new(replay);
+            player.run_to_end();
+
+            prop_assert_eq!(player.game(true).export_board(), live_a,
+                "replayed Side A board must match the live bout");
+            prop_assert_eq!(player.game(false).export_board(), live_b,
+                "replayed Side B board must match the live bout");
+            prop_assert_eq!(player.result(), live_result,
+                "replayed match result must match the live bout");
         }
     }
 

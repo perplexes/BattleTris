@@ -112,6 +112,19 @@ fn apply_op(g: &mut Game, rec: &mut Recorder, o: &Op) {
     }
 }
 
+/// A vs-computer-legal player input (the human side only — Ernie is regenerated
+/// from the seed, never recorded). Excludes weapon/score injections that aren't
+/// part of a normal vs-computer recording.
+fn vs_computer_input() -> impl Strategy<Value = Input> {
+    prop_oneof![
+        Just(Input::MoveLeft),
+        Just(Input::MoveRight),
+        Just(Input::Rotate),
+        Just(Input::BeginDrop),
+        Just(Input::SoftDrop),
+    ]
+}
+
 /// Random input for a Versus replay frame (two sides, no relay events needed
 /// for the VersusReplay path — side-crossing relay happens inside Versus).
 fn versus_input() -> impl Strategy<Value = Input> {
@@ -219,6 +232,63 @@ proptest! {
             live,
             "replay diverged from the live recording"
         );
+    }
+
+    // ── (a′) RECORD → REPLAY for a VS-COMPUTER match ────────────────────────
+    //
+    // `random_replay` only ever builds `Mode::Practice` replays, so the whole
+    // VsComputer reconstruction path (Ernie regenerated from the seed, the relay
+    // re-run) was UNTESTED by the property suite — a mutant in
+    // `ReplayPlayer::new`'s `Mode::VsComputer` arm, or in how `step` ticks the Vs
+    // engine, would not be caught. Here we record a real vs-computer match with
+    // random HUMAN inputs, then replay it in VsComputer mode and assert BOTH
+    // boards (human + Ernie) AND the match result reconstruct exactly.
+    #[test]
+    fn vs_computer_record_replay_bit_identity(
+        seed in any::<u32>(),
+        // Ernie difficulty index into bt_ai::AI_LEVELS (0 = Comatose .. 14 = Bionic).
+        level in 0u32..(bt_ai::AI_LEVELS.len() as u32),
+        // (tick, input) pairs, sorted, applied to the human side during the run.
+        script in prop::collection::vec((0u32..600u32, vs_computer_input()), 0..64),
+    ) {
+        use bt_ai::VsComputer;
+
+        let total = 600u32;
+        let mut sorted = script.clone();
+        sorted.sort_by_key(|(t, _)| *t);
+
+        let mut vs = VsComputer::new(seed as u64, level as usize);
+        let mut rec = Recorder::new(seed, Mode::VsComputer, Some(level), DT, "pbt");
+        let mut si = 0usize;
+        for t in 0..total {
+            // Apply every input stamped at tick t to the HUMAN side, recording it.
+            while si < sorted.len() && sorted[si].0 == t {
+                let inp = sorted[si].1.clone();
+                inp.apply_to_game(vs.player_mut());
+                rec.record(inp);
+                si += 1;
+            }
+            vs.tick(DT);
+            let _ = vs.drain_events();
+            rec.on_tick();
+        }
+        let live_player = fingerprint(vs.player());
+        let live_ai = fingerprint(vs.ai());
+        let live_result = vs.result();
+
+        // Replay it (VsComputer mode -> Ernie regenerated, relay re-run).
+        let replay = rec.to_replay();
+        prop_assert_eq!(replay.mode, Mode::VsComputer, "recorded mode must be VsComputer");
+        let mut player = ReplayPlayer::new(replay);
+        player.run_to_end();
+
+        prop_assert_eq!(fingerprint(player.player()), live_player,
+            "vs-computer replay diverged on the HUMAN board");
+        let replay_ai = player.ai().expect("VsComputer replay must expose Ernie's board");
+        prop_assert_eq!(fingerprint(replay_ai), live_ai,
+            "vs-computer replay diverged on ERNIE's board");
+        prop_assert_eq!(player.result(), live_result,
+            "vs-computer replay diverged on the match result");
     }
 
     // ── (b) seek(n) == n × step() ───────────────────────────────────────────
