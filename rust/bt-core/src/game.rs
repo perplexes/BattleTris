@@ -330,11 +330,16 @@ impl Game {
             // (`FundsStolen`), faithful to BTScoreManager.C:154-202.
             let gained = if self.weapons.is_active(WeaponToken::Mondale) {
                 let kept = (clear.funds as f64 * (1.0 - BT_MONDALE_RATE)) as i64;
-                // The attacker's cut is reconstructed from the victim's already-
-                // TRUNCATED kept funds, exactly as BTScoreManager.C:154-160 does
-                // (`(1/(1-rate)) * kept_delta * rate`) — so it matches the original
-                // to the bean (the double-truncation can drop 1, like the original).
-                let tax = (((1.0 / (1.0 - BT_MONDALE_RATE)) * kept as f64) * BT_MONDALE_RATE) as i64;
+                // CORRECTNESS over faithfulness: the attacker gains EXACTLY what the
+                // victim lost (`clear.funds - kept`), so the tax CONSERVES money.
+                // The 1994 original (BTScoreManager.C:154-160) reconstructed the cut
+                // from the victim's already-TRUNCATED funds delta sent over the P2P
+                // wire — a second independent truncation with no shared remainder,
+                // which DESTROYS up to 2 funds per clear (the victim loses more than
+                // the attacker gains; see `mondale_transfer_conserves_funds`). We
+                // have full information at the relay, so we transfer the exact
+                // remainder instead. (Diverges from the binary by <=2 funds/clear.)
+                let tax = clear.funds as i64 - kept;
                 if tax != 0 {
                     self.events.push(GameEvent::FundsStolen(tax));
                 }

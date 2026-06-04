@@ -415,13 +415,14 @@ proptest! {
     }
 }
 
-/// MONDALE 30% tax: the victim keeps (1-0.30) of newly-banked line funds; the
-/// attacker's cut is reconstructed from the truncated kept funds. Independent
-/// oracle for the EXACT bean arithmetic from BTScoreManager.C:154-160. We build a
-/// full bottom row of known die value, flush Mondale active, then clear it and
-/// check kept == floor(funds*0.70) and stolen == floor((1/0.70)*kept*0.30).
+/// MONDALE 30% tax: the victim keeps floor((1-0.30)*funds) of newly-banked line
+/// funds; the attacker gets the EXACT remainder (funds - kept) so the transfer
+/// CONSERVES money (see `mondale_transfer_conserves_funds`). NB the engine no
+/// longer uses the original's leaky bean reconstruction
+/// `floor((1/0.70)*kept*0.30)` — but for these width-multiple die values the two
+/// formulas COINCIDE, so this also pins faithfulness-where-1994-agrees.
 #[test]
-fn mondale_taxes_thirty_percent_with_the_originals_bean_arithmetic() {
+fn mondale_taxes_thirty_percent_keeping_the_transfer_conserved() {
     // Try several die values so `funds` spans a range and truncation varies.
     for die in 1u8..=6 {
         let mut g = Game::new(1);
@@ -439,9 +440,11 @@ fn mondale_taxes_thirty_percent_with_the_originals_bean_arithmetic() {
         let value = w * die as i32;
         let raw_funds = value; // lines == 1
 
-        // Independent oracle (BTScoreManager.C:154-160, mirrored in game.rs).
+        // Independent oracle: victim keeps floor(70%), attacker gets the exact
+        // remainder (conserving). For width-multiple raw_funds this equals the
+        // original bean value floor((1/0.70)*kept*0.30) too.
         let kept = (raw_funds as f64 * (1.0 - BT_MONDALE_RATE)) as i64;
-        let tax = (((1.0 / (1.0 - BT_MONDALE_RATE)) * kept as f64) * BT_MONDALE_RATE) as i64;
+        let tax = raw_funds as i64 - kept;
 
         // Drive a lock that clears the prebuilt row; collect FundsStolen.
         g.begin_drop();
@@ -466,6 +469,76 @@ fn mondale_taxes_thirty_percent_with_the_originals_bean_arithmetic() {
         assert_eq!(stolen, tax,
             "Mondale stolen cut must match the original bean arithmetic: die={die} tax={tax} got={stolen}");
     }
+}
+
+/// Fill row `y` completely with dice whose values SUM to `target` (each die in
+/// 1..=6, so `target` must be in `[width, 6*width]`). Lets us drive a clear whose
+/// `funds` (= value*lines, lines==1) is an EXACT chosen G — including the
+/// non-multiple-of-width totals the uniform-row tests above never reach.
+fn fill_bottom_row_to_sum(g: &mut Game, target: i32) {
+    let (w, h) = (g.board().width, g.board().height);
+    let mut vals = vec![1i32; w as usize]; // min sum = w
+    let mut remaining = target - w; // distribute the surplus, each cell up to +5
+    for v in vals.iter_mut() {
+        let add = remaining.min(5);
+        *v += add;
+        remaining -= add;
+    }
+    assert_eq!(remaining, 0, "target {target} out of [{w}, {}]", 6 * w);
+    for (x, v) in vals.iter().enumerate() {
+        g.board_mut().set(x as i32, h - 1, Some(Cell::die(*v as u8)));
+    }
+}
+
+/// FIRST-PRINCIPLES correctness (NOT faithfulness): Mondale is a fund TRANSFER,
+/// so it must CONSERVE money — the attacker gains exactly what the victim loses,
+/// relative to the un-taxed earning G. Concretely: victim's banked gain (`kept`)
+/// plus the attacker's stolen cut (`stolen`) must equal the raw line-clear value
+/// G. This owes nothing to the 1994 original; it's just "a tax can't make money
+/// vanish." Driven through the REAL engine for every reachable G.
+#[test]
+fn mondale_transfer_conserves_funds() {
+    let mut violations: Vec<(i32, i64, i64)> = Vec::new(); // (G, kept, stolen)
+    let w = Game::new(0).board().width;
+    for g_target in w..=(6 * w) {
+        let mut g = Game::new(7);
+        assert!(receive_and_flush(&mut g, WeaponToken::Mondale), "Mondale active");
+        let funds_before = g.score().funds;
+        fill_bottom_row_to_sum(&mut g, g_target);
+
+        g.begin_drop();
+        let (mut stolen, mut raw_funds, mut cleared) = (0i64, 0i64, false);
+        for _ in 0..1200 {
+            g.tick(16);
+            for e in g.take_events() {
+                match e {
+                    GameEvent::FundsStolen(a) => stolen += a,
+                    GameEvent::Locked { lines, funds, .. } if lines > 0 => {
+                        raw_funds = funds as i64;
+                        cleared = true;
+                    }
+                    _ => {}
+                }
+            }
+            if cleared || g.is_game_over() {
+                break;
+            }
+        }
+        assert!(cleared, "row must clear for G={g_target}");
+        assert_eq!(raw_funds, g_target as i64, "sanity: clear funds == chosen G");
+        let kept = g.score().funds - funds_before;
+        if kept + stolen != raw_funds {
+            violations.push((g_target, kept, stolen));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "Mondale transfer DESTROYS funds for {}/{} values (victim loses more than the \
+         attacker gains). Examples (G, victim_kept, attacker_stolen): {:?}",
+        violations.len(),
+        6 * w - w + 1,
+        &violations[..violations.len().min(8)]
+    );
 }
 
 // ===========================================================================
