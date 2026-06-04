@@ -1,2 +1,7 @@
 /target
 /bt-wasm/pkg
+# Runtime artifacts a server run / test writes into the crate dir
+ratings.json
+replays.db
+replays.db-shm
+replays.db-wal
