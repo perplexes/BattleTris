@@ -98,11 +98,14 @@ function showGame() {
     lobbyActive = false;
     lobbyScreen.style.display = 'none';
     gameScreen.style.display = '';
+    // The mobile touch-control bar is only useful in a game (CSS gates on this).
+    document.body.classList.add('in-game');
     applyBoardScale();
 }
 
 function showLobby() {
     lobbyActive = true;
+    document.body.classList.remove('in-game');
     gameScreen.style.display = 'none';
     lobbyScreen.style.display = '';
 }

@@ -755,8 +755,18 @@ body.bazaar-open #touchControls { display: none !important; }
         padding: 6px 4px;
     }
 
-    /* Lobby stacks into one column on narrow screens */
+    /* Lobby stacks into one column on narrow screens. Flatten the two desktop
+       columns (display: contents) so we can interleave them into a sensible
+       phone order: logo, player list, Challenge/actions, stats, then Play
+       Computer last (instead of list → Play Computer → logo → actions). */
     .lobby-card { flex-direction: column; }
+    .lobby-left, .lobby-right { display: contents; }
+    .lobby-logo-row { order: 1; }
+    .lobby-listbox  { order: 2; }
+    .lobby-actions  { order: 3; }
+    .online-status  { order: 4; }
+    .lobby-statsbox { order: 5; }
+    .lobby-frame    { order: 6; }
 
     /* The compact bars replace the desktop score/arsenal column. Keep Ernie's
        (vs-Computer) or the spy board visible — laid out SIDE BY SIDE with the
@@ -871,7 +881,9 @@ body.bazaar-open #touchControls { display: none !important; }
     }
 
     /* Touch control bar: fixed at bottom of screen */
-    .touch-controls {
+    /* Only in a game (body.in-game) — never on the lobby, where it'd overlap the
+       Play Computer frame. The bazaar page also hides it (body.bazaar-open). */
+    body.in-game .touch-controls {
         display: flex;
         position: fixed;
         bottom: 0;
