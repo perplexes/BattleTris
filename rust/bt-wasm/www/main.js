@@ -80,6 +80,7 @@ const onlineListEl = document.getElementById('onlineList');
 const challengeBtn = document.getElementById('challengeBtn');
 const updateBtn = document.getElementById('updateBtn');
 const availableToggle = document.getElementById('availableToggle');
+const availableToggleGame = document.getElementById('availableToggleGame');
 const statsPanelEl = document.getElementById('statsPanel');
 const playingStatusEl = document.getElementById('playingStatus');
 const ernieSlider = document.getElementById('ernieSlider');
@@ -179,12 +180,20 @@ async function challengeSelected() {
     }
 }
 
+// "Open to matches" lives in two places — the lobby and the in-game top bar —
+// so keep both checkboxes showing the same state.
+function syncAvailableUI(v) {
+    if (availableToggle) availableToggle.checked = v;
+    if (availableToggleGame) availableToggleGame.checked = v;
+}
+
 // Open-to-matches: become challengeable AND eligible for auto-pairing.
 async function setAvailable(v) {
     if (v) await ensureIdentity();
     if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'available', value: v, name: playerName, token: identityToken }));
     }
+    syncAvailableUI(v);
 }
 
 // An incoming challenge invite (server -> us).
@@ -1458,6 +1467,7 @@ if (ernieSlider) {
 if (updateBtn) updateBtn.addEventListener('click', () => requestPlayerList());
 if (challengeBtn) challengeBtn.addEventListener('click', () => challengeSelected());
 if (availableToggle) availableToggle.addEventListener('change', () => setAvailable(availableToggle.checked));
+if (availableToggleGame) availableToggleGame.addEventListener('change', () => setAvailable(availableToggleGame.checked));
 const challengeAcceptBtn = document.getElementById('challengeAccept');
 const challengeDeclineBtn = document.getElementById('challengeDecline');
 if (challengeAcceptBtn) challengeAcceptBtn.addEventListener('click', () => respondChallenge(true));
@@ -1481,8 +1491,10 @@ function leaveToLobby() {
     showLobby();
     if (forfeiting && ws) { try { ws.close(); } catch (_) {} }
 }
+const leaveGameTop = document.getElementById('leaveGameTop');
 if (backToLobbyBtn) backToLobbyBtn.addEventListener('click', leaveToLobby);
 if (leaveGameBtn) leaveGameBtn.addEventListener('click', leaveToLobby);
+if (leaveGameTop) leaveGameTop.addEventListener('click', leaveToLobby);
 
 // ─── Bug report ─────────────────────────────────────────────────────────────
 // Capture a deterministic replay of the current game, upload it for a shareable

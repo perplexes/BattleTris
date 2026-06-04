@@ -108,6 +108,20 @@ body {
 /* ─── Game screen (BTGame.C): board left (fills height) + score/arsenal right ── */
 .game-screen { min-height: 100vh; }
 
+/* In-game top bar: Leave (left) + Open-to-matches toggle (right). Always shown
+   on the game screen, both desktop and mobile. */
+.game-topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 6px 14px;
+    background-color: #a8a8a8;                  /* gray66 */
+    border-bottom: 2px solid #808080;
+}
+.game-topbar #leaveGameTop { padding: 6px 14px; }
+.game-topbar-toggle { color: #000; white-space: nowrap; }
+
 .game-area {
     display: flex;
     gap: 22px;
@@ -729,6 +743,11 @@ body.bazaar-open #touchControls { display: none !important; }
     }
 
     /* Stack the game area vertically */
+    /* Compact top bar so it costs little vertical room above the board. */
+    .game-topbar { padding: 5px 8px; }
+    .game-topbar #leaveGameTop { font-size: 13px; padding: 7px 12px; }
+    .game-topbar-toggle { font-size: 13px; }
+
     .game-area {
         flex-direction: column;
         align-items: center;

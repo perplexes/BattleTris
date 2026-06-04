@@ -75,6 +75,17 @@
     <!-- ════════════════════ GAME SCREEN (BTGame.C) ════════════════════ -->
     <div id="gameScreen" class="screen game-screen" style="display:none;">
 
+        <!-- In-game top bar: always visible so you can bail out of a game (the
+             desktop Leave/New Game column is hidden on mobile) and flip your
+             match availability without trekking back to the lobby — handy when
+             you're deep in a vs-Computer game. -->
+        <div class="game-topbar">
+            <button id="leaveGameTop" class="lobby-btn">&#8592; Leave game</button>
+            <label class="lobby-toggle game-topbar-toggle">
+                <input id="availableToggleGame" type="checkbox"> Open to matches
+            </label>
+        </div>
+
         <!-- Mobile-only compact stats bar (shown above board on small screens) -->
         <div id="mobileStats" class="mobile-stats">
             <span><strong>Score:</strong> <span id="mobileScore">0</span></span>
