@@ -354,6 +354,50 @@ fn upbyside_line_clear_shifts_the_opposite_direction() {
     assert!(b.get(4, 5).is_none(), "the marker vacated its old cell");
 }
 
+use bt_core::Rng;
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// UPBYSIDE flip is an INVOLUTION (first-principles, NOT faithfulness): turning
+    /// the weapon ON mirrors the board top<->bottom, and turning it OFF mirrors it
+    /// back — so on-then-off must leave the board BYTE-IDENTICAL (a mirror is its
+    /// own inverse). Pinned with an independent reference: ON must equal the
+    /// hand-computed vertical mirror (catches a wrong-axis / partial flip), and OFF
+    /// must restore the original (catches an asymmetric on/off). No faithfulness
+    /// oracle checks either.
+    #[test]
+    fn upbyside_flip_on_then_off_is_an_involution(
+        fills in prop::collection::vec(
+            (0i32..BT_BOARD_WTH, 0i32..BT_BOARD_HGT, 1u8..=6u8), 0..50)
+    ) {
+        let mut rng = Rng::new(1);
+        let mut b = Board::standard(false); // human board: the flip actually happens
+        let (w, h) = (b.width as usize, b.height as usize);
+        for (x, y, v) in &fills {
+            b.set(*x, *y, Some(Cell::die(*v)));
+        }
+        let before = value_grid(&b);
+        // Independent reference for the ON flip: `before` with its rows reversed.
+        let mut expect_mirror = vec![None; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                expect_mirror[y * w + x] = before[(h - 1 - y) * w + x];
+            }
+        }
+
+        // ON: mirror top<->bottom.
+        b.apply_weapon(WeaponToken::Upbyside, &mut rng);
+        prop_assert_eq!(value_grid(&b), expect_mirror,
+            "Upbyside ON must mirror the board top<->bottom exactly");
+
+        // OFF: mirror back -> the involution.
+        b.revert_weapon(WeaponToken::Upbyside);
+        prop_assert_eq!(value_grid(&b), before,
+            "Upbyside on-then-off must round-trip the board (flip is its own inverse)");
+    }
+}
+
 // ===========================================================================
 // GROUP B — FUNDS EFFECTS (Reagan / Mondale / Keating), independent arithmetic.
 // ===========================================================================
