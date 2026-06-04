@@ -9,7 +9,7 @@
 //!       cells across both boards is conserved.
 
 use bt_core::versus::Side;
-use bt_core::{Versus, WeaponToken};
+use bt_core::{Cell, Versus, WeaponToken};
 use proptest::prelude::*;
 
 // ---- shared op type ---------------------------------------------------------
@@ -153,6 +153,52 @@ proptest! {
                 winner,
                 v.result()
             );
+        }
+    }
+}
+
+// ---- (b') RESULT LATCH after a FORCED top-out -------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// Force a real top-out (random play almost never reaches one), then verify
+    /// the latch holds. Side B's board is filled near-full with a DIAGONAL hole
+    /// so no row is ever complete — nothing clears it away — so B cannot place
+    /// pieces and tops out; result() then must stay fixed for all further play.
+    #[test]
+    fn result_latches_after_forced_topout(
+        seed_a in any::<u64>(),
+        seed_b in any::<u64>(),
+        extra in 1usize..120usize,
+    ) {
+        let mut v = Versus::new(seed_a, seed_b);
+        {
+            let b = v.game_mut(Side::B).board_mut();
+            let (w, h) = (b.width, b.height);
+            for y in 4..h {
+                for x in 0..w {
+                    if x != y % w {            // one empty cell per row -> never a full line
+                        b.set(x, y, Some(Cell::color(1)));
+                    }
+                }
+            }
+        }
+
+        // Drive B down until it tops out.
+        let mut r = 0;
+        for _ in 0..800 {
+            v.game_mut(Side::B).begin_drop();
+            v.tick(16);
+            r = v.result();
+            if r != 0 { break; }
+        }
+        prop_assert!(r != 0, "B did not top out from a near-full board");
+
+        // Latched: result is unchanged by any further ticks.
+        for _ in 0..extra {
+            v.tick(16);
+            prop_assert_eq!(v.result(), r, "result changed after latching to {}", r);
         }
     }
 }

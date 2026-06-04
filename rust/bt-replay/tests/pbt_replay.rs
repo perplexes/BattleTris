@@ -232,6 +232,32 @@ proptest! {
         );
     }
 
+    // ── (b″) BACKWARD seek rebuilds correctly ───────────────────────────────
+    //
+    // Forward seek is just stepping; a BACKWARD seek (target < current) takes
+    // seek's distinct rebuild-from-the-seeds path. Seek forward to `hi`, back to
+    // `lo`, and compare to a fresh player stepped to `lo`.
+    #[test]
+    fn seek_backward_rebuilds_correctly(
+        replay in random_replay(200, 64),
+        x in 0_u32..200_u32,
+        y in 0_u32..200_u32,
+    ) {
+        let hi = x.max(y).min(replay.tick_count);
+        let lo = x.min(y).min(replay.tick_count);
+
+        let mut p = ReplayPlayer::new(replay.clone());
+        p.seek(hi);
+        p.seek(lo); // backward (unless hi == lo) -> rebuild path
+
+        let mut q = ReplayPlayer::new(replay.clone());
+        for _ in 0..lo { if !q.step() { break; } }
+
+        prop_assert_eq!(p.tick_index(), q.tick_index(), "backward-seek tick_index mismatch");
+        prop_assert_eq!(fingerprint(p.player()), fingerprint(q.player()),
+            "backward-seek state mismatch (hi={}, lo={})", hi, lo);
+    }
+
     // ── (b′) VersusReplayPlayer seek(n) == n × step() ───────────────────────
     #[test]
     fn versus_seek_equals_step(

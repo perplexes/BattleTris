@@ -179,6 +179,12 @@ proptest! {
     fn client_keyframe_redacts_op_funds(
         seed in any::<u64>(),
         ops in prop::collection::vec(op(), 0..256),
+        // A NON-ZERO op_funds so the redaction is actually observable — without
+        // this the test was vacuous (op_funds defaults to 0, so a keyframe that
+        // failed to redact would still pass).
+        op_funds in 1i64..1_000_000,
+        op_score in 0i64..1_000_000,
+        op_lines in 0i64..1000,
     ) {
         let mut g = Game::new(seed);
         for o in &ops {
@@ -186,21 +192,30 @@ proptest! {
             apply(&mut g, o);
         }
         g.leave_bazaar();
+        // Plant a real opponent-funds mirror to redact.
+        g.receive_op_score(op_score, op_lines, op_funds);
 
         let full = g.snapshot_bytes();
         let client = g.client_keyframe_bytes();
 
-        // Restore the client keyframe; op_funds should be 0.
+        // Sanity: the FULL snapshot KEEPS op_funds (so the redaction check below
+        // isn't vacuous — op_funds really was non-zero pre-keyframe).
+        let mut h2 = Game::new(0);
+        prop_assert!(h2.restore_bytes(&full));
+        prop_assert_eq!(h2.score().op_funds, op_funds,
+            "full snapshot must preserve op_funds");
+
+        // The CLIENT keyframe must zero it.
         let mut h = Game::new(0);
         prop_assert!(h.restore_bytes(&client));
         prop_assert_eq!(h.score().op_funds, 0i64,
             "client keyframe must redact op_funds");
 
-        // All other score fields must be identical (restore from full for ref).
-        let mut h2 = Game::new(0);
-        prop_assert!(h2.restore_bytes(&full));
-        prop_assert_eq!(h.score().score,  h2.score().score);
-        prop_assert_eq!(h.score().funds,  h2.score().funds);
-        prop_assert_eq!(h.score().lines,  h2.score().lines);
+        // Every OTHER field is identical between client + full (only op_funds differs).
+        prop_assert_eq!(h.score().score,    h2.score().score);
+        prop_assert_eq!(h.score().funds,    h2.score().funds);
+        prop_assert_eq!(h.score().lines,    h2.score().lines);
+        prop_assert_eq!(h.score().op_score, h2.score().op_score);
+        prop_assert_eq!(h.score().op_lines, h2.score().op_lines);
     }
 }

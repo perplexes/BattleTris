@@ -217,3 +217,34 @@ proptest! {
         }
     }
 }
+
+/// Names that deliberately land whitespace and multibyte characters AT / around
+/// the MAX_NAME_LEN truncation boundary — where the `sanitize_name`
+/// non-idempotency bug lived (trim-then-truncate could strand a trailing space
+/// at char 32). Targets the exact failure mode, not just broad unicode.
+fn arb_cap_boundary_name() -> impl Strategy<Value = String> {
+    (
+        // up to 40 chars (incl. multibyte) so the boundary at 32 is well inside
+        prop::string::string_regex("[a-zA-Zé漢🙂0-9]{0,40}").unwrap(),
+        prop::string::string_regex("[ \t]{1,3}").unwrap(), // whitespace that may land on the cap
+        prop::string::string_regex("[a-z]{0,10}").unwrap(),
+    )
+        .prop_map(|(a, ws, b)| format!("{a}{ws}{b}"))
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(512))]
+
+    /// `sanitize_name` is idempotent AND returns a trimmed, cap-bounded string,
+    /// even when whitespace/multibyte chars straddle the MAX_NAME_LEN boundary.
+    #[test]
+    fn sanitize_idempotent_at_cap_boundary(raw in arb_cap_boundary_name()) {
+        let once = sanitize_name(&raw);
+        let twice = once.as_deref().and_then(sanitize_name);
+        prop_assert_eq!(&once, &twice, "sanitize_name not idempotent for {:?}", raw);
+        if let Some(s) = &once {
+            prop_assert_eq!(s.trim(), s.as_str(), "result has untrimmed whitespace: {:?}", s);
+            prop_assert!(s.chars().count() <= bt_identity::MAX_NAME_LEN, "result exceeds cap: {:?}", s);
+        }
+    }
+}

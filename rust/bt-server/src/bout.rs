@@ -378,20 +378,18 @@ mod tests {
         ]
     }
 
-    /// Strategy: a legal client input chosen from the full set of accepted
-    /// variants (Movement + shop).  All indices are kept within safe ranges so
-    /// `apply_input` can evaluate the full anti-cheat path.
-    fn legal_client_input() -> impl Strategy<Value = Input> {
+    /// Strategy: legal client inputs that must NEVER change a player's funds via
+    /// the `apply_input` call itself (funds may only change later, in the engine
+    /// tick, from line clears). Excludes SoftDrop (can trigger a lock+clear in
+    /// the call) and Buy/Sell (which legitimately change funds inside the
+    /// bazaar) so the injection oracle below has a clean "funds must not move".
+    fn noninjecting_input() -> impl Strategy<Value = Input> {
         prop_oneof![
             Just(Input::MoveLeft),
             Just(Input::MoveRight),
             Just(Input::Rotate),
-            Just(Input::SoftDrop),
             Just(Input::BeginDrop),
             (0u32..10u32).prop_map(Input::LaunchWeapon),
-            (0i32..10i32).prop_map(Input::BuyWeapon),
-            (0i32..10i32).prop_map(Input::SellWeapon),
-            Just(Input::LeaveBazaar),
         ]
     }
 
@@ -453,57 +451,42 @@ mod tests {
         #[test]
         fn seq_monotonicity_enforced(
             seed in any::<u64>(),
-            // A sequence of (seq, is_legal) pairs to drive the bout.
-            seqs in prop::collection::vec(
-                (1u64..=1000u64, any::<bool>()),
-                1..256,
-            ),
+            // Random (often out-of-order) seqs to exercise both stale-reject and
+            // fresh-accept. We never tick, so MoveLeft never locks -> the game
+            // never enters the bazaar -> a fresh legal seq MUST be accepted.
+            seqs in prop::collection::vec(1u64..=1000u64, 1..256),
         ) {
             let mut b = Bout::new(seed, seed.wrapping_add(1));
 
-            for (seq, pick_legal) in seqs {
-                // Always use Side::A with a simple legal input.
-                let input = Input::MoveLeft;
+            for seq in seqs {
                 let ack_before = b.snapshot_for(Side::A, false).ack;
-                let accepted = b.apply_input(Side::A, &input, seq);
+                let accepted = b.apply_input(Side::A, &Input::MoveLeft, seq);
 
-                if seq <= ack_before {
-                    // Must be rejected; ack must not go backward.
-                    prop_assert!(
-                        !accepted,
-                        "stale/duplicate seq {} (ack={}) was accepted",
-                        seq, ack_before
-                    );
-                    prop_assert_eq!(
-                        b.snapshot_for(Side::A, false).ack, ack_before,
-                        "ack moved backward after rejected stale seq {}", seq
-                    );
-                } else if accepted {
-                    // Accepted: ack must have advanced to seq.
-                    prop_assert_eq!(
-                        b.snapshot_for(Side::A, false).ack, seq,
-                        "ack did not advance to applied seq {}", seq
-                    );
+                // BICONDITIONAL: a legal non-bazaar input is accepted IFF its seq
+                // is fresh (strictly greater than the last ack). This requires
+                // the server to ACCEPT fresh inputs — a server that rejected
+                // everything (or accepted stale seqs) now fails.
+                prop_assert_eq!(accepted, seq > ack_before,
+                    "MoveLeft seq {} (ack {}): accepted={} (expected {})",
+                    seq, ack_before, accepted, seq > ack_before);
+
+                let ack_after = b.snapshot_for(Side::A, false).ack;
+                if accepted {
+                    prop_assert_eq!(ack_after, seq, "ack did not advance to applied seq {}", seq);
+                } else {
+                    prop_assert_eq!(ack_after, ack_before, "ack moved after a rejected seq {}", seq);
                 }
-                // If rejected for a reason other than stale seq (e.g. bazaar
-                // gate), the ack still must not exceed the seq we sent.
-                let _ = pick_legal; // consumed to suppress warning
             }
         }
     }
 
     // -----------------------------------------------------------------------
-    // Property (c): driving a Bout with random sequences of LEGAL inputs and
-    //   monotonically-increasing seqs never lets a side gain funds it didn't
-    //   legitimately earn via the engine.  Specifically: the only way funds
-    //   can increase from the initial 0 is through the game engine (e.g. line
-    //   clears), NOT through client-injected inputs. Relay-internal inputs are
-    //   never accepted, so funds can only come from actual gameplay.
-    //
-    //   We assert: funds on BOTH sides are always >= 0 and that applying legal
-    //   inputs never causes the SERVER's ack to go below its previous value
-    //   (no rewind possible).  We additionally verify that the total server-ack
-    //   for each side advances monotonically throughout the run.
+    // Property (c): INJECTION ORACLE. A non-economic legal input (move / rotate /
+    //   drop / launch) must NEVER change a player's funds when applied — funds
+    //   may only move later, inside the engine tick, from real line clears. So a
+    //   bug where e.g. `MoveLeft` granted +999 funds is caught directly (the
+    //   apply call would move funds). We also keep the funds >= 0 invariant after
+    //   the tick (legitimate clears never make funds negative).
     // -----------------------------------------------------------------------
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(128))]
@@ -512,54 +495,32 @@ mod tests {
         fn legal_inputs_never_inject_funds(
             seed_a in any::<u64>(),
             seed_b in any::<u64>(),
-            ops in prop::collection::vec(
-                // (side, legal_input)
-                (0usize..2, legal_client_input()),
-                0..256,
-            ),
+            ops in prop::collection::vec((0usize..2, noninjecting_input()), 0..256),
         ) {
             let mut b = Bout::new(seed_a, seed_b);
-            // Per-side strictly-increasing seq counters (start at 1 so first
-            // input satisfies seq > ack=0).
             let mut next_seq = [1u64, 1u64];
-            let mut last_ack = [0u64, 0u64];
 
             for (side_idx, input) in ops {
                 let side = if side_idx == 0 { Side::A } else { Side::B };
                 let seq = next_seq[side_idx];
                 next_seq[side_idx] += 1;
 
-                let accepted = b.apply_input(side, &input, seq);
+                let fa0 = b.versus.game(Side::A).score().funds;
+                let fb0 = b.versus.game(Side::B).score().funds;
 
-                // If accepted, ack must advance to seq.
-                if accepted {
-                    let new_ack = b.snapshot_for(side, false).ack;
-                    prop_assert!(
-                        new_ack >= last_ack[side_idx],
-                        "ack went backward: was {}, now {} after {:?}",
-                        last_ack[side_idx], new_ack, input
-                    );
-                    last_ack[side_idx] = new_ack;
-                }
+                let _ = b.apply_input(side, &input, seq);
 
-                // Tick the simulation so the engine has a chance to process
-                // effects and clear any pending transitions.
+                // The apply itself must inject NOTHING into either side's funds.
+                prop_assert_eq!(b.versus.game(Side::A).score().funds, fa0,
+                    "Side A funds changed by applying {:?} (injection!)", input);
+                prop_assert_eq!(b.versus.game(Side::B).score().funds, fb0,
+                    "Side B funds changed by applying {:?} (injection!)", input);
+
+                // Legitimate gameplay (line clears) happens in the tick; funds may
+                // rise but never go negative from client inputs.
                 b.tick(16);
-
-                // Funds on both sides must always be >= 0: legal inputs can't
-                // inject negative (stolen) funds.  They start at 0 and only
-                // rise via engine line-clear events — never fall below 0 from
-                // client inputs alone.
-                let funds_a = b.versus.game(Side::A).score().funds;
-                let funds_b = b.versus.game(Side::B).score().funds;
-                prop_assert!(
-                    funds_a >= 0,
-                    "Side A funds went negative ({}): possible injection", funds_a
-                );
-                prop_assert!(
-                    funds_b >= 0,
-                    "Side B funds went negative ({}): possible injection", funds_b
-                );
+                prop_assert!(b.versus.game(Side::A).score().funds >= 0, "Side A funds negative");
+                prop_assert!(b.versus.game(Side::B).score().funds >= 0, "Side B funds negative");
             }
         }
     }

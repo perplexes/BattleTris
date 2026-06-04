@@ -43,16 +43,6 @@ fn apply(g: &mut Game, op: &Op) {
     }
 }
 
-/// All buyable weapon tokens (tokens where a price is set).
-fn buyable_tokens() -> Vec<WeaponToken> {
-    WeaponToken::ALL.to_vec()
-}
-
-/// Strategy: pick a random token index into ALL.
-fn any_token() -> impl Strategy<Value = WeaponToken> {
-    (0..bt_core::weapons::BT_MAX_WEAPONS).prop_map(|i| WeaponToken::ALL[i])
-}
-
 // ---- (a) BOARD round-trip ---------------------------------------------------
 
 proptest! {
@@ -87,83 +77,68 @@ proptest! {
             "re-exported bytes must match original"
         );
 
-        // render_ids sees board cells (not the live falling piece) through the
-        // same code path; verify they match too.
-        let ids1 = g.export_board(); // already captured
-        let ids2 = g2.export_board();
-        prop_assert_eq!(ids1, ids2, "board cell exports must be identical after import");
+        // INDEPENDENT check: compare the board cell-by-cell via board().get()
+        // (a DIFFERENT accessor than the export codec), so a bug in
+        // export/import can't cancel out against itself.
+        let (b1, b2) = (g.board(), g2.board());
+        prop_assert_eq!(b1.width, b2.width);
+        prop_assert_eq!(b1.height, b2.height);
+        for y in 0..b1.height {
+            for x in 0..b1.width {
+                prop_assert_eq!(
+                    b1.get(x, y).map(|c| c.id()), b2.get(x, y).map(|c| c.id()),
+                    "board cell ({},{}) differs after import_board", x, y);
+            }
+        }
     }
 }
 
 // ---- (b) ARSENAL round-trip -------------------------------------------------
 
-#[derive(Debug, Clone)]
-enum ArsenalOp {
-    #[allow(dead_code)]
-    AddFunds(i64),
-    BuyToken(usize), // index into ALL
-    #[allow(dead_code)]
-    SellToken(usize),
-}
-
-fn arsenal_op() -> impl Strategy<Value = ArsenalOp> {
+/// One arsenal slot: a HOLE (-1, 0) or an occupied slot (valid token, qty).
+fn holey_slot() -> impl Strategy<Value = (i32, i32)> {
     prop_oneof![
-        2 => (1i64..=2000i64).prop_map(ArsenalOp::AddFunds),
-        3 => (0..bt_core::weapons::BT_MAX_WEAPONS).prop_map(ArsenalOp::BuyToken),
-        1 => (0..bt_core::weapons::BT_MAX_WEAPONS).prop_map(ArsenalOp::SellToken),
+        1 => Just((-1i32, 0i32)),
+        2 => ((0i32..bt_core::weapons::BT_MAX_WEAPONS as i32), 1i32..50i32),
     ]
 }
 
-/// Build a game with a random arsenal, export it, import it onto a fresh game,
-/// and assert the exact slot layout (token + quantity) is preserved — including
-/// holes (None slots between occupied ones).
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(128))]
 
+    /// Round-trip RANDOM arsenal layouts that deliberately include holes (empty
+    /// slots between occupied ones — which `grant_weapon` would compact away, so
+    /// we import a crafted layout instead). The codec must preserve the exact
+    /// layout and never compact a hole.
     #[test]
-    fn arsenal_export_import_preserves_holes(
+    fn arsenal_codec_preserves_random_holey_layouts(
         seed in any::<u64>(),
-        ops in prop::collection::vec(arsenal_op(), 0..64),
+        slots in prop::collection::vec(holey_slot(), 10),
     ) {
-        // We need a game that's in the bazaar to call buy/sell.
-        // Force it in by granting weapons directly (grant_weapon uses arsenal.buy
-        // which doesn't require in_bazaar) and then exercise sell via the
-        // export/import codec directly.
-        let mut g = Game::new(seed);
-
-        // Use grant_weapon to build a random arsenal (no bazaar gate).
-        for op in &ops {
-            match op {
-                ArsenalOp::AddFunds(_) => {} // not needed for grant
-                ArsenalOp::BuyToken(i) => {
-                    g.grant_weapon(WeaponToken::ALL[*i]);
-                }
-                ArsenalOp::SellToken(_) => {} // sell requires bazaar; skip
-            }
+        // Craft a 20-int export with random holes; import_arsenal sets each slot
+        // DIRECTLY (unlike grant_weapon, which fills the first empty slot).
+        let mut crafted = Vec::with_capacity(20);
+        for &(t, q) in &slots {
+            crafted.push(t);
+            crafted.push(if t < 0 { 0 } else { q });
         }
+        let mut g = Game::new(seed);
+        g.import_arsenal(&crafted);
+        let e1 = g.export_arsenal();
+        prop_assert_eq!(e1.len(), 20, "export_arsenal must return 20 ints");
 
-        // Snapshot the slot layout.
-        let exported = g.export_arsenal();
-        prop_assert_eq!(exported.len(), 20, "export_arsenal must always return 20 ints");
+        // Round-trip the (normalized) layout — must be identity.
+        let mut g2 = Game::new(seed.wrapping_add(1));
+        g2.import_arsenal(&e1);
+        let e2 = g2.export_arsenal();
+        prop_assert_eq!(&e1, &e2, "arsenal round-trip is not identity");
 
-        // Import onto a fresh game.
-        let mut g2 = Game::new(seed + 1);
-        g2.import_arsenal(&exported);
-
-        let re_exported = g2.export_arsenal();
-        prop_assert_eq!(
-            &exported, &re_exported,
-            "arsenal round-trip must be identity (slot layout preserved)"
-        );
-
-        // Explicitly check that every slot matches, including None (holes).
-        for slot in 0..10 {
-            let tok_before = g.arsenal_token(slot);
-            let qty_before = g.arsenal_quantity(slot);
-            let tok_after = g2.arsenal_token(slot);
-            let qty_after = g2.arsenal_quantity(slot);
-            prop_assert_eq!(tok_before, tok_after, "slot {} token mismatch: {} vs {}", slot, tok_before, tok_after);
-            prop_assert_eq!(qty_before, qty_after, "slot {} quantity mismatch: {} vs {}", slot, qty_before, qty_after);
+        // Every crafted hole stays a hole (no compaction).
+        for (i, &(t, _)) in slots.iter().enumerate() {
+            if t < 0 {
+                prop_assert_eq!(e1[i * 2], -1,
+                    "crafted-empty slot {} became occupied -> codec compacted a hole", i);
+            }
         }
     }
 

@@ -1,12 +1,16 @@
 //! Property-based tests for line-clear correctness.
 //!
-//! Drives random play and checks:
-//!  (a) no completely-filled row ever remains after a lock,
-//!  (b) filled-cell count is conserved across each Locked event
-//!      (locked_cells = prev_filled + piece_cells - N*width),
-//!  (c) the board never contains cells at out-of-range coordinates.
+//!  (a) no completely-filled row ever remains after a lock (during real play),
+//!  (b) filled-cell count is conserved across each Locked event,
+//!  (c) `check_lines` on a CONSTRUCTED board removes exactly the full rows,
+//!      conserves cells, and shifts the survivors down in order.
+//!
+//! (a)/(b) drive real random play (clears are rare there but the invariants must
+//! still hold); (c) forces clears directly so the shift logic is actually
+//! exercised. The exact-value behaviour of `check_lines` is additionally pinned
+//! against a reference model in `differential_lineclear.rs`.
 
-use bt_core::{Game, GameEvent};
+use bt_core::{Board, Cell, Game, GameEvent};
 use proptest::prelude::*;
 
 #[derive(Debug, Clone)]
@@ -41,64 +45,38 @@ fn apply(g: &mut Game, op: &Op) {
     }
 }
 
-/// Count all filled cells on the board.
 fn board_filled_count(g: &Game) -> i64 {
     let b = g.board();
-    let mut n = 0i64;
-    for y in 0..b.height {
-        for x in 0..b.width {
-            if b.get(x, y).is_some() {
-                n += 1;
-            }
-        }
-    }
-    n
+    (0..b.height)
+        .flat_map(|y| (0..b.width).map(move |x| (x, y)))
+        .filter(|&(x, y)| b.get(x, y).is_some())
+        .count() as i64
 }
 
-/// Count the filled cells in the falling piece's 8×8 grid (before it locks).
 fn piece_cell_count(g: &Game) -> i64 {
     match g.current_piece() {
-        Some(p) => p
-            .cells
-            .iter()
-            .flatten()
-            .filter(|c| c.is_some())
-            .count() as i64,
+        Some(p) => p.cells.iter().flatten().filter(|c| c.is_some()).count() as i64,
         None => 0,
     }
 }
 
-/// Check that no row on the board is completely filled.
+/// One board row as a bitmask (bit x set = cell occupied).
+fn row_mask(b: &Board, y: i32, w: usize) -> u32 {
+    let mut m = 0u32;
+    for x in 0..w {
+        if b.get(x as i32, y).is_some() {
+            m |= 1 << x;
+        }
+    }
+    m
+}
+
 fn assert_no_full_rows(g: &Game) -> Result<(), TestCaseError> {
     let b = g.board();
     for y in 0..b.height {
         let full = (0..b.width).all(|x| b.get(x, y).is_some());
-        prop_assert!(
-            !full,
-            "row {} is fully filled after a lock — line-clear missed it",
-            y
-        );
+        prop_assert!(!full, "row {} is fully filled after a lock — line-clear missed it", y);
     }
-    Ok(())
-}
-
-/// Check that every filled cell lives within board bounds (0..width, 0..height).
-/// (board.get() already returns None for OOB; we verify the internal grid
-/// isn't lying by scanning the legal coordinate space for Some cells and
-/// checking symmetry via the count.)
-fn assert_no_oob_cells(g: &Game) -> Result<(), TestCaseError> {
-    let b = g.board();
-    // We cannot directly walk "all cells" outside bounds (get() clamps), but
-    // we can verify the total set of in-bounds cells equals what the board
-    // stores — if the board ever writes to an OOB slot and it shows up
-    // nowhere in the legal scan, the count tests above will catch the
-    // discrepancy. Here we additionally assert each Some cell has valid coords.
-    for y in 0..b.height {
-        for x in 0..b.width {
-            let _ = b.get(x, y); // just ensure it doesn't panic
-        }
-    }
-    prop_assert!(b.width > 0 && b.height > 0, "board dimensions must be positive");
     Ok(())
 }
 
@@ -107,76 +85,88 @@ proptest! {
 
     /// (a) No completely-filled row ever remains on the board after a lock.
     #[test]
-    fn no_full_row_after_lock(
-        seed in any::<u64>(),
-        ops in prop::collection::vec(op(), 0..256),
-    ) {
+    fn no_full_row_after_lock(seed in any::<u64>(), ops in prop::collection::vec(op(), 0..256)) {
         let mut g = Game::new(seed);
         for o in &ops {
-            if g.is_game_over() {
-                break;
-            }
+            if g.is_game_over() { break; }
             apply(&mut g, o);
-            // Check after every step so we catch the exact failing op.
             assert_no_full_rows(&g)?;
         }
     }
 
-    /// (b) CONSERVATION: filled_after == prev_filled + piece_cells - lines*width.
-    ///
-    /// Sampled just before the lock event fires: we track filled count before
-    /// each op, record piece cell count (which lands on the board on lock), and
-    /// after the op drain events. On a Locked event, verify the arithmetic.
+    /// (b) CONSERVATION: filled_after == prev_filled + piece_cells - lines*width
+    /// on every Locked event, during real play.
     #[test]
-    fn conservation_on_lock(
-        seed in any::<u64>(),
-        ops in prop::collection::vec(op(), 0..256),
-    ) {
+    fn conservation_on_lock(seed in any::<u64>(), ops in prop::collection::vec(op(), 0..256)) {
         let mut g = Game::new(seed);
         let width = g.board().width as i64;
-
         for o in &ops {
-            if g.is_game_over() {
-                break;
-            }
-
-            // Snapshot: board fill + current piece cells (will land on lock).
+            if g.is_game_over() { break; }
             let prev_filled = board_filled_count(&g);
             let piece_cells = piece_cell_count(&g);
-
             apply(&mut g, o);
-
-            let events = g.take_events();
-            for ev in &events {
+            for ev in &g.take_events() {
                 if let GameEvent::Locked { lines, .. } = ev {
-                    let after_filled = board_filled_count(&g);
+                    let after = board_filled_count(&g);
                     let expected = prev_filled + piece_cells - (*lines as i64) * width;
-                    prop_assert_eq!(
-                        after_filled,
-                        expected,
-                        "conservation violated after Locked{{lines={}}}: \
-                         prev_filled={} piece_cells={} width={} \
-                         expected_after={} actual_after={}",
-                        lines, prev_filled, piece_cells, width, expected, after_filled
-                    );
+                    prop_assert_eq!(after, expected,
+                        "conservation violated (lines={}): prev={} piece={} -> {} != {}",
+                        lines, prev_filled, piece_cells, expected, after);
                 }
             }
         }
     }
 
-    /// (c) Board cells never appear at out-of-range coordinates.
+    /// (c) `check_lines` on a CONSTRUCTED board: removes exactly the full rows,
+    /// conserves cells, leaves NO full row, and shifts the survivors (filled AND
+    /// empty rows, in order) down so they're bottom-aligned. This forces real
+    /// clears that random play almost never produces.
     #[test]
-    fn board_cells_stay_in_range(
+    fn check_lines_clears_full_rows_and_preserves_order(
         seed in any::<u64>(),
-        ops in prop::collection::vec(op(), 0..256),
+        // a random mask per row, plus which rows to force completely full
+        masks in prop::collection::vec(0u32..1024, 0..28usize),
+        force_full in prop::collection::vec(any::<bool>(), 0..28usize),
     ) {
         let mut g = Game::new(seed);
-        for o in &ops {
-            if g.is_game_over() {
-                break;
+        let b = g.board_mut();
+        b.clear();
+        let w = b.width as usize;
+        let h = b.height as usize;
+        let full = (1u32 << w) - 1;
+
+        // Lay the rows at the BOTTOM of the well (a realistic stack).
+        let n = masks.len().min(h);
+        for i in 0..n {
+            let y = (h - n + i) as i32;
+            let mut mask = masks[i] & full;
+            if force_full.get(i).copied().unwrap_or(false) {
+                mask = full;
             }
-            apply(&mut g, o);
-            assert_no_oob_cells(&g)?;
+            for x in 0..w {
+                if mask & (1 << x) != 0 {
+                    b.set(x as i32, y, Some(Cell::color(1)));
+                }
+            }
         }
+
+        let before: Vec<u32> = (0..h as i32).map(|y| row_mask(b, y, w)).collect();
+        let before_filled: i64 = before.iter().map(|r| r.count_ones() as i64).sum();
+        let n_full = before.iter().filter(|&&r| r == full).count() as i64;
+
+        let _ = b.check_lines();
+
+        let after: Vec<u32> = (0..h as i32).map(|y| row_mask(b, y, w)).collect();
+        let after_filled: i64 = after.iter().map(|r| r.count_ones() as i64).sum();
+
+        // No full row survives.
+        prop_assert!(after.iter().all(|&r| r != full), "a full row survived check_lines");
+        // Cells conserved minus the cleared full rows.
+        prop_assert_eq!(after_filled, before_filled - n_full * w as i64, "cell count off");
+        // Survivors (non-full rows, top->bottom) end bottom-aligned with empty pad on top.
+        let kept: Vec<u32> = before.iter().copied().filter(|&r| r != full).collect();
+        let pad = h - kept.len();
+        let expected: Vec<u32> = std::iter::repeat(0u32).take(pad).chain(kept).collect();
+        prop_assert_eq!(after, expected, "rows did not shift down in order");
     }
 }

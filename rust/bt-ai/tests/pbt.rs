@@ -78,68 +78,66 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
-// (b) Returned Placement is legal — piece fits at (x, orientation)
+// (b) The returned Placement is in-range AND actually executable on the real
+//     engine. Rather than re-verify with best_placement's own scratch-board
+//     rotation (which would let a bug cancel out), we DRIVE THE REAL GAME — the
+//     engine is the authority on what's a legal placement — and confirm the AI's
+//     (x, orientation) executes into a real lock.
 // ---------------------------------------------------------------------------
 
-/// Rotate a piece clone `o` times on a scratch board (no board walls can
-/// block the rotation), mirroring what best_placement does internally.
-fn rotate_piece_n(piece: &Piece, o: i32, board_w: i32, board_h: i32) -> Piece {
-    let scratch = Board::new(board_w + 20, board_h + 20, true);
-    let mut p = piece.clone();
-    p.move_to(&scratch, 10, 10);
-    for _ in 0..o {
-        if !p.rotate(&scratch, false) {
-            break;
-        }
-    }
-    p
+fn filled(g: &Game) -> i64 {
+    let b = g.board();
+    (0..b.height)
+        .flat_map(|y| (0..b.width).map(move |x| (x, y)))
+        .filter(|&(x, y)| b.occupied(x, y))
+        .count() as i64
 }
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(128))]
 
-    /// The Placement returned by best_placement must be reachable: the piece
-    /// (after `orientation` rotations) must be able to move to (x, dropped_y)
-    /// without overlap or out-of-bounds.  We verify by:
-    ///   1. Rotating a clone to `orientation`.
-    ///   2. Dropping it to its resting row (incrementing y until blocked).
-    ///   3. Checking can_move_to succeeds at that row.
-    ///
-    /// Note: if no placement succeeds (board full / piece too big), the fallback
-    /// Placement {x: piece.x, orientation: 0} is returned, which may not have a
-    /// resting position — we skip the legality check in that case.
     #[test]
-    fn best_placement_is_legal(
-        (board, piece) in game_board_strategy(),
+    fn best_placement_is_in_range_and_executes(
+        seed in any::<u64>(),
+        pre_ticks in 0u64..1500u64,
     ) {
+        let mut g = Game::new(seed);
+        for _ in 0..pre_ticks {
+            if g.is_game_over() { break; }
+            g.tick(16);
+        }
+        if g.is_game_over() { return Ok(()); }
+        let piece = match g.current_piece() { Some(p) => p.clone(), None => return Ok(()) };
+        let board = g.board().clone();
+
         let pl = best_placement(&board, &piece);
 
-        // Rotate a clone to the target orientation (same scratch-board
-        // technique best_placement uses internally).
-        let rotated = rotate_piece_n(&piece, pl.orientation, board.width, board.height);
+        // In-range sanity, independent of execution.
+        prop_assert!(pl.orientation >= 0 && pl.orientation < piece.orientations.max(1),
+            "orientation {} out of range (orientations={})", pl.orientation, piece.orientations);
 
-        // Check move_to at spawn y=0; if it fails we're in a pathological
-        // state (piece can't enter at all, e.g. board topped out) — skip.
-        if !rotated.can_move_to(&board, pl.x, 0) {
-            return Ok(());
-        }
-
-        // Drop to resting row.
-        let mut landed_y = 0i32;
-        loop {
-            if rotated.can_move_to(&board, pl.x, landed_y + 1) {
-                landed_y += 1;
-            } else {
-                break;
+        // Execute the AI's placement through the REAL engine: rotate, walk to the
+        // column, hard-drop, tick to lock. The engine refuses any illegal
+        // sub-move, so a resulting lock (or a legitimate top-out) proves the
+        // placement is executable — and a panic here would be a real bug.
+        let before = filled(&g);
+        for _ in 0..pl.orientation { g.rotate(); }
+        for _ in 0..(board.width * 2 + 4) {
+            match g.current_piece().map(|p| p.x) {
+                Some(x) if x < pl.x => g.move_right(),
+                Some(x) if x > pl.x => g.move_left(),
+                _ => break,
             }
         }
-
-        // The piece must fit at the resting position.
-        prop_assert!(
-            rotated.can_move_to(&board, pl.x, landed_y),
-            "Placement ({}, rot={}) does not fit on the board at resting y={}",
-            pl.x, pl.orientation, landed_y
-        );
+        g.begin_drop();
+        for _ in 0..300 {
+            if g.is_game_over() { break; }
+            g.tick(16);
+            g.take_events();
+        }
+        prop_assert!(filled(&g) > before || g.is_game_over(),
+            "AI placement (x={}, rot={}) produced neither a lock nor a top-out",
+            pl.x, pl.orientation);
     }
 }
 

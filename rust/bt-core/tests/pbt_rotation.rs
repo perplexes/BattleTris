@@ -1,14 +1,18 @@
 //! Property-based tests for piece rotation.
 //!
-//! Drives random play including rotates and checks:
 //!  (a) rotate preserves the piece's filled-cell count,
-//!  (b) after any rotate, the active piece's filled cells are within board
-//!      bounds AND never overlap an occupied board cell,
-//!  (c) the current falling piece never overlaps locked cells after any op,
-//!  (d) rotate-then-reverse restores the original cell set when both succeed
-//!      (uses Piece::rotate directly on a clone since Game::rotate is forward-only).
+//!  (b) after any rotate the active piece's cells are in-bounds and never
+//!      overlap a locked cell,
+//!  (c) the falling piece never overlaps locked cells,
+//!  (d) rotate-then-reverse restores the original cell set when both succeed,
+//!  (e) DETERMINISTIC coverage: the special custom-rotation pieces
+//!      (Wall / Star / WeirdLong) are actually reached and rotate validly.
+//!
+//! Random play from a fresh Game never spawns the weird pieces, so the random
+//! properties grant `FearedWeird` (which unlocks them) and (e) confirms they're
+//! really exercised.
 
-use bt_core::{Game, Piece};
+use bt_core::{Game, Piece, PieceKind, WeaponToken};
 use proptest::prelude::*;
 
 #[derive(Debug, Clone)]
@@ -43,26 +47,28 @@ fn apply(g: &mut Game, op: &Op) {
     }
 }
 
+/// A game whose stream includes the weird pieces (Wall/Star/WeirdLong etc.).
+fn weird_game(seed: u64) -> Game {
+    let mut g = Game::new(seed);
+    g.receive_weapon(WeaponToken::FearedWeird);
+    g
+}
+
 fn count_piece_cells_in(p: &Piece) -> usize {
     p.cells.iter().flatten().filter(|c| c.is_some()).count()
 }
 
 fn count_piece_cells(g: &Game) -> usize {
-    g.current_piece().map(|p| count_piece_cells_in(p)).unwrap_or(0)
+    g.current_piece().map(count_piece_cells_in).unwrap_or(0)
 }
 
-/// Returns true iff the falling piece overlaps any occupied board cell.
 fn piece_overlaps_board(g: &Game) -> bool {
     let b = g.board();
     if let Some(p) = g.current_piece() {
         for i in 0..8usize {
             for j in 0..8usize {
-                if p.cells[i][j].is_some() {
-                    let bx = p.x + i as i32;
-                    let by = p.y + j as i32;
-                    if b.get(bx, by).is_some() {
-                        return true;
-                    }
+                if p.cells[i][j].is_some() && b.get(p.x + i as i32, p.y + j as i32).is_some() {
+                    return true;
                 }
             }
         }
@@ -70,15 +76,13 @@ fn piece_overlaps_board(g: &Game) -> bool {
     false
 }
 
-/// Returns true iff any filled cell of the falling piece is outside board bounds.
 fn piece_out_of_bounds(g: &Game) -> bool {
     let b = g.board();
     if let Some(p) = g.current_piece() {
         for i in 0..8usize {
             for j in 0..8usize {
                 if p.cells[i][j].is_some() {
-                    let bx = p.x + i as i32;
-                    let by = p.y + j as i32;
+                    let (bx, by) = (p.x + i as i32, p.y + j as i32);
                     if bx < 0 || bx >= b.width || by < 0 || by >= b.height {
                         return true;
                     }
@@ -92,156 +96,130 @@ fn piece_out_of_bounds(g: &Game) -> bool {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(128))]
 
-    /// (a) Rotate preserves the piece's filled-cell count.
-    ///
-    /// Snapshot the cell count before each op; if the same piece is still active
-    /// after the op (no lock+spawn occurred), the count must be unchanged.
+    /// (a) Rotate preserves the piece's filled-cell count (while the same piece
+    /// is alive).
     #[test]
-    fn rotate_preserves_cell_count(
-        seed in any::<u64>(),
-        ops in prop::collection::vec(op(), 0..256),
-    ) {
-        let mut g = Game::new(seed);
+    fn rotate_preserves_cell_count(seed in any::<u64>(), ops in prop::collection::vec(op(), 0..256)) {
+        let mut g = weird_game(seed);
         for o in &ops {
-            if g.is_game_over() {
-                break;
-            }
-            // Capture piece identity (position acts as a proxy for "same piece").
+            if g.is_game_over() { break; }
             let before_count = count_piece_cells(&g);
-            let before_pos = g.current_piece().map(|p| (p.x, p.y, p.kind));
+            let before_kind = g.current_piece().map(|p| p.kind);
             apply(&mut g, o);
-            let after_count = count_piece_cells(&g);
-            let after_pos = g.current_piece().map(|p| (p.x, p.y, p.kind));
-
-            // Only compare counts when the same piece is still alive.
-            // A lock→spawn event resets the piece, so the (kind) must match.
-            // Since kind alone can repeat we also require the count was nonzero
-            // before (avoids false positives on the very first tick).
-            if before_count > 0 && before_pos.map(|b| b.2) == after_pos.map(|a| a.2) {
-                // Guard: also confirm this isn't a new spawn at the same x,y
-                // (very unlikely, but possible in theory). A cleaner heuristic
-                // is that the piece count must be stable for *all* ops that
-                // don't cause a lock event (no Locked event this step).
-                // We accept the small false-negative risk here to keep it simple.
-                prop_assert_eq!(
-                    after_count, before_count,
-                    "piece cell count changed {} → {} after {:?}",
-                    before_count, after_count, o
-                );
+            let after_kind = g.current_piece().map(|p| p.kind);
+            if before_count > 0 && before_kind == after_kind {
+                prop_assert_eq!(count_piece_cells(&g), before_count,
+                    "piece cell count changed after {:?}", o);
             }
         }
     }
 
-    /// (a) Stronger: rotate preserves cell count — detect even across spawns by
-    ///     running only the rotate path, making it an invariant across the whole
-    ///     game, not just same-piece windows.
+    /// (a') Every live piece always has > 0 cells.
     #[test]
-    fn every_piece_always_has_positive_cell_count(
-        seed in any::<u64>(),
-        ops in prop::collection::vec(op(), 0..256),
-    ) {
-        let mut g = Game::new(seed);
+    fn every_piece_always_has_positive_cell_count(seed in any::<u64>(), ops in prop::collection::vec(op(), 0..256)) {
+        let mut g = weird_game(seed);
         for o in &ops {
-            if g.is_game_over() {
-                break;
-            }
+            if g.is_game_over() { break; }
             apply(&mut g, o);
             if let Some(p) = g.current_piece() {
-                prop_assert!(
-                    count_piece_cells_in(p) > 0,
-                    "piece {:?} has zero cells after {:?}", p.kind, o
-                );
+                prop_assert!(count_piece_cells_in(p) > 0, "piece {:?} has zero cells", p.kind);
             }
         }
     }
 
-    /// (b) After any rotate, the piece's cells are within board bounds
-    ///     and don't overlap any locked board cell.
+    /// (b) After any rotate the piece is in-bounds and overlaps no locked cell.
     #[test]
-    fn rotate_stays_in_bounds_no_overlap(
-        seed in any::<u64>(),
-        ops in prop::collection::vec(op(), 0..256),
-    ) {
-        let mut g = Game::new(seed);
+    fn rotate_stays_in_bounds_no_overlap(seed in any::<u64>(), ops in prop::collection::vec(op(), 0..256)) {
+        let mut g = weird_game(seed);
         for o in &ops {
-            if g.is_game_over() {
-                break;
-            }
+            if g.is_game_over() { break; }
             apply(&mut g, o);
-            prop_assert!(
-                !piece_out_of_bounds(&g),
-                "piece cell landed out of bounds after {:?}", o
-            );
-            prop_assert!(
-                !piece_overlaps_board(&g),
-                "piece overlaps a locked board cell after {:?}", o
-            );
+            prop_assert!(!piece_out_of_bounds(&g), "piece out of bounds after {:?}", o);
+            prop_assert!(!piece_overlaps_board(&g), "piece overlaps locked cell after {:?}", o);
         }
     }
 
-    /// (c) The falling piece never overlaps locked cells after any op sequence.
+    /// (c) The falling piece never overlaps locked cells.
     #[test]
-    fn piece_never_overlaps_locked_cells(
-        seed in any::<u64>(),
-        ops in prop::collection::vec(op(), 0..256),
-    ) {
-        let mut g = Game::new(seed);
+    fn piece_never_overlaps_locked_cells(seed in any::<u64>(), ops in prop::collection::vec(op(), 0..256)) {
+        let mut g = weird_game(seed);
         for o in &ops {
-            if g.is_game_over() {
-                break;
-            }
+            if g.is_game_over() { break; }
             apply(&mut g, o);
-            prop_assert!(
-                !piece_overlaps_board(&g),
-                "falling piece overlaps locked board cell after {:?}", o
-            );
+            prop_assert!(!piece_overlaps_board(&g), "falling piece overlaps locked cell after {:?}", o);
         }
     }
 
-    /// (d) rotate-then-reverse restores the original cell set when both succeed.
-    ///
-    /// We clone the current piece and call Piece::rotate(board, false) then
-    /// Piece::rotate(board, true) on the clone. If both return true the cells
-    /// must equal the snapshot.
+    /// (d) rotate(fwd) then rotate(rev) restores the original cells when both succeed.
     #[test]
-    fn rotate_reverse_roundtrip(
-        seed in any::<u64>(),
-        ops in prop::collection::vec(op(), 0..256),
-    ) {
-        let mut g = Game::new(seed);
+    fn rotate_reverse_roundtrip(seed in any::<u64>(), ops in prop::collection::vec(op(), 0..256)) {
+        let mut g = weird_game(seed);
         for o in &ops {
-            if g.is_game_over() {
-                break;
-            }
-
-            // Before running the op: test roundtrip on a clone of the piece.
+            if g.is_game_over() { break; }
             if let Some(p) = g.current_piece() {
                 if p.rot > 0 {
                     let board = g.board();
                     let cells_before = p.cells;
                     let mut pc = p.clone();
-
-                    let fwd_ok = pc.rotate(board, false);
-                    if fwd_ok {
-                        // Forward succeeded: the cells must have changed (or Star
-                        // may stay the same in degenerate positions, but still).
-                        let fwd_cells = pc.cells;
-                        let rev_ok = pc.rotate(board, true);
-                        if rev_ok {
-                            prop_assert_eq!(
-                                pc.cells, cells_before,
-                                "rotate(fwd) then rotate(rev) didn't restore original \
-                                 cells for piece {:?} (rot={}, orientations={}, state={}); \
-                                 after_fwd={:?}",
-                                p.kind, p.rot, p.orientations, p.state,
-                                fwd_cells
-                            );
-                        }
+                    if pc.rotate(board, false) && pc.rotate(board, true) {
+                        prop_assert_eq!(pc.cells, cells_before,
+                            "rotate fwd+rev didn't restore cells for {:?} (rot={}, orient={}, state={})",
+                            p.kind, p.rot, p.orientations, p.state);
                     }
                 }
             }
-
             apply(&mut g, o);
         }
+    }
+}
+
+/// (e) Coverage: with FearedWeird active, the special custom-rotation pieces are
+/// actually reached, and rotating them keeps the cell count + leaves the piece
+/// in-bounds with no overlap. Deterministic (fixed seed, bounded spawns).
+#[test]
+fn special_piece_rotation_is_covered_and_valid() {
+    // Vary the seed per game — resetting to a fixed seed would just replay the
+    // same deterministic piece sequence and never cover all the weird kinds.
+    let mut game_no = 0u64;
+    let mut g = weird_game(game_no);
+    let mut seen: Vec<PieceKind> = Vec::new();
+
+    for _ in 0..8000 {
+        if g.is_game_over() {
+            game_no += 1;
+            g = weird_game(game_no);
+        }
+        // Keep the weird stream lit (flushed each iteration by the drop below).
+        g.receive_weapon(WeaponToken::FearedWeird);
+
+        if let Some(p) = g.current_piece() {
+            let kind = p.kind;
+            if !seen.contains(&kind) {
+                seen.push(kind);
+            }
+            let base = count_piece_cells(&g);
+            // Rotate through its orientations; invariants must hold each time.
+            for _ in 0..8 {
+                g.rotate();
+                assert!(!piece_out_of_bounds(&g), "{:?} rotated out of bounds", kind);
+                assert!(!piece_overlaps_board(&g), "{:?} rotated into a locked cell", kind);
+                if let Some(pp) = g.current_piece() {
+                    if pp.kind == kind {
+                        assert_eq!(count_piece_cells_in(pp), base,
+                            "{:?} changed cell count under rotation", kind);
+                    }
+                }
+            }
+        }
+        // Lock the piece and let the next spawn.
+        g.begin_drop();
+        for _ in 0..50 {
+            g.tick(16);
+        }
+        let _ = g.take_events();
+    }
+
+    for k in [PieceKind::Wall, PieceKind::Star, PieceKind::WeirdLong] {
+        assert!(seen.contains(&k), "coverage gap: never spawned {:?} (custom rotation untested)", k);
     }
 }
