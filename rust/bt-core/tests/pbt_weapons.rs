@@ -1028,6 +1028,73 @@ fn speedy_speeds_up_and_meadow_slows_gravity() {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(48))]
+
+    /// PIECE IT TOGETHER / BUG REPORT each add EXACTLY ONE box (Bug's is invisible)
+    /// — on a non-full board the cell count rises by exactly one.
+    #[test]
+    fn piece_it_and_bug_add_exactly_one_box(seed in any::<u64>(), bug in any::<bool>()) {
+        let tok = if bug { WeaponToken::Bug } else { WeaponToken::PieceIt };
+        let mut rng = Rng::new(seed);
+        let mut b = Board::standard(false);
+        b.clear();
+        let before = cell_count(&b);
+        b.apply_weapon(tok, &mut rng);
+        prop_assert_eq!(cell_count(&b), before + 1, "{:?} must add exactly one box", tok);
+    }
+
+    /// THE BLIND CLERIC only REMOVES boxes — it never adds a cell and never touches
+    /// a non-removable (structure) cell.
+    #[test]
+    fn blind_only_removes_removable_boxes(
+        fills in prop::collection::vec((0i32..BT_BOARD_WTH, 0i32..BT_BOARD_HGT, 1u8..=6u8), 0..60),
+        seed in any::<u64>(),
+    ) {
+        let mut rng = Rng::new(seed);
+        let mut b = Board::standard(false);
+        b.clear();
+        for (x, y, v) in &fills { b.set(*x, *y, Some(Cell::die(*v))); }
+        b.set(0, 0, Some(Cell::structure())); // a structure cell that must survive
+        let before = value_grid(&b);
+        let cnt = cell_count(&b);
+        b.apply_weapon(WeaponToken::Blind, &mut rng);
+        prop_assert!(cell_count(&b) <= cnt, "Blind must only remove, never add");
+        let after = value_grid(&b);
+        for (i, a) in after.iter().enumerate() {
+            if a.is_some() {
+                prop_assert!(before[i].is_some(), "Blind added a cell at index {}", i);
+            }
+        }
+        prop_assert_eq!(b.get(0, 0).map(|c| c.kind), Some(CellKind::Structure),
+            "Blind must not bomb a structure cell");
+    }
+
+    /// FALLOUT drops out the MIDDLE columns: every cell in [LEDGE, width-LEDGE) is
+    /// removed (the black hole); the side ledge columns are untouched.
+    #[test]
+    fn fallout_empties_the_middle_columns_only(
+        fills in prop::collection::vec((0i32..BT_BOARD_WTH, 0i32..BT_BOARD_HGT, 1u8..=6u8), 0..60),
+    ) {
+        let mut rng = Rng::new(1);
+        let mut b = Board::standard(false);
+        b.clear();
+        for (x, y, v) in &fills { b.set(*x, *y, Some(Cell::die(*v))); }
+        let before = value_grid(&b);
+        let w = b.width as usize;
+        b.apply_weapon(WeaponToken::FallOut, &mut rng);
+        for y in 0..b.height { for x in 0..b.width {
+            if x >= BT_FALL_OUT_LEDGE && x < b.width - BT_FALL_OUT_LEDGE {
+                prop_assert!(b.get(x, y).is_none(),
+                    "FallOut must empty the middle column at ({},{})", x, y);
+            } else {
+                prop_assert_eq!(b.get(x, y).map(|c| c.value()), before[(y as usize) * w + x as usize],
+                    "FallOut must NOT touch the ledge column at ({},{})", x, y);
+            }
+        }}
+    }
+}
+
+proptest! {
     #![proptest_config(ProptestConfig::with_cases(70))]
 
     /// DURATION weapons ACCUMULATE on relaunch (first-principles lifecycle): a
@@ -1474,6 +1541,60 @@ fn no_dice_wired_into_the_live_game_stream_drops_dice() {
     assert!(kinds.len() > 50, "sanity: collected a real stream ({} spawns)", kinds.len());
     assert!(!kinds.contains(&bt_core::PieceKind::Die),
         "NoDice wired into a live Game must drop Die pieces from the stream");
+}
+
+/// FOUR-BY-FOUR replaces the opponent's BOX piece with a 4x4 hollow box. While
+/// active, the live stream must contain a FourByFour and NO Box.
+#[test]
+fn four_by_four_replaces_box_in_the_live_stream() {
+    use bt_core::PieceKind::{Box, FourByFour};
+    let mut g = Game::new(789);
+    assert!(receive_and_flush(&mut g, WeaponToken::FourByFour), "FourByFour active");
+    let kinds = collect_spawned_kinds(&mut g, 200);
+    assert!(kinds.len() > 30, "sanity: collected a real stream ({} spawns)", kinds.len());
+    assert!(!kinds.contains(&Box), "FourByFour must replace the Box piece (no Box in the stream)");
+    assert!(kinds.contains(&FourByFour), "FourByFour pieces must appear in the stream");
+}
+
+/// BROKEN RECORD "gives the same piece the same piece ..." — it repeats the last
+/// piece, switching to a new one only ~1/BT_BROKEN_PROB of the time, so the stream
+/// is long RUNS of repeats. First-principles (differential, not "all identical"):
+/// with Broken active, consecutive spawns repeat FAR more than a normal stream,
+/// and repeats dominate switches.
+#[test]
+fn broken_record_mostly_repeats_unlike_a_normal_stream() {
+    let repeats = |ks: &[bt_core::PieceKind]| ks.windows(2).filter(|w| w[0] == w[1]).count();
+
+    // Control: a normal stream of the same length rarely repeats back-to-back.
+    let normal = collect_spawned_kinds(&mut Game::new(654), 60);
+    let normal_reps = repeats(&normal);
+
+    // Broken: same seed, but the record skips.
+    let mut g = Game::new(654);
+    assert!(receive_and_flush(&mut g, WeaponToken::Broken), "Broken active");
+    let broken = collect_spawned_kinds(&mut g, 60);
+    assert!(broken.len() > 20, "sanity: real stream ({})", broken.len());
+    let broken_reps = repeats(&broken);
+    let switches = broken.len() - 1 - broken_reps;
+
+    assert!(broken_reps > switches,
+        "Broken must MOSTLY repeat (repeats {} vs switches {}): {:?}", broken_reps, switches, broken);
+    assert!(broken_reps > normal_reps,
+        "Broken must repeat MORE than a normal stream ({} vs {})", broken_reps, normal_reps);
+}
+
+/// HAVE A NICE DAY gives the opponent a smiley face — a Happy piece enters the
+/// stream (the 150-bean gift the flavor jokes about).
+#[test]
+fn nice_day_gives_a_happy_piece() {
+    let mut g = Game::new(111);
+    g.receive_weapon(WeaponToken::NiceDay);
+    assert!(lock_one(&mut g), "flush NiceDay");
+    let mut kinds = Vec::new();
+    if let Some(p) = g.current_piece() { kinds.push(p.kind); }
+    kinds.extend(collect_spawned_kinds(&mut g, 10));
+    assert!(kinds.contains(&bt_core::PieceKind::Happy),
+        "Have a Nice Day must give a Happy (smiley) piece, saw {:?}", kinds);
 }
 
 /// FEARED WEIRD wired through a live Game: after flush, the standard pieces vanish
