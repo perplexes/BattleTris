@@ -615,9 +615,18 @@ fn clear_n_lines(g: &mut Game, n: i32) -> i32 {
                 }
             }
         }
+        // Clearing lines crosses the combined-20-lines bazaar barrier, which FREEZES
+        // the game (no piece will lock). Leave the bazaar immediately so locks keep
+        // flowing — we only want the line-tick side-effect, not the shopping flow.
+        if g.is_in_bazaar() {
+            g.leave_bazaar();
+        }
         g.begin_drop();
         let mut got_lock = false;
         for _ in 0..400 {
+            if g.is_in_bazaar() {
+                g.leave_bazaar();
+            }
             g.tick(16);
             for e in g.take_events() {
                 if let GameEvent::Locked { lines, .. } = e {
@@ -963,7 +972,6 @@ fn bottle_expiry_removes_the_structure_walls() {
     }
 }
 
-/// REAGAN is on the Mirror nullify list — a Reagan launched by a mirror-cursed
 /// MIRROR routing for the two FUNDS weapons that differ: Reagan BACKFIRES onto a
 /// cursed launcher (it is NOT on the nullify-9 set), whereas Keating FIZZLES (it
 /// IS). This is the exact distinction in BTWeaponManager.C:204-216, and it's the
@@ -1051,4 +1059,246 @@ proptest! {
             + b_cells.iter().map(|c| (c.0, c.1)).collect::<std::collections::HashSet<_>>().len(),
             "no cells created or destroyed by Swap");
     }
+}
+
+// ===========================================================================
+// GROUP I — PIECE-STREAM WIRING, end-to-end through a live Game.
+//
+// The piece-stream weapons (FearedWeird/FourByFour/SoLong/NoDice/NiceDay/Broken)
+// are pinned at the PieceManager unit level, but nothing pinned that
+// `Game::receive_weapon(tok)` + flush actually WIRES into the piece manager and
+// changes the LIVE stream. A mutant dropping the `self.pieces.weapon_on(token)`
+// call in `apply_weapon_on` (game.rs) survived every weapon test. These properties
+// observe the live spawn stream of a real Game and pin that wiring.
+// ===========================================================================
+
+/// Collect the kinds of the next `n` pieces a live Game spawns, clearing the board
+/// before each lock so the game can never top out (clearing CELLS leaves weapon
+/// state intact). Each lock spawns the next piece; we record its kind. This reads
+/// only the public `current_piece()` + drives real locks — an independent probe of
+/// the live stream, not a PieceManager unit call.
+fn collect_spawned_kinds(g: &mut Game, n: usize) -> Vec<bt_core::PieceKind> {
+    let mut kinds = Vec::with_capacity(n);
+    for _ in 0..n {
+        // Empty the board so the next lock can't top out.
+        let (w, h) = (g.board().width, g.board().height);
+        for y in 0..h { for x in 0..w { g.board_mut().set(x, y, None); } }
+        if !lock_one(g) || g.is_game_over() {
+            break;
+        }
+        if let Some(p) = g.current_piece() {
+            kinds.push(p.kind);
+        }
+    }
+    kinds
+}
+
+/// SO LONG wired through a live Game: after `receive_weapon(SoLong)` + flush, the
+/// live spawn stream must contain NO Long pieces. Independent oracle: scan many
+/// real spawns and assert Long never appears. A mutant that drops the
+/// Game->PieceManager wiring (or SoLong's keep-prob zeroing) lets Long through.
+#[test]
+fn so_long_wired_into_the_live_game_stream_drops_long_pieces() {
+    let mut g = Game::new(321);
+    assert!(receive_and_flush(&mut g, WeaponToken::SoLong), "SoLong active");
+    let kinds = collect_spawned_kinds(&mut g, 300);
+    assert!(kinds.len() > 50, "sanity: collected a real stream ({} spawns)", kinds.len());
+    assert!(!kinds.contains(&bt_core::PieceKind::Long),
+        "SoLong wired into a live Game must drop Long pieces from the stream");
+}
+
+/// NO DICE wired through a live Game: after flush, no Die piece spawns. Same
+/// independent-stream oracle; kills a dropped-wiring or wrong-keep-prob mutant.
+#[test]
+fn no_dice_wired_into_the_live_game_stream_drops_dice() {
+    let mut g = Game::new(123);
+    assert!(receive_and_flush(&mut g, WeaponToken::NoDice), "NoDice active");
+    let kinds = collect_spawned_kinds(&mut g, 300);
+    assert!(kinds.len() > 50, "sanity: collected a real stream ({} spawns)", kinds.len());
+    assert!(!kinds.contains(&bt_core::PieceKind::Die),
+        "NoDice wired into a live Game must drop Die pieces from the stream");
+}
+
+/// FEARED WEIRD wired through a live Game: after flush, the standard pieces vanish
+/// and ONLY weird pieces spawn. Independent stream oracle: every spawned kind is in
+/// the weird set; none is a standard tetromino. Kills a dropped-wiring mutant and a
+/// FearedWeird keep-prob mutant that forgets to zero the standard pieces.
+#[test]
+fn feared_weird_wired_into_the_live_game_stream_yields_only_weird_pieces() {
+    use bt_core::PieceKind::*;
+    let standard = [El, RevEl, SlideLeft, SlideRight, Long, Plug, Box];
+    let mut g = Game::new(456);
+    assert!(receive_and_flush(&mut g, WeaponToken::FearedWeird), "FearedWeird active");
+    let kinds = collect_spawned_kinds(&mut g, 200);
+    assert!(kinds.len() > 30, "sanity: collected a real stream ({} spawns)", kinds.len());
+    for k in &kinds {
+        assert!(!standard.contains(k),
+            "FearedWeird wired into a live Game must drop standard pieces, saw {:?}", k);
+    }
+}
+
+/// NO DICE EXPIRY wired through a live Game: once NoDice's duration elapses, Die
+/// pieces RETURN to the live stream. Pins the expiry side of the wiring (the
+/// `pieces.weapon_off` call). We flush NoDice, expire it by clearing its full
+/// duration, then assert a Die reappears in the live spawn stream. A mutant that
+/// drops the off-wiring keeps dice suppressed forever.
+#[test]
+fn no_dice_expiry_restores_dice_in_the_live_game_stream() {
+    let mut g = Game::new(2024);
+    assert!(receive_and_flush(&mut g, WeaponToken::NoDice), "NoDice active");
+    let dur = weapon_table()[WeaponToken::NoDice.index()].duration as i32;
+    let cleared = clear_n_lines(&mut g, dur);
+    if g.is_game_over() {
+        return; // expiry of the FLAG is pinned by the remaining-countdown test
+    }
+    assert!(cleared >= dur, "cleared {cleared} of {dur} to expire NoDice");
+    assert!(!g.weapon_active(WeaponToken::NoDice), "NoDice expired");
+    let kinds = collect_spawned_kinds(&mut g, 400);
+    assert!(kinds.contains(&bt_core::PieceKind::Die),
+        "after NoDice expires, Die pieces must return to the live stream");
+}
+
+// ===========================================================================
+// GROUP J — MIRROR LIFECYCLE (the curse expires after its duration; routing
+// returns to normal). The versus tests pin backfire/nullify WHILE cursed, but
+// nothing pinned that the curse LIFTS after Mirror's 10-line duration — a mutant
+// that never expires Mirror (curse forever) survived every weapon test.
+// ===========================================================================
+
+/// Filled cells in the bottom row — the RiseUp garbage signature (width-1), which
+/// no single piece-lock can deposit.
+fn bottom_row_fill(g: &Game) -> i32 {
+    let y = g.board().height - 1;
+    (0..g.board().width).filter(|&x| g.board().get(x, y).is_some()).count() as i32
+}
+
+/// MIRROR EXPIRES after its 10-line duration, RESTORING normal routing. We curse
+/// the attacker, confirm a launch BACKFIRES (cursed), then clear Mirror's full
+/// duration of lines on the attacker so the curse lifts, and confirm a subsequent
+/// launch once again HITS THE OPPONENT. Independent oracle on RiseUp's bottom-row
+/// signature. A mutant that never expires Mirror keeps backfiring and fails the
+/// post-expiry "hits the opponent" assertion.
+#[test]
+fn mirror_curse_expires_and_routing_returns_to_normal() {
+    let mut atk = Game::new(11);
+    let mut vic = Game::new(22);
+    // Curse the attacker.
+    deliver_weapon(&mut vic, &mut atk, WeaponToken::Mirror);
+    assert!(lock_one(&mut atk));
+    assert!(atk.weapon_active(WeaponToken::Mirror), "attacker is mirror-cursed");
+    let mir_dur = weapon_table()[WeaponToken::Mirror.index()].duration as i32;
+    assert_eq!(atk.weapon_remaining(WeaponToken::Mirror), mir_dur,
+        "Mirror starts with its full {mir_dur}-line duration");
+
+    // WHILE CURSED: a RiseUp launch backfires onto the attacker.
+    let vic_bottom0 = bottom_row_fill(&vic);
+    deliver_weapon(&mut atk, &mut vic, WeaponToken::RiseUp);
+    assert!(lock_one(&mut atk));
+    assert!(bottom_row_fill(&atk) >= 9, "cursed launch backfired onto the attacker");
+    assert_eq!(bottom_row_fill(&vic), vic_bottom0, "victim spared while attacker cursed");
+
+    // Expire Mirror: clear its full duration of lines on the attacker.
+    let cleared = clear_n_lines(&mut atk, mir_dur);
+    if atk.is_game_over() {
+        return; // can't observe post-expiry routing; flag-expiry pinned elsewhere
+    }
+    assert!(cleared >= mir_dur, "cleared {cleared} of {mir_dur} to expire Mirror");
+    assert!(!atk.weapon_active(WeaponToken::Mirror),
+        "Mirror must expire after its duration — the curse lifts");
+
+    // POST-EXPIRY: a fresh RiseUp launch must HIT THE OPPONENT again (normal routing).
+    // Use a fresh victim so its bottom row starts clearly empty.
+    let mut vic2 = Game::new(33);
+    let vic2_bottom0 = bottom_row_fill(&vic2);
+    deliver_weapon(&mut atk, &mut vic2, WeaponToken::RiseUp);
+    assert!(lock_one(&mut vic2));
+    assert!(bottom_row_fill(&vic2) >= 9,
+        "after Mirror expires, a launch must hit the OPPONENT (got bottom row {})",
+        bottom_row_fill(&vic2));
+    assert!(vic2_bottom0 < 9, "sanity: victim started with an essentially empty bottom row");
+}
+
+// ===========================================================================
+// GROUP K — CONTROL / SPEED REVERSION on expiry (Upbyside controls, Meadow speed).
+//
+// weapons_game.rs pins the ACTIVE effect of Upbyside (controls reversed) and
+// Meadow (slower) but NOT that they REVERT when the weapon's duration elapses. A
+// mutant that drops the `apply_weapon_off` restoration leaves controls inverted /
+// gravity halved forever, and survived every weapon test.
+// ===========================================================================
+
+/// UPBYSIDE CONTROL REVERSION: while active, `move_left` shifts the piece RIGHT;
+/// after Upbyside's 10-line duration elapses, `move_left` must shift LEFT again.
+/// Independent oracle on the sign of the x-delta before vs after expiry. A mutant
+/// that forgets to restore `left_x/right_x/delta_y` on expiry keeps controls
+/// inverted and fails the post-expiry "moves left" check.
+#[test]
+fn upbyside_controls_revert_when_the_weapon_expires() {
+    let mut g = Game::new(3);
+    assert!(receive_and_flush(&mut g, WeaponToken::Upbyside), "Upbyside active");
+
+    // WHILE ACTIVE: move_left shifts the piece RIGHT (controls reversed).
+    // Empty the board + recenter so the move isn't wall-blocked.
+    {
+        let (w, h) = (g.board().width, g.board().height);
+        for y in 0..h { for x in 0..w { g.board_mut().set(x, y, None); } }
+    }
+    let x0 = g.piece_pos().0;
+    g.move_left();
+    let x1 = g.piece_pos().0;
+    assert!(x1 > x0, "while Upbyside active, move_left() shifts RIGHT ({x0} -> {x1})");
+
+    // Expire Upbyside: clear its full duration of lines.
+    let dur = weapon_table()[WeaponToken::Upbyside.index()].duration as i32;
+    let cleared = clear_n_lines(&mut g, dur);
+    if g.is_game_over() {
+        return; // flag-expiry pinned elsewhere
+    }
+    assert!(cleared >= dur, "cleared {cleared} of {dur} to expire Upbyside");
+    assert!(!g.weapon_active(WeaponToken::Upbyside), "Upbyside expired");
+
+    // POST-EXPIRY: move_left must shift the piece LEFT again (controls restored).
+    {
+        let (w, h) = (g.board().width, g.board().height);
+        for y in 0..h { for x in 0..w { g.board_mut().set(x, y, None); } }
+    }
+    let xa = g.piece_pos().0;
+    g.move_left();
+    let xb = g.piece_pos().0;
+    assert!(xb < xa,
+        "after Upbyside expires, move_left() must shift LEFT again ({xa} -> {xb})");
+}
+
+/// MEADOW EXPIRY round-trips the gravity period: Meadow DOUBLES `base_drop_time`
+/// (slower) on activation and the expiry handler halves it back. Independent oracle
+/// on the gravity period (ms per row): active period > baseline; post-expiry period
+/// == baseline. A mutant that forgets the Meadow expiry restoration leaves gravity
+/// permanently slow.
+#[test]
+fn meadow_expiry_restores_the_baseline_gravity_period() {
+    let baseline = gravity_period_ms(&mut Game::new(8));
+    assert!(baseline != i32::MAX && baseline > 0, "sanity: measurable baseline");
+
+    // Active: Meadow makes the period LONGER (slower).
+    {
+        let mut md = Game::new(8);
+        assert!(receive_and_flush(&mut md, WeaponToken::Meadow), "Meadow active");
+        let active = gravity_period_ms(&mut md);
+        assert!(active != i32::MAX && active > baseline,
+            "Meadow must lengthen the gravity period ({active} vs baseline {baseline})");
+    }
+
+    let mut g = Game::new(8);
+    assert!(receive_and_flush(&mut g, WeaponToken::Meadow), "Meadow active");
+    let dur = weapon_table()[WeaponToken::Meadow.index()].duration as i32;
+    let cleared = clear_n_lines(&mut g, dur);
+    if g.is_game_over() {
+        return;
+    }
+    assert!(cleared >= dur, "cleared {cleared} of {dur} for Meadow expiry");
+    assert!(!g.weapon_active(WeaponToken::Meadow), "Meadow expired");
+    let after = gravity_period_ms(&mut g);
+    assert!(after != i32::MAX, "post-expiry period measurable");
+    assert_eq!(after, baseline,
+        "after Meadow expires, the gravity period must return to baseline ({after} vs {baseline})");
 }
