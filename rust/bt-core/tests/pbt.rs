@@ -4,8 +4,15 @@
 //! and assert engine invariants after every step. proptest shrinks any failure
 //! to a minimal operation sequence.
 
-use bt_core::Game;
+use bt_core::{Game, WeaponToken};
 use proptest::prelude::*;
+
+/// Force a lone Game into the bazaar deterministically by crossing a 20-line
+/// bazaar boundary via the opponent-score mirror (combined lines 19 -> 20).
+fn enter_bazaar(g: &mut Game) {
+    g.receive_op_score(0, 19, 0);
+    g.receive_op_score(0, 20, 0);
+}
 
 #[derive(Debug, Clone)]
 enum Op {
@@ -212,22 +219,44 @@ proptest! {
             "the piece must eventually reach the floor (soft drop stops advancing y)");
     }
 
-    /// HUMAN HARD-DROP scoring: the FIRST `begin_drop()` on a fresh falling piece
-    /// awards exactly `BT_BOARD_HGT - y` points (the further it still had to fall,
-    /// the more it's worth — BTGame.C:729), and a SECOND `begin_drop()` (fast drop
-    /// already engaged) awards NOTHING. Kills `+= 0` (no award) and a double-award.
+    /// HUMAN HARD-DROP scoring: the FIRST `begin_drop()` awards exactly
+    /// `BT_BOARD_HGT - y` points (the further the piece still had to fall, the more
+    /// it's worth — BTGame.C:729), and a SECOND `begin_drop()` (fast drop already
+    /// engaged) awards NOTHING. CRUCIALLY we vary `y` by soft-dropping the piece
+    /// down first, so the bonus genuinely DEPENDS on `y`: a mutant that awards a
+    /// constant `BT_BOARD_HGT` (ignoring `y`) is now caught — the old fixed-y==0
+    /// version couldn't tell `BT_BOARD_HGT - 0` from `BT_BOARD_HGT`. soft_drop
+    /// advances `y` without engaging the fast drop, so the award is still the
+    /// first-engage bonus at the descended `y`.
     #[test]
-    fn begin_drop_awards_board_height_minus_y_once(seed in any::<u64>()) {
+    fn begin_drop_awards_board_height_minus_y_once(
+        seed in any::<u64>(),
+        // How many rows to soft-drop the piece before hard-dropping (y > 0).
+        descend in 0u32..12,
+    ) {
         use bt_core::constants::BT_BOARD_HGT;
         let mut g = Game::new(seed);
-        let (_, y) = g.piece_pos();
-        prop_assert_eq!(y, 0, "fresh piece at spawn row");
+
+        // Soft-drop the piece down `descend` rows (or until it can't go lower),
+        // WITHOUT engaging the fast drop (so begin_drop's first-engage bonus fires).
+        let mut steps = 0u32;
+        for _ in 0..descend {
+            let y_pre = g.piece_pos().1;
+            g.soft_drop();
+            if g.piece_pos().1 == y_pre { break; } // hit the floor / slide
+            steps += 1;
+        }
+        let y = g.piece_pos().1;
+        prop_assume!(g.current_piece().is_some() && !g.is_game_over());
+        // y must equal the number of successful soft-drop steps (started at 0).
+        prop_assert_eq!(y, steps as i32, "y must track the soft-drop descent");
         let s0 = g.score().score;
 
         g.begin_drop();
         let s1 = g.score().score;
         prop_assert_eq!(s1 - s0, (BT_BOARD_HGT - y) as i64,
-            "first begin_drop must award BT_BOARD_HGT - y = {}", BT_BOARD_HGT - y);
+            "first begin_drop must award BT_BOARD_HGT - y = {} - {} = {}",
+            BT_BOARD_HGT, y, BT_BOARD_HGT - y);
 
         // A second begin_drop (fast drop already engaged) must NOT award again.
         g.begin_drop();
@@ -264,5 +293,92 @@ proptest! {
                 );
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BAZAAR ECONOMY oracle. Buying a weapon must DEBIT its (Carter-doubled) price
+// and add it to the arsenal; selling must REFUND the price and remove it. The
+// robustness/bout PBTs only gate buy/sell or assert funds stay non-negative —
+// they never pin the funds delta or the arsenal change, so removing
+// `self.score.funds -= price` (free weapons) survived. These pin both, including
+// Carter's price doubling.
+// ---------------------------------------------------------------------------
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    #[test]
+    fn bazaar_buy_then_sell_conserves_funds_and_arsenal(
+        seed in any::<u64>(),
+        tok_idx in 0usize..34,
+        // Extra headroom so the buy is always affordable.
+        extra in 0i64..5000,
+    ) {
+        let token = WeaponToken::ALL[tok_idx];
+        let mut g = Game::new(seed);
+        enter_bazaar(&mut g);
+        prop_assume!(g.is_in_bazaar());
+
+        let price = g.bazaar_price(token) as i64;
+        // Seed exactly price + extra funds so the buy is affordable.
+        g.add_funds(price + extra);
+        let funds0 = g.score().funds;
+        let qty0 = (0..10).map(|s| if g.arsenal_token(s) == tok_idx as i32 { g.arsenal_quantity(s) } else { 0 }).sum::<u16>();
+
+        // BUY: funds drop by EXACTLY the effective price; the arsenal gains one.
+        let bought = g.buy_weapon(token);
+        prop_assert!(bought, "an affordable buy in the bazaar must succeed (price {})", price);
+        prop_assert_eq!(g.score().funds, funds0 - price,
+            "buy must debit exactly the price {} (funds {} -> {})", price, funds0, g.score().funds);
+        let qty1 = (0..10).map(|s| if g.arsenal_token(s) == tok_idx as i32 { g.arsenal_quantity(s) } else { 0 }).sum::<u16>();
+        prop_assert_eq!(qty1, qty0 + 1, "buy must add one of the token to the arsenal");
+
+        // SELL: funds return to where they were; the arsenal loses one.
+        let sold = g.sell_weapon(token);
+        prop_assert!(sold, "selling the just-bought weapon must succeed");
+        prop_assert_eq!(g.score().funds, funds0,
+            "sell must refund exactly the price (funds back to {})", funds0);
+        let qty2 = (0..10).map(|s| if g.arsenal_token(s) == tok_idx as i32 { g.arsenal_quantity(s) } else { 0 }).sum::<u16>();
+        prop_assert_eq!(qty2, qty0, "sell must remove the bought token from the arsenal");
+    }
+
+    /// CARTER doubles the bazaar price. With Carter active, `bazaar_price` is 2x
+    /// the base, and a buy debits the doubled amount. Activating Carter requires a
+    /// lock to flush it, so we do that BEFORE entering the bazaar.
+    #[test]
+    fn carter_doubles_the_bazaar_price(
+        seed in any::<u64>(),
+        tok_idx in 0usize..34,
+    ) {
+        let token = WeaponToken::ALL[tok_idx];
+
+        // Base price (no Carter).
+        let base = {
+            let mut g = Game::new(seed);
+            enter_bazaar(&mut g);
+            g.bazaar_price(token) as i64
+        };
+
+        // Carter active: receive it and lock to flush, THEN enter the bazaar.
+        let mut g = Game::new(seed);
+        g.receive_weapon(WeaponToken::Carter);
+        // Flush the pending Carter by driving a lock.
+        g.begin_drop();
+        for _ in 0..1200 {
+            g.tick(16);
+            if g.weapon_active(WeaponToken::Carter) || g.is_game_over() { break; }
+        }
+        prop_assume!(g.weapon_active(WeaponToken::Carter) && !g.is_game_over());
+        enter_bazaar(&mut g);
+        prop_assume!(g.is_in_bazaar());
+
+        prop_assert_eq!(g.bazaar_price(token) as i64, base * 2,
+            "Carter must double the bazaar price ({} -> expected {})", base, base * 2);
+        // And a buy debits the doubled price.
+        g.add_funds(base * 2);
+        let funds0 = g.score().funds;
+        prop_assume!(g.buy_weapon(token));
+        prop_assert_eq!(g.score().funds, funds0 - base * 2,
+            "a Carter-priced buy must debit the doubled price");
     }
 }

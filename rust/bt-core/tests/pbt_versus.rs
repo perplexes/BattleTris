@@ -326,6 +326,54 @@ fn arsenal_sig(g: &Game) -> Vec<(i32, u16)> {
     (0..10).map(|s| (g.arsenal_token(s), g.arsenal_quantity(s))).collect()
 }
 
+/// Activate `token` on `g` by receiving it and driving a lock to flush the
+/// pending-weapon queue (the port applies received weapons at the next lock).
+fn activate_weapon(g: &mut Game, token: WeaponToken) {
+    g.receive_weapon(token);
+    g.begin_drop();
+    for _ in 0..1200 {
+        g.tick(16);
+        if g.weapon_active(token) || g.is_game_over() { break; }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// SWAP cancels BOTTLE and UPBYSIDE on BOTH boards (BTGame.C:494-528): a Swap
+    /// is a fresh start, so the board-shape weapons that depend on the OLD board
+    /// must be cleared. The board-bytes-only Swap test can't see this — removing
+    /// the `force_weapon_off(Bottle/Upbyside)` cleanup loop in `swap_board_with`
+    /// still exchanges the cells. Here we ACTIVATE Bottle on one side and Upbyside
+    /// on the other, Swap, and assert BOTH weapons are inactive with zero remaining
+    /// on BOTH sides afterward.
+    #[test]
+    fn swap_cancels_bottle_and_upbyside(
+        seed_a in any::<u64>(),
+        seed_b in any::<u64>(),
+    ) {
+        let mut a = Game::new(seed_a);
+        let mut b = Game::new(seed_b);
+        activate_weapon(&mut a, WeaponToken::Bottle);
+        activate_weapon(&mut b, WeaponToken::Upbyside);
+        prop_assume!(!a.is_game_over() && !b.is_game_over());
+        prop_assume!(a.weapon_active(WeaponToken::Bottle) && b.weapon_active(WeaponToken::Upbyside));
+
+        a.swap_board_with(&mut b);
+
+        for (label, g) in [("A", &a), ("B", &b)] {
+            prop_assert!(!g.weapon_active(WeaponToken::Bottle),
+                "Swap must cancel Bottle on side {}", label);
+            prop_assert!(!g.weapon_active(WeaponToken::Upbyside),
+                "Swap must cancel Upbyside on side {}", label);
+            prop_assert_eq!(g.weapon_remaining(WeaponToken::Bottle), 0,
+                "Bottle remaining must be 0 after Swap on side {}", label);
+            prop_assert_eq!(g.weapon_remaining(WeaponToken::Upbyside), 0,
+                "Upbyside remaining must be 0 after Swap on side {}", label);
+        }
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(128))]
 

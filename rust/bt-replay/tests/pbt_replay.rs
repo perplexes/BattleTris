@@ -67,7 +67,7 @@ fn op() -> impl Strategy<Value = Op> {
     ]
 }
 
-fn apply_op(g: &mut Game, rec: &mut Recorder, o: &Op) {
+fn apply_op(g: &mut Game, rec: &mut Recorder, o: &Op, dt: i32) {
     // Drive the LIVE game through DIRECT Game methods — NOT Input::apply_to_game.
     // The replay reconstructs via Input::apply_to_game, so routing the live
     // oracle around that mapping makes the record→replay equality independent of
@@ -76,7 +76,7 @@ fn apply_op(g: &mut Game, rec: &mut Recorder, o: &Op) {
     // both sides making the identical mistake and cancelling out.
     match o {
         Op::Tick => {
-            g.tick(DT);
+            g.tick(dt);
             rec.on_tick();
         }
         Op::MoveLeft => {
@@ -268,30 +268,36 @@ proptest! {
     fn record_replay_bit_identity(
         seed in any::<u64>(),
         ops in prop::collection::vec(op(), 0..256),
+        // A VARIABLE timestep (often NOT 16). The recorded `dt_ms` drives WHEN
+        // gravity fires, so a `ReplayPlayer::step` that ticks with a literal `16`
+        // instead of `self.replay.dt_ms` diverges from a live run recorded at a
+        // different dt. The old hardcoded DT=16 couldn't tell them apart.
+        dt in 8i32..40,
     ) {
         let seed32 = seed as u32;
         let mut g = Game::new(seed);
-        let mut rec = Recorder::new(seed32, Mode::Practice, None, DT, "pbt");
+        let mut rec = Recorder::new(seed32, Mode::Practice, None, dt, "pbt");
 
         for o in &ops {
             if g.is_game_over() { break; }
-            apply_op(&mut g, &mut rec, o);
+            apply_op(&mut g, &mut rec, o, dt);
         }
         // Always end on a tick boundary so tick_count matches the player.
         if !g.is_game_over() {
-            g.tick(DT);
+            g.tick(dt);
             rec.on_tick();
         }
         let live = fingerprint(&g);
 
         let replay = rec.to_replay();
+        prop_assert_eq!(replay.dt_ms, dt, "the recorder must preserve the recorded dt_ms");
         let mut player = ReplayPlayer::new(replay);
         player.run_to_end();
 
         prop_assert_eq!(
             fingerprint(player.player()),
             live,
-            "replay diverged from the live recording"
+            "replay diverged from the live recording (dt={})", dt
         );
     }
 
@@ -512,6 +518,47 @@ proptest! {
             "seek-past-end must land exactly at tick_count (versus)");
         prop_assert_eq!(fingerprint(vsought.game(true)), fingerprint(vran.game(true)),
             "seek-past-end side-A must equal run_to_end (versus)");
+        prop_assert_eq!(fingerprint(vsought.game(false)), fingerprint(vran.game(false)),
+            "seek-past-end side-B must equal run_to_end (versus)");
+        prop_assert_eq!(vsought.result(), vran.result(),
+            "seek-past-end result must equal run_to_end (versus)");
+    }
+
+    // ── (a‴) Input::LaunchWeapon EXECUTION is semantically pinned ────────────
+    //
+    // `Input::apply_to_game(LaunchWeapon(slot))` must actually launch the weapon
+    // in that slot: consume it from the arsenal AND emit a `WeaponLaunched` event
+    // for the relay. Replay/server PBTs mostly check accept/ack/recording, so a
+    // mutant `Input::LaunchWeapon(_slot) => {}` (a silent no-op) survives them.
+    // Here we grant a weapon into a known slot, apply the Input, and assert both
+    // the arsenal decrement and the emitted launch event.
+    #[test]
+    fn launch_weapon_input_consumes_arsenal_and_emits_event(
+        seed in any::<u64>(),
+        tok in 0_i32..MAX_WEAPONS,
+    ) {
+        use bt_core::GameEvent;
+        let Some(token) = bt_core::WeaponToken::from_index(tok) else { return Ok(()); };
+        let mut g = Game::new(seed);
+        // Grant the token; find the slot it landed in.
+        prop_assume!(g.grant_weapon(token));
+        let slot = (0..10usize).find(|&s| g.arsenal_token(s) == tok)
+            .expect("granted token must occupy a slot");
+        let qty_before = g.arsenal_quantity(slot);
+        let _ = g.take_events(); // clear any spawn/start events
+
+        Input::LaunchWeapon(slot as u32).apply_to_game(&mut g);
+
+        // The arsenal slot must have one fewer (consumed).
+        let qty_after = g.arsenal_quantity(slot);
+        prop_assert_eq!(qty_after, qty_before - 1,
+            "LaunchWeapon must consume one from arsenal slot {} ({} -> {})",
+            slot, qty_before, qty_after);
+        // And a WeaponLaunched(token) event must be queued for the relay.
+        let launched = g.take_events().into_iter()
+            .any(|e| matches!(e, GameEvent::WeaponLaunched(t) if t == token));
+        prop_assert!(launched,
+            "LaunchWeapon must emit WeaponLaunched({:?}) for the relay", token);
     }
 
     // ── (c) Replay JSON round-trip ──────────────────────────────────────────

@@ -231,6 +231,55 @@ proptest! {
     }
 
     // -----------------------------------------------------------------------
+    // (c1'') A CORRECTLY-SIGNED token with a BAD `alg`/`typ` header is rejected.
+    //        The tamper test breaks the MAC; here we instead forge a header
+    //        (`alg:"none"` or a wrong `typ`) and RE-SIGN header.payload with the
+    //        REAL secret, so the MAC is valid. A verifier that only checks the MAC
+    //        (the JWT algorithm-confusion footgun) would accept it; we require
+    //        rejection. This pins the verifier's header validation, which the
+    //        MAC-only tests could never reach (a valid MAC + bad header).
+    // -----------------------------------------------------------------------
+    #[test]
+    fn correctly_signed_bad_header_is_rejected(
+        raw in "[a-zA-Z0-9]{1,20}",
+        // Pick a forged header to plant.
+        which in 0usize..3,
+    ) {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let Some(clean) = sanitize_name(&raw) else { return Ok(()); };
+        let secret = secret_a();
+
+        // A forged header that is NOT the issuer's {"alg":"HS256","typ":"JWT"}.
+        let forged_header_json = match which {
+            0 => r#"{"alg":"none","typ":"JWT"}"#,
+            1 => r#"{"alg":"HS512","typ":"JWT"}"#,
+            _ => r#"{"alg":"HS256","typ":"NOTJWT"}"#,
+        };
+        let header_b64 = URL_SAFE_NO_PAD.encode(forged_header_json.as_bytes());
+        let payload_b64 = URL_SAFE_NO_PAD.encode(
+            serde_json::json!({ "name": clean, "iat": IAT }).to_string(),
+        );
+        let signing_input = format!("{header_b64}.{payload_b64}");
+
+        // RE-SIGN with the REAL secret, exactly as bt-identity does — so the MAC
+        // is genuinely valid over this forged header.
+        let mut mac = Hmac::<Sha256>::new_from_slice(&secret).unwrap();
+        mac.update(signing_input.as_bytes());
+        let sig_b64 = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+        let forged = format!("{signing_input}.{sig_b64}");
+
+        prop_assert!(
+            verify_token_with(&secret, &forged).is_none(),
+            "a validly-MAC'd token with header {} must be REJECTED (alg-confusion guard)",
+            forged_header_json
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // (c2) Tampered payload (swap to a different name) fails verification.
     // -----------------------------------------------------------------------
     #[test]

@@ -875,6 +875,136 @@ mod tests {
             .count() as i64
     }
 
+    /// Force `side` to clear roughly `target` lines by repeatedly prefilling its
+    /// bottom two rows and locking. Returns the side's final cleared-line count.
+    fn force_side_clears(b: &mut Bout, side: bt_core::versus::Side, target: i64) -> i64 {
+        let mut guard = 0;
+        while b.versus.game(side).score().lines < target && guard < 60 {
+            guard += 1;
+            {
+                let bd = b.versus.game_mut(side).board_mut();
+                let (w, h) = (bd.width, bd.height);
+                for y in [h - 1, h - 2] {
+                    for x in 0..w { bd.set(x, y, Some(bt_core::Cell::die(6))); }
+                }
+            }
+            let before = b.versus.game(side).score().lines;
+            for _ in 0..600 {
+                b.versus.game_mut(side).begin_drop();
+                b.tick(16);
+                if b.is_over() || b.versus.game(side).score().lines > before { break; }
+            }
+            if b.is_over() { break; }
+        }
+        b.versus.game(side).score().lines
+    }
+
+    // -----------------------------------------------------------------------
+    // Property (g): `Bout::take_dirty` reports cross-player events. A delivered
+    //   weapon (and funds steal / bazaar entry) is something a client can't predict
+    //   from its own inputs, so the server sets a dirty flag to push a prompt
+    //   keyframe. Nothing pinned `Bout::take_dirty`, so `take_dirty() -> false`
+    //   survived. Here: A launches a weapon at B, a tick DELIVERS it -> take_dirty
+    //   must be true exactly once, then clear.
+    // -----------------------------------------------------------------------
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn take_dirty_fires_on_a_delivered_weapon(
+            seed_a in any::<u64>(),
+            seed_b in any::<u64>(),
+        ) {
+            let mut b = Bout::new(seed_a, seed_b);
+            // Drain the start-of-match dirty (if any).
+            let _ = b.take_dirty();
+            // A acquires + launches a cross-player weapon at B.
+            b.versus.game_mut(Side::A).grant_weapon(bt_core::WeaponToken::RiseUp);
+            prop_assert!(b.apply_input(Side::A, &Input::LaunchWeapon(0), 1),
+                "the launch input is accepted");
+            prop_assert!(!b.take_dirty(),
+                "apply_input alone must not mark dirty (delivery happens in the tick)");
+
+            // The tick relays the launch -> weapon delivered -> dirty set.
+            b.tick(16);
+            prop_assert!(b.take_dirty(),
+                "a delivered cross-player weapon must mark the bout dirty");
+            // And it CLEARS after being taken.
+            prop_assert!(!b.take_dirty(), "take_dirty must clear after being read");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property (h): `Bout::lines(side)` reflects the side's real cleared-line
+    //   count (used to settle TrueSkill). Only ever checked at the fresh zero
+    //   state, so `lines(_) -> 0` survived. Force real clears on a side and assert
+    //   `lines(side)` equals the underlying game's `score().lines`.
+    // -----------------------------------------------------------------------
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+
+        #[test]
+        fn lines_accessor_tracks_real_clears(
+            seed_a in any::<u64>(),
+            seed_b in any::<u64>(),
+            side_idx in 0usize..2,
+        ) {
+            let mut b = Bout::new(seed_a, seed_b);
+            let side = if side_idx == 0 { Side::A } else { Side::B };
+            let cleared = force_side_clears(&mut b, side, 4);
+            prop_assume!(cleared > 0); // the side really cleared lines
+            // The accessor must mirror the engine's count exactly (not a constant).
+            prop_assert_eq!(b.lines(side) as i64, b.versus.game(side).score().lines,
+                "Bout::lines(side) must equal the side's real cleared-line count");
+            prop_assert_eq!(b.lines(side), cleared as u32,
+                "Bout::lines(side) must be the {} lines we forced", cleared);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property (i): a SPY EXPIRES after the opponent clears its `duration` lines.
+    //   The spy bookkeeping decrements the remaining budget by the opponent's
+    //   line-clears each tick; once it hits 0 the spy is dropped (`spying` false,
+    //   no spy_board). Only ever checked immediately after launch, so `let delta =
+    //   0` (a spy that never expires) survived. Here we launch a spy, force the
+    //   opponent through MORE than its duration of clears, and assert it expired.
+    // -----------------------------------------------------------------------
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(24))]
+
+        #[test]
+        fn a_spy_expires_after_the_opponents_duration_of_clears(
+            seed_a in any::<u64>(),
+            seed_b in any::<u64>(),
+            // 0=Ames(20), 1=Ace(30) — pick the shorter-duration spies to keep the
+            // forced-clear loop bounded.
+            spy_idx in 0usize..2,
+        ) {
+            let spy = [bt_core::WeaponToken::Ames, bt_core::WeaponToken::Ace][spy_idx];
+            let duration = weapon_table()[spy.index()].duration as i64;
+
+            let mut b = Bout::new(seed_a, seed_b);
+            // A launches the spy at B.
+            b.versus.game_mut(Side::A).grant_weapon(spy);
+            prop_assert!(b.apply_input(Side::A, &Input::LaunchWeapon(0), 1));
+            b.tick(16); // relay records the spy launch; the bout activates it
+            prop_assert!(b.snapshot_for(Side::A, false).spying,
+                "A must be spying immediately after launching {:?}", spy);
+
+            // Force B (the opponent) to clear MORE than `duration` lines; the spy's
+            // budget is charged by B's clears each tick.
+            let got = force_side_clears(&mut b, Side::B, duration + 2);
+            prop_assume!(got >= duration); // B cleared enough to exhaust the spy
+
+            // The spy must have EXPIRED — A is no longer spying, and a keyframe
+            // frame carries no spy board.
+            prop_assert!(!b.snapshot_for(Side::A, false).spying,
+                "the spy must expire after the opponent clears its {}-line duration", duration);
+            prop_assert!(b.snapshot_for(Side::A, true).spy_board.is_none(),
+                "an expired spy must not still reveal the opponent board");
+        }
+    }
+
     #[test]
     fn rejects_relay_internal_inputs_from_clients() {
         // The anti-cheat core: a client must not be able to grant itself a
