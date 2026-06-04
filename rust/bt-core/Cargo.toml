@@ -11,3 +11,5 @@ description = "Faithful port of BattleTris game logic (board, pieces, weapons, s
 [dependencies]
 
 [dev-dependencies]
+# Property-based testing (test-only — the shipped engine stays dependency-free).
+proptest = "1"

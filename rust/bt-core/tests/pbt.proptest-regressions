@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b327d5072d28c9ba6540e496a1c2d78475c23f81504bf2ed45e502318e9a21ab # shrinks to seed = 36067593327093996, ops = [Drop, Tick, Tick, Tick, Tick, Tick, Rotate, Rotate, Right, Rotate, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Rotate, Tick, Tick, Rotate, Rotate, Rotate, Rotate, Tick, Rotate, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick]

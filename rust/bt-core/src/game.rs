@@ -373,8 +373,14 @@ impl Game {
             // Next piece (or top-out).
             self.spawn();
         } else {
-            // Slid off the edge in time — keep falling.
+            // Slid off the edge in time — keep falling. Advance the game's
+            // position AND the piece's own: collision/locking read self.x/y,
+            // while render + land() read p.x/y, so they must stay in lockstep.
+            // (Omitting the p.y sync here let a piece lock one row above where it
+            // rendered — resting in mid-air; caught by the position-sync PBT.)
             self.y += self.delta_y;
+            p.x = self.x;
+            p.y = self.y;
             self.current = Some(p);
             self.phase = Phase::Falling;
             self.drop_accum = 0;
@@ -1208,6 +1214,39 @@ impl Cur<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The "blocks sit in mid-air" guarantee: `place()` (the lock-delay expiry)
+    /// re-checks gravity. If the piece can still move down — e.g. it was slid
+    /// over a hole during the 150ms slide window — it RESUMES FALLING instead of
+    /// locking floating. So a locked piece is always supported; overhangs from a
+    /// tuck are possible (classic Tetris keeps holes), but nothing locks with
+    /// empty space under every cell.
+    #[test]
+    fn a_piece_that_can_still_fall_resumes_falling_not_locks_midair() {
+        let mut g = Game::new(1);
+        let y0 = g.y;
+        let piece_id = g.current.as_ref().unwrap().kind.id();
+        // Pretend the lock-delay is running while the fresh piece is still high
+        // up with nothing under it (the "slid over a hole" situation).
+        g.phase = Phase::Sliding;
+        g.sliding = 1;
+        assert!(
+            g.current.as_ref().unwrap().can_move_to(&g.board, g.x, g.y + g.delta_y),
+            "precondition: the piece can move down"
+        );
+        g.place(false);
+        assert_eq!(g.phase, Phase::Falling, "it resumed falling");
+        assert_eq!(g.y, y0 + g.delta_y, "gravity moved it down a row");
+        assert_eq!(
+            g.current.as_ref().map(|p| p.kind.id()),
+            Some(piece_id),
+            "same piece still in play — it did NOT lock or spawn a new one"
+        );
+        // The crux of the mid-air bug: the game's position (collision/lock) and
+        // the piece's own (render/land) must stay in lockstep after the resume.
+        let p = g.current.as_ref().unwrap();
+        assert_eq!((g.x, g.y), (p.x, p.y), "game & piece positions stay synced");
+    }
 
     /// While the weapons bazaar is open the whole game is frozen
     /// (`BTGame::pauseAllTimeOuts`), so player input must be inert. This guards
