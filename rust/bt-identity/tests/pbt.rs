@@ -167,6 +167,45 @@ proptest! {
     }
 
     // -----------------------------------------------------------------------
+    // (c1') Tampered HEADER fails verification. The MAC covers `header.payload`,
+    //       so flipping a byte of the header segment (e.g. forging `alg`/`typ`)
+    //       must break verification. The payload/signature tamper tests never
+    //       touch the header, so a mutant that signs/verifies the PAYLOAD ONLY
+    //       (while still emitting `header.payload.sig`) survived them — a forged
+    //       header would then pass. Here we demand rejection.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn tampered_header_rejected(
+        raw in "[a-zA-Z0-9]{1,30}",
+        flip_idx in any::<usize>(),
+    ) {
+        let Some(clean) = sanitize_name(&raw) else {
+            return Ok(());
+        };
+        let secret = secret_a();
+        let token = issue_token_with(&secret, &clean, IAT);
+
+        // The header is the FIRST dot-separated segment.
+        let first_dot = token.find('.').unwrap();
+        let (header, rest) = token.split_at(first_dot); // rest starts with '.'
+        let mut header_bytes = header.as_bytes().to_vec();
+        if header_bytes.is_empty() {
+            return Ok(());
+        }
+        let idx = flip_idx % header_bytes.len();
+        header_bytes[idx] ^= 0xFF; // any change
+        let tampered = format!("{}{}", String::from_utf8_lossy(&header_bytes), rest);
+        // (Guard: if the flip happened to be a no-op, skip — it never is for ^0xFF.)
+        prop_assume!(tampered != token);
+
+        prop_assert!(
+            verify_token_with(&secret, &tampered).is_none(),
+            "a tampered header must be rejected (the MAC must cover the header); got {:?}",
+            verify_token_with(&secret, &tampered)
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // (c2) Tampered payload (swap to a different name) fails verification.
     // -----------------------------------------------------------------------
     #[test]

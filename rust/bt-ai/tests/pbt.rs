@@ -515,3 +515,78 @@ proptest! {
             "take_turn left the piece at its spawn pose despite a differing target");
     }
 }
+
+// ---------------------------------------------------------------------------
+// eval_board GOLDEN FIXTURES (exact numeric values).
+//
+// The directional properties above pin the SHAPE of the heuristic, and the
+// `eval_penalty_weights_match_btcomputer` unit test pins the named CONSTANTS, but
+// neither pins that the FORMULA assembles them correctly (right coefficients /
+// powers / branch). A mutant like `height_pen = fraction^3 * HEIGHT_PENALTY`
+// (wrong power) or `variance_raw * 50.0 * (1-f)^2` (wrong cubic) keeps the
+// constants and the directional orderings, yet changes the number. These hand-
+// derived exact values (from the BTCBoard::eval formula) catch that.
+#[test]
+fn eval_board_matches_hand_derived_golden_values() {
+    let approx = |got: f64, want: f64, label: &str| {
+        assert!((got - want).abs() < 1e-6, "{label}: eval_board = {got}, expected {want}");
+    };
+
+    // (1) Empty board: no variance, no holes, top == h so height fraction = 0,
+    //     no lines. eval == 0 exactly.
+    let empty = Board::standard(false);
+    approx(eval_board(&empty), 0.0, "empty board");
+
+    // (2) A single filled FLOOR cell at (0, 27):
+    //     top=27, fraction_top=27/28.
+    //     variance_raw = 2 (the C++ ptops_[1]-seeded scan over one step at each
+    //       edge of the lone column), variance = 2*50*(1/28)^3.
+    //     height_pen = (1/28)^2 * 30000.  No holes, no lines.
+    let mut one = Board::standard(false);
+    one.set(0, 27, Some(brick()));
+    let f = 1.0_f64 / 28.0;
+    let want_one = 2.0 * 50.0 * f * f * f + f * f * 30_000.0;
+    approx(eval_board(&one), want_one, "single floor cell");
+
+    // (3) A complete bottom row (all 10 cols at y=27):
+    //     top=27, variance 0 (flat), height_pen = (1/28)^2*30000, ONE full line.
+    //     top(27) is NOT < MIDLINE(14), so the line bonus uses the ELSE branch:
+    //       LINE_BONUS * (-4 + 1) * fraction_top = 5000 * -3 * 27/28, and eval
+    //       SUBTRACTS it (so it adds +14464.2857…).
+    let mut row = Board::standard(false);
+    for x in 0..10 { row.set(x, 27, Some(brick())); }
+    let ftop = 27.0_f64 / 28.0;
+    let height_pen = f * f * 30_000.0;
+    let line_bonus = 5_000.0 * (-4.0 + 1.0) * ftop; // negative
+    let want_row = height_pen - line_bonus;
+    approx(eval_board(&row), want_row, "full bottom row");
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// `take_turn` must engage Ernie's FLAT placement score (`ai_begin_drop` ->
+    /// `BT_BOARD_HGT / 2`, BTComputer.C:1255), NOT the human hard-drop bonus
+    /// (`begin_drop` -> `BT_BOARD_HGT - y`). On a FRESH game the piece is at the
+    /// spawn row (y = 0), so the human bonus would be `BT_BOARD_HGT` (= 28) while
+    /// the AI's flat award is `BT_BOARD_HGT / 2` (= 14) — distinct values. We
+    /// assert the score jumps by EXACTLY the flat amount when take_turn fires the
+    /// drop, killing an `ai_begin_drop()` -> `begin_drop()` substitution.
+    #[test]
+    fn take_turn_uses_the_flat_ai_drop_score(seed in any::<u64>()) {
+        use bt_core::constants::BT_BOARD_HGT;
+        let mut g = Game::new(seed);
+        // Fresh game: the piece is at spawn (y = 0). take_turn rotates/slides (no
+        // vertical move) then fires the drop, so the score award is computed at y=0.
+        prop_assert_eq!(g.piece_pos().1, 0, "fresh piece must be at the spawn row");
+        let score_before = g.score().score;
+
+        let mut ernie = Computer::new();
+        ernie.take_turn(&mut g); // engages ai_begin_drop (synchronous score award)
+
+        let delta = g.score().score - score_before;
+        prop_assert_eq!(delta, (BT_BOARD_HGT / 2) as i64,
+            "take_turn must award the FLAT AI drop score {} (not the human {}-y bonus); got {}",
+            BT_BOARD_HGT / 2, BT_BOARD_HGT, delta);
+    }
+}

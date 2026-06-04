@@ -162,19 +162,29 @@ proptest! {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
-    /// Force a real top-out (random play almost never reaches one), then verify
-    /// the latch holds. Side B's board is filled near-full with a DIAGONAL hole
-    /// so no row is ever complete — nothing clears it away — so B cannot place
-    /// pieces and tops out; result() then must stay fixed for all further play.
+    /// Force a real top-out on EITHER side (random play almost never reaches one),
+    /// assert the RIGHT winner is latched, and that the latch holds. The losing
+    /// side's board is filled near-full with a DIAGONAL hole so no row is ever
+    /// complete — nothing clears it — so it tops out. The SURVIVOR must win:
+    ///   * B tops out  -> result == 1 (A wins)   [the `result = 2` GameOver arm]
+    ///   * A tops out  -> result == 2 (B wins)   [the `result = 1` GameOver arm]
+    /// Parametrising the losing side covers BOTH arms — the old test only forced B,
+    /// so dropping the A-topout arm (`GameOver => self.result = 2`, versus.rs) or
+    /// crossing the winners survived.
     #[test]
-    fn result_latches_after_forced_topout(
+    fn result_latches_with_the_correct_winner_on_either_topout(
         seed_a in any::<u64>(),
         seed_b in any::<u64>(),
+        loser_is_a in any::<bool>(),
         extra in 1usize..120usize,
     ) {
+        let loser = if loser_is_a { Side::A } else { Side::B };
+        // The SURVIVOR wins: result is 1 when A wins (B out), 2 when B wins (A out).
+        let expected_winner = if loser_is_a { 2 } else { 1 };
+
         let mut v = Versus::new(seed_a, seed_b);
         {
-            let b = v.game_mut(Side::B).board_mut();
+            let b = v.game_mut(loser).board_mut();
             let (w, h) = (b.width, b.height);
             for y in 4..h {
                 for x in 0..w {
@@ -185,20 +195,24 @@ proptest! {
             }
         }
 
-        // Drive B down until it tops out.
+        // Drive the loser down until it tops out.
         let mut r = 0;
         for _ in 0..800 {
-            v.game_mut(Side::B).begin_drop();
+            v.game_mut(loser).begin_drop();
             v.tick(16);
             r = v.result();
             if r != 0 { break; }
         }
-        prop_assert!(r != 0, "B did not top out from a near-full board");
+        prop_assert!(r != 0, "{:?} did not top out from a near-full board", loser);
+        prop_assert_eq!(r, expected_winner,
+            "wrong winner latched: {:?} topped out, expected result {} (survivor wins), got {}",
+            loser, expected_winner, r);
 
-        // Latched: result is unchanged by any further ticks.
+        // Latched: result is unchanged (and stays the right winner) for all further play.
         for _ in 0..extra {
             v.tick(16);
-            prop_assert_eq!(v.result(), r, "result changed after latching to {}", r);
+            prop_assert_eq!(v.result(), expected_winner,
+                "result changed after latching to {}", expected_winner);
         }
     }
 }
@@ -384,41 +398,65 @@ proptest! {
             "the seized funds must be credited to the attacker (A)");
     }
 
-    /// SCORE/FUNDS relay across sides: whatever score/lines/funds B banks must be
-    /// mirrored into A's `op_score`/`op_lines`/`op_funds` (and vice versa) via the
-    /// `Scored` event the relay forwards as `receive_op_score`. A mutant that drops
-    /// or misroutes the Scored relay leaves the mirror at 0.
+    /// SCORE/FUNDS relay across sides — in BOTH directions. Whatever score/lines/
+    /// funds a side banks must be mirrored into the OTHER side's op_* via the
+    /// `Scored` event the relay forwards as `receive_op_score`. We force a real
+    /// line clear on EACH side (so both the A->B and B->A relay arms fire) and
+    /// assert each side's mirror matches the other's real score. The earlier
+    /// version only cleared on B, so dropping the A-events `Scored` arm
+    /// (`versus.rs:210`) survived — the B->A direction was never exercised.
     #[test]
     fn score_and_funds_mirror_across_the_relay(
         seed_a in any::<u64>(),
         seed_b in any::<u64>(),
     ) {
         let mut v = Versus::new(seed_a, seed_b);
-        // Make B clear a line so it banks real score/funds: prefill B's bottom rows.
-        {
-            let b = v.game_mut(Side::B).board_mut();
+        // Prefill BOTH sides' bottom rows so each banks real score/funds on a lock.
+        for side in [Side::A, Side::B] {
+            let b = v.game_mut(side).board_mut();
             let (w, h) = (b.width, b.height);
             for y in [h - 1, h - 2] {
                 for x in 0..w { b.set(x, y, Some(Cell::die(6))); }
             }
         }
-        // Drive B to a lock (clears those rows -> Scored relayed to A as op_*).
-        for _ in 0..600 {
-            v.game_mut(Side::B).begin_drop();
+        // Drive BOTH to a lock (each clears -> Scored relayed to the OTHER side).
+        // begin_drop is what bumps the hard-drop `score`, so stop calling it once a
+        // side has cleared — otherwise its score keeps drifting AFTER its mirror was
+        // set, and the comparison races. After both clear we run a couple of quiet
+        // ticks (no begin_drop, so scores are stable) to let the relay settle, then
+        // compare a consistent post-relay snapshot.
+        for _ in 0..1200 {
+            if v.is_over() { break; }
+            if v.game(Side::A).score().lines == 0 { v.game_mut(Side::A).begin_drop(); }
+            if v.game(Side::B).score().lines == 0 { v.game_mut(Side::B).begin_drop(); }
             v.tick(16);
-            if v.is_over() || v.game(Side::B).score().lines > 0 { break; }
+            if v.game(Side::A).score().lines > 0 && v.game(Side::B).score().lines > 0 { break; }
         }
+        prop_assume!(!v.is_over());
+        // Quiet settle: no begin_drop, so each side's hard-drop `score` is now
+        // frozen; ticking lets both boards lock their next pieces (re-emitting a
+        // Scored at the stable score) and the relay run, so both mirrors converge
+        // to the other side's final banked score.
+        for _ in 0..40 { if v.is_over() { break; } v.tick(16); }
+        prop_assume!(!v.is_over());
+        let a_score = v.game(Side::A).score();
         let b_score = v.game(Side::B).score();
-        prop_assume!(b_score.lines > 0); // B actually cleared a line
+        // BOTH sides actually cleared (so both relay directions are exercised).
+        prop_assume!(a_score.lines > 0 && b_score.lines > 0);
 
-        // A's mirror of B must match B's real score/lines/funds.
-        let a_mirror = v.game(Side::A).score();
-        prop_assert_eq!(a_mirror.op_lines, b_score.lines,
-            "A.op_lines must mirror B.lines via the relay");
-        prop_assert_eq!(a_mirror.op_score, b_score.score,
-            "A.op_score must mirror B.score via the relay");
-        prop_assert_eq!(a_mirror.op_funds, b_score.funds,
-            "A.op_funds must mirror B.funds via the relay");
+        // A's mirror must match B's real score, AND B's mirror must match A's.
+        prop_assert_eq!(a_score.op_lines, b_score.lines,
+            "A.op_lines must mirror B.lines (B->A relay)");
+        prop_assert_eq!(a_score.op_score, b_score.score,
+            "A.op_score must mirror B.score (B->A relay)");
+        prop_assert_eq!(a_score.op_funds, b_score.funds,
+            "A.op_funds must mirror B.funds (B->A relay)");
+        prop_assert_eq!(b_score.op_lines, a_score.lines,
+            "B.op_lines must mirror A.lines (A->B relay)");
+        prop_assert_eq!(b_score.op_score, a_score.score,
+            "B.op_score must mirror A.score (A->B relay)");
+        prop_assert_eq!(b_score.op_funds, a_score.funds,
+            "B.op_funds must mirror A.funds (A->B relay)");
     }
 }
 

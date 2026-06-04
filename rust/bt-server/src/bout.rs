@@ -200,6 +200,14 @@ impl Bout {
     /// Export the match so far as a deterministic, replayable [`VersusReplay`]
     /// (the seeds + the totally-ordered client-input stream). Replaying re-runs a
     /// `Versus`, so the whole relay reproduces — no need to record its effects.
+    ///
+    /// `tick_count` is `self.tick`, the number of ticks the bout actually ran.
+    /// The server's match loop applies a batch of inputs and then ALWAYS ticks
+    /// (`apply_input … ; bout.tick()`), so every recorded frame is stamped at a
+    /// tick strictly less than `self.tick` and a `VersusReplayPlayer` (which
+    /// applies a frame on its stamped tick, then ticks, stopping at `executed >=
+    /// tick_count`) replays all of them. (Stamping a frame AT `self.tick` would
+    /// require an input with no following tick, which the loop never produces.)
     pub fn to_replay(&self, dt_ms: i32, engine_sha: &str) -> VersusReplay {
         VersusReplay {
             version: REPLAY_VERSION,
@@ -396,6 +404,29 @@ mod tests {
         ]
     }
 
+    /// Strategy: a non-shopping legal client input — legal in general, but illegal
+    /// WHILE in the bazaar (the match is frozen; only buy/sell/leave shop actions
+    /// are allowed there). The bazaar gate must reject every one of these.
+    fn non_bazaar_legal_input() -> impl Strategy<Value = Input> {
+        prop_oneof![
+            Just(Input::MoveLeft),
+            Just(Input::MoveRight),
+            Just(Input::Rotate),
+            Just(Input::SoftDrop),
+            Just(Input::BeginDrop),
+            (0u32..10u32).prop_map(Input::LaunchWeapon),
+        ]
+    }
+
+    /// Force `side` into the bazaar deterministically by crossing a 20-line bazaar
+    /// boundary via the score mirror (combined lines 19 -> lines_til_baz = 1, then
+    /// 20 -> update_bazaar sees new_til(20) > 1 and fires `in_bazaar`). Uses only
+    /// the engine's own bazaar logic, so it's faithful to a real entry.
+    fn force_into_bazaar(b: &mut Bout, side: Side) {
+        b.versus.game_mut(side).receive_op_score(0, 19, 0);
+        b.versus.game_mut(side).receive_op_score(0, 20, 0);
+    }
+
     /// Strategy: legal client inputs that must NEVER change a player's funds via
     /// the `apply_input` call itself (funds may only change later, in the engine
     /// tick, from line clears). Excludes SoftDrop (can trigger a lock+clear in
@@ -576,6 +607,58 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Property (b''): the BAZAAR INPUT GATE. While a side is shopping the match is
+    //   frozen; only buy/sell/leave are legal. A non-shopping input (move / rotate
+    //   / drop / launch) must be REJECTED with NO state change — no ack advance, no
+    //   recorded frame, no game movement. This gate had zero coverage, so a mutant
+    //   `if false && g.is_in_bazaar() && !is_bazaar_input(input) { return false; }`
+    //   (letting a client nudge its frozen piece / fire weapons mid-shop) survived.
+    // -----------------------------------------------------------------------
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn bazaar_gate_rejects_non_shopping_inputs(
+            seed_a in any::<u64>(),
+            seed_b in any::<u64>(),
+            side_idx in 0usize..2,
+            // seq 2.. leaves seq 1 for the baseline accepted shopping input below.
+            seq in 2u64..=u64::MAX,
+            input in non_bazaar_legal_input(),
+        ) {
+            let mut b = Bout::new(seed_a, seed_b);
+            let side = if side_idx == 0 { Side::A } else { Side::B };
+
+            force_into_bazaar(&mut b, side);
+            prop_assert!(b.versus.game(side).is_in_bazaar(),
+                "precondition: the side must actually be in the bazaar");
+
+            // Baseline: a SHOPPING input (SellWeapon of an empty slot) is bazaar-legal
+            // and accepted, advancing ack to 1 — so the rejection below is a true
+            // no-advance, not just "ack was already 0" (a gate that rejected
+            // EVERYTHING in the bazaar would still pass a 0==0 check).
+            prop_assert!(b.apply_input(side, &Input::SellWeapon(0), 1),
+                "a shopping input must be accepted while in the bazaar");
+            prop_assert_eq!(b.snapshot_for(side, false).ack, 1, "shopping input advanced ack to 1");
+
+            let ack_before = b.snapshot_for(side, false).ack;
+            let frames_before = b.frames.clone();
+            let game_before = b.versus.game(side).snapshot_bytes();
+
+            // The non-shopping input must be REJECTED while in the bazaar.
+            let accepted = b.apply_input(side, &input, seq);
+            prop_assert!(!accepted,
+                "non-shopping input {:?} must be rejected while in the bazaar", input);
+            prop_assert_eq!(b.snapshot_for(side, false).ack, ack_before,
+                "ack must NOT advance on a bazaar-rejected input {:?}", input);
+            prop_assert_eq!(&b.frames, &frames_before,
+                "NO frame must be recorded for a bazaar-rejected input {:?}", input);
+            prop_assert_eq!(b.versus.game(side).snapshot_bytes(), game_before,
+                "the game must NOT move on a bazaar-rejected input {:?}", input);
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Property (c): INJECTION ORACLE. A non-economic legal input (move / rotate /
     //   drop / launch) must NEVER change a player's funds when applied — funds
     //   may only move later, inside the engine tick, from real line clears. So a
@@ -683,14 +766,29 @@ mod tests {
         }
     }
 
+    /// FULL per-side fingerprint: the locked board, the falling piece pose, AND
+    /// the score triple (score / lines / funds) + op-mirror. `export_board()` alone
+    /// misses the current piece + all scoring, so a replay that diverges on a
+    /// trailing input (which moves the piece/score but not the locked board) or on
+    /// score/funds slips through a board-only comparison.
+    fn side_fingerprint(g: &bt_core::Game) -> (Vec<i32>, i32, i32, i32, i64, i64, i64, i64, i64, i64) {
+        let (px, py, po) = g.current_piece().map(|p| (p.x, p.y, p.orientation)).unwrap_or((-99, -99, -99));
+        let s = g.score();
+        (g.export_board(), px, py, po, s.score, s.lines, s.funds, s.op_score, s.op_lines, s.op_funds)
+    }
+
     // -----------------------------------------------------------------------
     // Property (d): `Bout::to_replay` REPLAYS BIT-EXACT. The server records every
     //   accepted client input (stamped with the tick) and exports the match as a
-    //   VersusReplay; a VersusReplayPlayer must reconstruct BOTH boards and the
-    //   result exactly. `to_replay` had ZERO coverage, so a mutant that dropped a
-    //   frame, mis-stamped its tick, swapped the side field, or used the wrong
-    //   seed sailed through. Here we drive a real bout with random accepted inputs
-    //   + ticks, export, replay, and compare.
+    //   VersusReplay; a VersusReplayPlayer must reconstruct BOTH boards, the
+    //   falling pieces, the FULL scores, AND the result exactly. We compare FULL
+    //   side fingerprints (board + falling piece + score/lines/funds/op_*), NOT
+    //   just export_board — so a recorded-input substitution that keeps the locked
+    //   board identical but changes the piece pose or the score (e.g. recording
+    //   `AiDrop` in place of `BeginDrop`: the flat AI score vs the human hard-drop
+    //   bonus) is caught. We mirror the server's match loop exactly — apply a
+    //   batch of inputs, THEN always tick — so a frame is never stamped at a tick
+    //   the replay won't reach (the real loop's `apply_input … ; bout.tick()`).
     // -----------------------------------------------------------------------
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(96))]
@@ -699,11 +797,11 @@ mod tests {
         fn to_replay_reconstructs_the_match_bit_exact(
             seed_a in any::<u64>(),
             seed_b in any::<u64>(),
-            // (side, input, then this many ticks) — interleave inputs with ticks
-            // so frames land on varied ticks.
-            steps in prop::collection::vec(
-                (0usize..2, legal_client_input(), 0u32..8),
-                0..200,
+            // Per loop-iteration: a batch of (side, input) applied this tick, then
+            // exactly one tick — faithful to the server's `apply…; bout.tick()`.
+            iters in prop::collection::vec(
+                prop::collection::vec((0usize..2, legal_client_input()), 0..3),
+                0..400,
             ),
         ) {
             use bt_replay::VersusReplayPlayer;
@@ -717,34 +815,33 @@ mod tests {
             let mut b = Bout::new(seed_a, seed_b);
             let mut next_seq = [1u64, 1u64];
 
-            for (side_idx, input, ticks) in steps {
+            for batch in iters {
                 if b.is_over() { break; }
-                let side = if side_idx == 0 { Side::A } else { Side::B };
-                let seq = next_seq[side_idx];
-                next_seq[side_idx] += 1;
-                let _ = b.apply_input(side, &input, seq);
-                for _ in 0..ticks {
-                    if b.is_over() { break; }
-                    b.tick(16);
+                for (side_idx, input) in batch {
+                    let side = if side_idx == 0 { Side::A } else { Side::B };
+                    let seq = next_seq[side_idx];
+                    next_seq[side_idx] += 1;
+                    let _ = b.apply_input(side, &input, seq);
                 }
+                // The server ALWAYS ticks after draining a batch of inputs.
+                b.tick(16);
             }
 
-            let live_a = b.versus.game(Side::A).export_board();
-            let live_b = b.versus.game(Side::B).export_board();
+            let live_a = side_fingerprint(b.versus.game(Side::A));
+            let live_b = side_fingerprint(b.versus.game(Side::B));
             let live_result = b.result();
 
-            // Export + replay.
+            // Export + replay (through JSON too — the on-disk form).
             let replay = b.to_replay(TICK_MS, "pbt");
-            // Round-trip through JSON too (the on-disk form), then replay.
             let replay = bt_replay::VersusReplay::from_json(&replay.to_json())
                 .expect("to_replay JSON must parse");
             let mut player = VersusReplayPlayer::new(replay);
             player.run_to_end();
 
-            prop_assert_eq!(player.game(true).export_board(), live_a,
-                "replayed Side A board must match the live bout");
-            prop_assert_eq!(player.game(false).export_board(), live_b,
-                "replayed Side B board must match the live bout");
+            prop_assert_eq!(side_fingerprint(player.game(true)), live_a,
+                "replayed Side A (board+piece+score) must match the live bout");
+            prop_assert_eq!(side_fingerprint(player.game(false)), live_b,
+                "replayed Side B (board+piece+score) must match the live bout");
             prop_assert_eq!(player.result(), live_result,
                 "replayed match result must match the live bout");
         }

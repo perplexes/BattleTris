@@ -378,6 +378,21 @@ proptest! {
         prop_assert_eq!(h.score().lines,    h2.score().lines);
         prop_assert_eq!(h.score().op_score, h2.score().op_score);
         prop_assert_eq!(h.score().op_lines, h2.score().op_lines);
+
+        // STRONGER: the client keyframe must equal the FULL snapshot with ONLY
+        // op_funds zeroed — byte for byte, across the WHOLE state (board, arsenal,
+        // pieces, weapon durations, …). The score-only checks above can't catch a
+        // client keyframe that ALSO mangles non-score state (e.g. a stray
+        // `g.board.clear()` inside `client_keyframe_bytes`): build the expected
+        // redacted bytes by taking the full snapshot, zeroing JUST op_funds, and
+        // re-serialising, then demand the client keyframe matches exactly.
+        let mut expected = Game::new(seed.wrapping_add(31));
+        prop_assert!(expected.restore_bytes(&full));
+        // Re-plant op_* with op_funds = 0 (score-mirror set has no other side effects).
+        expected.receive_op_score(op_score, op_lines, 0);
+        prop_assert_eq!(expected.snapshot_bytes(), client.clone(),
+            "client keyframe must equal the full snapshot with ONLY op_funds redacted \
+             (anything else mangled — e.g. the board cleared — is a leak/bug)");
     }
 }
 

@@ -193,6 +193,67 @@ fn random_versus_replay(max_ticks: u32, max_frames: usize) -> impl Strategy<Valu
     )
 }
 
+/// EVERY `Input` variant, including the relay-internal and parameterised ones —
+/// for the JSON round-trip, which must preserve the full enum (not just the 5
+/// movement inputs the executable strategies use).
+fn any_input() -> impl Strategy<Value = Input> {
+    prop_oneof![
+        Just(Input::MoveLeft),
+        Just(Input::MoveRight),
+        Just(Input::Rotate),
+        Just(Input::BeginDrop),
+        Just(Input::AiDrop),
+        Just(Input::SoftDrop),
+        any::<u32>().prop_map(Input::LaunchWeapon),
+        any::<i32>().prop_map(Input::BuyWeapon),
+        any::<i32>().prop_map(Input::SellWeapon),
+        Just(Input::LeaveBazaar),
+        any::<bool>().prop_map(Input::SetPaused),
+        any::<i32>().prop_map(Input::ReceiveWeapon),
+        (any::<i64>(), any::<i64>(), any::<i64>())
+            .prop_map(|(score, lines, funds)| Input::ReceiveOpScore { score, lines, funds }),
+        any::<i64>().prop_map(Input::AddFunds),
+    ]
+}
+
+/// A `Replay` with full field variety for the JSON round-trip ONLY (it isn't
+/// executed): every `Mode`, an optional `ai_level`/`title`, and the full `Input`
+/// enum. Catches a serde mutant that drops/renames `title` or `ai_level`, or that
+/// silently substitutes an input variant on (de)serialise.
+fn json_replay() -> impl Strategy<Value = Replay> {
+    let mode = prop_oneof![
+        Just(Mode::Practice),
+        Just(Mode::VsComputer),
+        Just(Mode::VsPlayer),
+    ];
+    let frames = prop::collection::vec((0_u32..1000, any_input()), 0..48)
+        .prop_map(|mut v| { v.sort_by_key(|(t, _)| *t);
+            v.into_iter().map(|(tick, input)| Frame { tick, input }).collect::<Vec<_>>() });
+    (
+        any::<u32>(), mode, proptest::option::of(any::<u32>()), any::<u32>(),
+        proptest::option::of("[a-zA-Z0-9 _-]{0,40}"), frames,
+    ).prop_map(|(seed, mode, ai_level, tick_count, title, frames)| Replay {
+        version: REPLAY_VERSION,
+        seed, mode, ai_level, dt_ms: DT, engine_sha: "pbt-json".to_string(),
+        tick_count, frames, title,
+    })
+}
+
+/// A `VersusReplay` with full variety for the JSON round-trip ONLY.
+fn json_versus_replay() -> impl Strategy<Value = VersusReplay> {
+    let frames = prop::collection::vec((0_u32..1000, 0_u8..2, any_input()), 0..48)
+        .prop_map(|mut v| { v.sort_by_key(|(t, _, _)| *t);
+            v.into_iter().map(|(tick, side, input)| VersusFrame { tick, side, input }).collect::<Vec<_>>() });
+    (
+        any::<u32>(), any::<u32>(), any::<u32>(),
+        proptest::option::of("[a-zA-Z0-9 _-]{0,40}"), frames,
+    ).prop_map(|(seed_a, seed_b, tick_count, title, frames)| VersusReplay {
+        version: REPLAY_VERSION,
+        seed_a, seed_b, dt_ms: DT, engine_sha: "pbt-json".to_string(),
+        tick_count, frames, title,
+    })
+}
+
 // ─── properties ─────────────────────────────────────────────────────────────
 
 proptest! {
@@ -384,9 +445,45 @@ proptest! {
         );
     }
 
-    // ── (c) Replay JSON round-trip ──────────────────────────────────────────
+    // ── (b‴) VersusReplayPlayer BACKWARD seek rebuilds correctly ─────────────
+    //
+    // `versus_seek_equals_step` only seeks FORWARD from a fresh player, so the
+    // distinct rebuild-from-the-seeds branch in `VersusReplayPlayer::seek`
+    // (taken only when `target < executed`) was untested — a mutant
+    // `if false && target < self.executed { ... }` (never rebuild) survived. Seek
+    // forward to `hi`, then BACK to `lo`, and compare both sides to a fresh player
+    // stepped straight to `lo`.
     #[test]
-    fn replay_json_round_trip(replay in random_replay(200, 64)) {
+    fn versus_seek_backward_rebuilds_correctly(
+        replay in random_versus_replay(200, 64),
+        x in 0_u32..200_u32,
+        y in 0_u32..200_u32,
+    ) {
+        let hi = x.max(y).min(replay.tick_count);
+        let lo = x.min(y).min(replay.tick_count);
+
+        let mut p = VersusReplayPlayer::new(replay.clone());
+        p.seek(hi);
+        p.seek(lo); // backward (unless hi == lo) -> the rebuild path
+
+        let mut q = VersusReplayPlayer::new(replay.clone());
+        for _ in 0..lo { if !q.step() { break; } }
+
+        prop_assert_eq!(p.tick_index(), q.tick_index(),
+            "VersusReplayPlayer backward-seek tick_index mismatch (hi={}, lo={})", hi, lo);
+        prop_assert_eq!(fingerprint(p.game(true)), fingerprint(q.game(true)),
+            "side-A diverged after backward seek (hi={}, lo={})", hi, lo);
+        prop_assert_eq!(fingerprint(p.game(false)), fingerprint(q.game(false)),
+            "side-B diverged after backward seek (hi={}, lo={})", hi, lo);
+    }
+
+    // ── (c) Replay JSON round-trip ──────────────────────────────────────────
+    //    Uses the FULL-variety `json_replay` (every Mode, optional ai_level/title,
+    //    every Input variant) so a serde mutant that drops/renames `title` or
+    //    `ai_level`, or substitutes an input on (de)serialise, is caught — the old
+    //    strategy hardcoded Practice/None/None and a 5-input subset.
+    #[test]
+    fn replay_json_round_trip(replay in json_replay()) {
         let json = replay.to_json();
         let parsed = Replay::from_json(&json).expect("from_json must succeed");
         prop_assert_eq!(parsed, replay);
@@ -394,7 +491,7 @@ proptest! {
 
     // ── (c′) VersusReplay JSON round-trip ───────────────────────────────────
     #[test]
-    fn versus_replay_json_round_trip(replay in random_versus_replay(200, 64)) {
+    fn versus_replay_json_round_trip(replay in json_versus_replay()) {
         let json = replay.to_json();
         let parsed = VersusReplay::from_json(&json).expect("from_json must succeed");
         prop_assert_eq!(parsed, replay);
