@@ -590,6 +590,12 @@ impl Game {
 
     /// Sell `token` back in the bazaar (the "Remove" button): refund its
     /// effective price and remove one from the arsenal. Returns true on success.
+    ///
+    /// NB the refund is [`Self::bazaar_price`], which (like the buy price) tracks
+    /// the CURRENT Carter multiplier — faithful to BTBazaar.C:458. This makes
+    /// buying un-cursed and selling while Carter-cursed a deliberate +base-price
+    /// arbitrage ("buy low, stack, cash out double once cursed") — a kept skill
+    /// boon, NOT a bug. See `carter_buy_uncursed_sell_cursed_is_an_intentional_arbitrage_boon`.
     pub fn sell_weapon(&mut self, token: WeaponToken) -> bool {
         if !self.in_bazaar {
             return false;

@@ -935,6 +935,51 @@ fn open_bazaar(g: &mut Game) {
     let _ = g.take_events();
 }
 
+/// CARTER ARBITRAGE — an INTENTIONAL, faithful-to-1994 economic nuance, kept on
+/// purpose (NOT a bug). Both the buy price and the sell refund track the CURRENT
+/// Carter multiplier (BTBazaar.C:415 buy / :458 sell — `price_ * (1 + carter_)`),
+/// so buying a weapon while un-cursed and selling it back while Carter-cursed nets
+/// a profit of EXACTLY its base price. It's a skill boon: stack cheap inventory,
+/// then cash out for double once Carter curses you. A naive first-principles "the
+/// bazaar never mints funds" property fails on this by design — so instead we pin
+/// the EXACT boon, so a refactor can't silently remove it.
+///
+/// (Deliberately NOT conserving: the curse pays its victim to liquidate, which is
+/// faithful to the original and rewards players who know how to stack. If we ever
+/// wanted Carter to be a pure penalty, the sell path would drop the `*(1+carter)`.)
+#[test]
+fn carter_buy_uncursed_sell_cursed_is_an_intentional_arbitrage_boon() {
+    let tok = WeaponToken::RiseUp;
+    let base = weapon_table()[tok.index()].price as i64;
+    assert!(base > 0);
+
+    let mut g = Game::new(3);
+    open_bazaar(&mut g);
+    assert!(g.is_in_bazaar(), "bazaar open");
+    g.add_funds(base * 4);
+    let _ = g.take_events();
+    let funds_start = g.score().funds;
+
+    // Buy while NOT Carter-cursed (pays base).
+    assert!(g.buy_weapon(tok), "buy should succeed");
+
+    // Carter activates between bazaar visits (a lock on an empty board -> no clear).
+    g.leave_bazaar();
+    assert!(receive_and_flush(&mut g, WeaponToken::Carter), "Carter active");
+    open_bazaar(&mut g);
+    assert!(g.is_in_bazaar(), "bazaar re-open");
+
+    // Sell it back while cursed (refunds 2*base).
+    assert!(g.sell_weapon(tok), "sell should succeed");
+
+    assert_eq!(
+        g.score().funds, funds_start + base,
+        "Carter buy-low/sell-high mints exactly the base price {base} — the intentional boon \
+         (started {funds_start}, ended {})",
+        g.score().funds
+    );
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(48))]
 
