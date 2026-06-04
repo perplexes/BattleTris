@@ -1719,7 +1719,12 @@ async fn main() {
         .fallback_service(ServeDir::new(&static_dir))
         .with_state(state);
 
-    let addr = format!("0.0.0.0:{port}");
+    // Bind the IPv6 any-address. On Linux this is dual-stack (IPV6_V6ONLY=0 by
+    // default), so it serves BOTH the public site (the fly proxy reaches us over
+    // IPv4) AND fly's private 6PN network, which is IPv6-ONLY — that 6PN path is
+    // how the region bots reach us at ws://battletris.internal:8080. Binding only
+    // 0.0.0.0 (IPv4) left the 6PN port closed, so the bots got "connection refused".
+    let addr = format!("[::]:{port}");
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .unwrap_or_else(|e| panic!("bind {addr}: {e}"));
