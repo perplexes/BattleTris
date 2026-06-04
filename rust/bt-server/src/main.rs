@@ -56,8 +56,9 @@ use tower_http::services::ServeDir;
 mod bout;
 use bout::Bout;
 
-/// Player identity (HS256 JWT) + the `/api/identity` endpoint.
-mod identity;
+/// Player identity (HS256 JWT) — now a shared crate so the bots can mint the
+/// same tokens. Aliased to `identity` so existing `identity::…` call sites stand.
+use bt_identity as identity;
 
 /// One queued input headed for an authoritative [`Bout`]: (side, action, seq).
 type BoutInput = (Side, Input, u64);
@@ -146,6 +147,14 @@ struct Client {
     /// Lobby presence. `None` until the client establishes a name (anonymous
     /// connections don't appear in the roster). See [`Status`].
     status: Option<Status>,
+    /// Optional geo label (e.g. "Tokyo") shown next to the name in the roster.
+    /// Set from the `available` message; the region bots announce theirs.
+    geo: Option<String>,
+    /// True for a headless practice bot (announced via `available`'s `bot` flag).
+    /// A bot is human-challengeable and human-auto-pairable, but two bots never
+    /// auto-pair with EACH OTHER — otherwise they'd drain the lobby playing
+    /// themselves and leave nobody for a visitor to challenge.
+    is_bot: bool,
 }
 
 /// Shared server state.
@@ -171,9 +180,9 @@ struct App {
     /// One in-flight challenge per challenger; superseded/cleared on
     /// accept/decline/timeout/disconnect.
     challenges: HashMap<u64, (u64, Instant)>,
-    /// Last `players` roster we broadcast (the de-duped name->status list), so the
-    /// presence push only re-sends on a real change.
-    last_players: Vec<(String, Status)>,
+    /// Last `players` roster we broadcast (the de-duped name/status/geo list), so
+    /// the presence push only re-sends on a real change.
+    last_players: Vec<RosterEntry>,
 }
 
 impl App {
@@ -266,11 +275,14 @@ fn maybe_broadcast_stats(app: &mut App) {
     }
 }
 
+/// One de-duped lobby row: (name, busiest status, optional geo label).
+type RosterEntry = (String, Status, Option<String>);
+
 /// The de-duped lobby roster: one entry per *named* client, keeping the
 /// most-engaged status when a name has several connections (e.g. two tabs).
 /// Sorted by name so the broadcast-on-change comparison is order-stable.
-fn roster(app: &App) -> Vec<(String, Status)> {
-    let mut by_name: HashMap<String, Status> = HashMap::new();
+fn roster(app: &App) -> Vec<RosterEntry> {
+    let mut by_name: HashMap<String, (Status, Option<String>)> = HashMap::new();
     for c in app.clients.values() {
         let (name, status) = match (c.name.as_str(), c.status) {
             (n, Some(s)) if !n.is_empty() => (n.to_string(), s),
@@ -279,22 +291,31 @@ fn roster(app: &App) -> Vec<(String, Status)> {
         by_name
             .entry(name)
             .and_modify(|cur| {
-                if status.rank() > cur.rank() {
-                    *cur = status;
+                // Keep the busiest connection's status; carry its geo with it.
+                if status.rank() > cur.0.rank() {
+                    *cur = (status, c.geo.clone());
                 }
             })
-            .or_insert(status);
+            .or_insert((status, c.geo.clone()));
     }
-    let mut out: Vec<(String, Status)> = by_name.into_iter().collect();
+    let mut out: Vec<RosterEntry> =
+        by_name.into_iter().map(|(name, (status, geo))| (name, status, geo)).collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
 }
 
-/// The `players` presence frame the lobby renders.
-fn players_msg(roster: &[(String, Status)]) -> Value {
+/// The `players` presence frame the lobby renders. Each entry carries an optional
+/// `geo` (a city/region label) — bots announce theirs; humans usually omit it.
+fn players_msg(roster: &[RosterEntry]) -> Value {
     let players: Vec<Value> = roster
         .iter()
-        .map(|(name, status)| json!({ "name": name, "status": status.as_str() }))
+        .map(|(name, status, geo)| {
+            let mut o = json!({ "name": name, "status": status.as_str() });
+            if let Some(g) = geo {
+                o["geo"] = json!(g);
+            }
+            o
+        })
         .collect();
     json!({ "type": "players", "players": players })
 }
@@ -404,6 +425,14 @@ fn clear_challenge(app: &mut App, challenger: u64) -> Option<u64> {
 /// (the unified presence switch: Available = challengeable AND auto-pairable).
 fn is_match_candidate(app: &App, id: u64, cid: u64) -> bool {
     if cid == id {
+        return false;
+    }
+    // Two bots never auto-pair: that would leave the lobby full of bots playing
+    // each other and nobody Available for a visitor to challenge. (A human can
+    // still challenge or auto-pair INTO a bot — only bot-vs-bot is excluded.)
+    if app.clients.get(&id).is_some_and(|c| c.is_bot)
+        && app.clients.get(&cid).is_some_and(|c| c.is_bot)
+    {
         return false;
     }
     match app.clients.get(&cid) {
@@ -829,6 +858,12 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
                     let name = resolve_name(&app, &v, &prior);
                     let go_available = value && !name.is_empty();
                     let st = app.rating_for(&name);
+                    // Optional presence decoration: a geo label and a bot flag (the
+                    // region bots set both). geo shows in the roster; the bot flag
+                    // keeps two bots from auto-pairing each other.
+                    let geo = v.get("geo").and_then(|g| g.as_str())
+                        .map(|s| s.chars().take(24).collect::<String>());
+                    let is_bot = v.get("bot").and_then(|b| b.as_bool()).unwrap_or(false);
                     if !go_available {
                         // Going unavailable / un-named -> leave the roster + queue.
                         app.waiting.retain(|&w| w != id);
@@ -837,6 +872,10 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
                         c.name = name;
                         c.state = st;
                         c.status = go_available.then_some(Status::Available);
+                        if geo.is_some() {
+                            c.geo = geo;
+                        }
+                        c.is_bot = is_bot;
                     }
                     // An Available, named client is eligible for auto-pairing.
                     let pb = if go_available { try_match(&mut app, id) } else { None };
@@ -970,7 +1009,10 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
         let st = a.rating_for("");
         a.clients.insert(
             id,
-            Client { name: String::new(), tx, peer: None, state: st, bout: None, status: None },
+            Client {
+                name: String::new(), tx, peer: None, state: st, bout: None,
+                status: None, geo: None, is_bot: false,
+            },
         );
     }
 
@@ -1709,8 +1751,22 @@ mod tests {
         let state = app.rating_for(name);
         app.clients.insert(
             id,
-            Client { name: name.to_string(), tx, peer: None, state, bout: None, status: None },
+            Client {
+                name: name.to_string(), tx, peer: None, state, bout: None,
+                status: None, geo: None, is_bot: false,
+            },
         );
+        rx
+    }
+
+    /// Like [`add_client`] but flags the client as a bot (for the bot-vs-bot
+    /// auto-pair-exclusion test).
+    fn add_bot(app: &mut App, id: u64, name: &str) -> mpsc::UnboundedReceiver<Message> {
+        let rx = add_client(app, id, name);
+        if let Some(c) = app.clients.get_mut(&id) {
+            c.is_bot = true;
+            c.status = Some(Status::Available);
+        }
         rx
     }
 
@@ -2026,7 +2082,37 @@ mod tests {
         set_present(&mut app, 2, Status::InGame);
         let r = roster(&app);
         assert_eq!(r.len(), 1, "de-duped by name");
-        assert_eq!(r[0], ("dup".to_string(), Status::InGame), "the busiest status wins");
+        assert_eq!(r[0], ("dup".to_string(), Status::InGame, None), "the busiest status wins");
+    }
+
+    #[test]
+    fn two_bots_do_not_auto_pair_but_a_human_pairs_into_a_bot() {
+        let mut app = test_app();
+        let _b1 = add_bot(&mut app, 1, "Tokyo-Ernie");
+        let _b2 = add_bot(&mut app, 2, "London-Ernie");
+        // Neither bot should be matchable against the other.
+        assert!(!is_match_candidate(&app, 1, 2), "bot 2 is not an auto-pair target for bot 1");
+        assert!(try_match(&mut app, 1).is_none(), "a lone-among-bots bot finds no auto-pair");
+        // A human going Available auto-pairs into a waiting bot.
+        let _h = add_client(&mut app, 3, "human");
+        if let Some(c) = app.clients.get_mut(&3) {
+            c.status = Some(Status::Available);
+        }
+        assert!(is_match_candidate(&app, 3, 1), "a bot IS a valid pair for a human");
+        assert!(try_match(&mut app, 3).is_some(), "human auto-pairs into a bot");
+    }
+
+    #[test]
+    fn roster_carries_a_geo_label() {
+        let mut app = test_app();
+        let _r = add_client(&mut app, 1, "Sydney-Ernie");
+        if let Some(c) = app.clients.get_mut(&1) {
+            c.status = Some(Status::Available);
+            c.geo = Some("Sydney".to_string());
+        }
+        let frame = players_msg(&roster(&app));
+        let players = frame["players"].as_array().unwrap();
+        assert_eq!(players[0]["geo"], "Sydney", "geo rides the players frame");
     }
 
     #[test]

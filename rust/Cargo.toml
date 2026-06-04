@@ -5,8 +5,10 @@ members = [
     "bt-trueskill",
     "bt-ai",
     "bt-replay",
+    "bt-identity",
     "bt-wasm",
     "bt-server",
+    "bt-bot",
 ]
 # bt-wasm only targets wasm32 (cdylib + wasm-bindgen); keep it out of the
 # default host build/test so `cargo test` works without the wasm toolchain.
@@ -15,6 +17,7 @@ default-members = [
     "bt-trueskill",
     "bt-ai",
     "bt-replay",
+    "bt-identity",
 ]
 
 [workspace.package]

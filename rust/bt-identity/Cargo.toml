@@ -1,0 +1,16 @@
+[package]
+name = "bt-identity"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "BattleTris player identity: a minimal hand-rolled HS256 JWT shared by the server and the bots."
+
+[dependencies]
+# A minimal hand-rolled HS256 JWT (no `jsonwebtoken`) — HMAC-SHA256 over
+# base64url(header).base64url(payload). Shared by bt-server (verify) and bt-bot
+# (self-mint), so both speak the exact same token format with one BT_JWT_SECRET.
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+getrandom = "0.2"
+serde_json = "1"

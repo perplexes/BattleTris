@@ -1457,6 +1457,8 @@ body.bazaar-open #touchControls { display: none !important; }
 }
 .lobby-list-row:hover { background-color: #b8b8b8; }
 .lobby-list-row.selected { background-color: #ff0000; color: #ffffff; }
+.ll-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ll-geo { font-size: 11px; opacity: 0.75; white-space: nowrap; }
 .ll-status { opacity: 0.85; font-size: 12px; }
 .lobby-list-empty { padding: 14px; color: #555; font-size: 12px; font-style: italic; }
 

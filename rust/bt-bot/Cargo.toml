@@ -1,0 +1,23 @@
+[package]
+name = "bt-bot"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "BattleTris bot: a headless networked player (Ernie AI over the wire) used to populate the lobby and exercise the netcode across regions."
+
+[[bin]]
+name = "bt-bot"
+path = "src/main.rs"
+
+[dependencies]
+bt-core = { path = "../bt-core" }
+bt-ai = { path = "../bt-ai" }
+bt-replay = { path = "../bt-replay" }
+bt-identity = { path = "../bt-identity" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
+# Plaintext WebSocket client only — the bot reaches the server over fly's private
+# 6PN network (ws://battletris.internal:8080) or localhost, so no TLS is needed
+# (which also keeps the static musl build free of rustls/aws-lc C deps).
+tokio-tungstenite = "0.21"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+serde_json = "1"

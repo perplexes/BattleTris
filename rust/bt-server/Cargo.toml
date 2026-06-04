@@ -13,6 +13,7 @@ path = "src/main.rs"
 bt-core = { path = "../bt-core" }
 bt-trueskill = { path = "../bt-trueskill" }
 bt-replay = { path = "../bt-replay" }
+bt-identity = { path = "../bt-identity" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "signal"] }
 axum = { version = "0.7", features = ["ws"] }
 tower-http = { version = "0.5", features = ["fs"] }
@@ -24,11 +25,5 @@ serde_json = "1"
 # (the Dockerfile points the C build at musl-gcc). Keeps the server's only C dep
 # fully static — no libsqlite3 needed at runtime.
 rusqlite = { version = "0.31", features = ["bundled"] }
-# Identity tokens: a minimal hand-rolled HS256 JWT (no `jsonwebtoken` pulled in)
-# — HMAC-SHA256 over base64url(header).base64url(payload), so the only crypto
-# deps are the RustCrypto primitives. `getrandom` seeds the per-process secret
-# when `BT_JWT_SECRET` isn't set. Server-only; bt-core stays dependency-free.
-hmac = "0.12"
-sha2 = "0.10"
-base64 = "0.22"
-getrandom = "0.2"
+# Identity tokens (HS256 JWT) live in the shared `bt-identity` crate so the
+# server (verify) and the bots (self-mint) speak the exact same format.

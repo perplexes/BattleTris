@@ -148,7 +148,9 @@ function renderOnlineList(players) {
     for (const p of lobbyPlayers) {
         const row = document.createElement('div');
         row.className = 'lobby-list-row' + (p.name === selectedPlayer ? ' selected' : '');
-        row.innerHTML = `<span class="ll-name">${escapeHtml(p.name)}</span><span class="ll-status">${escapeHtml(p.status || '')}</span>`;
+        // Optional geo label (bots announce a city/region); humans usually omit it.
+        const geo = p.geo ? `<span class="ll-geo">\u{1F310} ${escapeHtml(p.geo)}</span>` : '';
+        row.innerHTML = `<span class="ll-name">${escapeHtml(p.name)}</span>${geo}<span class="ll-status">${escapeHtml(p.status || '')}</span>`;
         row.addEventListener('click', () => selectPlayer(p.name));
         onlineListEl.appendChild(row);
     }
