@@ -90,40 +90,39 @@ export function drawCellOnContext(context, x, y, cellId) {
         context.fillStyle = '#eeee00';
         context.fillRect(px, py, CELL_SIZE - BEVEL_BORDER, CELL_SIZE - BEVEL_BORDER);
 
-        // Draw face. Everything is centered on the FACE center (cx) so the
-        // smiley is symmetric — previously the eyes sat left of a centered
-        // mouth, which read as lopsided.
+        // Face, faithful to BTBox.C (23x23 cell). Constants from BTBox.C:
+        //   eyes  XFillArc box (X1=2 | X3=11, Y1=1, 4x7)  -> filled ellipses
+        //   smile XDrawArc box (X2=3, Y2=8, 11x5)  lower half (sits high)
+        //   frown XDrawArc box (X2=3, Y3=13, 11x5) upper half (sits LOW, clear of eyes)
+        //   tear  3 blue points + a 3x3 blue drop by the right eye
+        const X1 = 2, X2 = 3, X3 = 11, Y1 = 1, Y2 = 8, Y3 = 13;
+        const XRAD = 4, YRAD = 7, XRAD2 = 11, YRAD2 = 5;
+        // X11 arc box (x,y,w,h) -> canvas ellipse centered in that box.
+        const arcBox = (bx, by, w, h, start, end) => {
+            context.beginPath();
+            context.ellipse(px + bx + w / 2, py + by + h / 2, w / 2, h / 2, 0, start, end);
+        };
+
+        // Eyes: two filled ellipses (XFillArc, full circle).
         context.fillStyle = '#000000';
-        const cx = px + (CELL_SIZE - BEVEL_BORDER) / 2;
-        const eyeWidth = 4;
-        const eyeHeight = 7;
-        const eyeY = py + 5;
-        const eyeDx = 4; // half the eye separation
+        arcBox(X1, Y1, XRAD, YRAD, 0, Math.PI * 2); context.fill();
+        arcBox(X3, Y1, XRAD, YRAD, 0, Math.PI * 2); context.fill();
 
-        // Eyes (symmetric about cx)
-        context.beginPath();
-        context.ellipse(cx - eyeDx, eyeY, eyeWidth / 2, eyeHeight / 2, 0, 0, Math.PI * 2);
-        context.fill();
-        context.beginPath();
-        context.ellipse(cx + eyeDx, eyeY, eyeWidth / 2, eyeHeight / 2, 0, 0, Math.PI * 2);
-        context.fill();
-
-        // Mouth (centered on cx)
+        context.strokeStyle = '#000000';
+        context.lineWidth = 1;
         if (cellId === 21) {
-            // Happy: smile (lower half of arc)
-            context.beginPath();
-            context.arc(cx, py + 12, 5, 0, Math.PI);
-            context.stroke();
+            // Smile: lower half of the mouth ellipse (canvas 0..PI = bottom).
+            arcBox(X2, Y2, XRAD2, YRAD2, 0, Math.PI); context.stroke();
         } else {
-            // Unhappy: frown (upper half of arc)
-            context.beginPath();
-            context.arc(cx, py + 12, 5, Math.PI, 0);
-            context.stroke();
-
-            // Tear: small blue dot below the right eye
+            // Frown: upper half, in the LOWER mouth box (canvas PI..2PI = top).
+            arcBox(X2, Y3, XRAD2, YRAD2, Math.PI, Math.PI * 2); context.stroke();
+            // Tear by the right eye.
             context.fillStyle = '#3050ff';
+            context.fillRect(px + X3 + 1, py + Y1 + 7, 1, 1);
+            context.fillRect(px + X3 + 1, py + Y1 + 8, 1, 1);
+            context.fillRect(px + X3 + 2, py + Y1 + 8, 1, 1);
             context.beginPath();
-            context.arc(cx + eyeDx, py + 8, 2, 0, Math.PI * 2);
+            context.ellipse(px + X3 + 1.5, py + Y1 + 8 + 1.5, 1.5, 1.5, 0, 0, Math.PI * 2);
             context.fill();
         }
         return;
