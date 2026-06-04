@@ -6,8 +6,33 @@
 //!   (c) Computer::take_turn never panics and actually changes game state.
 
 use bt_ai::{best_placement, eval_board, Computer, Placement};
-use bt_core::{Board, Game, Piece, PieceKind};
+use bt_core::{Board, Cell, Game, Piece, PieceKind};
 use proptest::prelude::*;
+
+// ---------------------------------------------------------------------------
+// INDEPENDENT eval_board characterization.
+//
+// `best_placement_attains_global_minimum_score` recomputes the minimum with the
+// SAME `eval_board`, so a mutant `eval_board -> 0.0` (or any monotone rescaling)
+// passes it — both the candidate score and the recomputed min collapse together.
+// These pin the MEANING of eval_board WITHOUT routing through best_placement, by
+// constructing two hand-built boards that differ in exactly one structural way
+// and asserting the score moves the RIGHT direction. A constant/zeroed eval, a
+// dropped term, or a flipped sign breaks at least one of them.
+// ---------------------------------------------------------------------------
+
+/// A solid (color) cell for stacking test boards.
+fn brick() -> Cell {
+    Cell::color(1)
+}
+
+/// Fill column `x` of `board` solidly from row `top_y` down to the floor.
+fn fill_column_from(board: &mut Board, x: i32, top_y: i32) {
+    for y in top_y..board.height {
+        board.set(x, y, Some(brick()));
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 // Strategies
@@ -209,6 +234,207 @@ proptest! {
     }
 }
 
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    /// A board with a BURIED HOLE scores strictly WORSE (higher) than the same
+    /// board with the hole filled. We hold the column TOP constant across both
+    /// boards (so variance + height penalties are identical), so the ONLY delta
+    /// is the hole penalty. Kills `eval_board -> 0.0`, a dropped hole term, or a
+    /// hole penalty whose sign rewards holes.
+    #[test]
+    fn buried_hole_scores_strictly_worse(
+        cx in 0i32..10,
+        // Stack height above the hole (>=1 so the hole is genuinely covered).
+        cover in 1i32..6,
+    ) {
+        let h = 28;
+        // hole sits just under the cover; floor cell stays filled so the top of
+        // the column is identical in both boards.
+        let top_y = h - cover - 2;       // topmost filled row (same in both)
+        let hole_y = h - cover - 1;      // the cell we toggle
+        prop_assume!(top_y >= 0 && hole_y < h - 1);
+
+        // no_hole: column solid from top_y to floor (no empty cells below top).
+        let mut no_hole = Board::standard(false);
+        fill_column_from(&mut no_hole, cx, top_y);
+
+        // with_hole: same, but punch out hole_y (covered by >=1 brick above it).
+        let mut with_hole = no_hole.clone();
+        with_hole.set(cx, hole_y, None);
+
+        // Sanity: tops are identical (top filled cell unchanged).
+        prop_assert!(with_hole.occupied(cx, top_y) && no_hole.occupied(cx, top_y),
+            "column top must be filled in both boards");
+        prop_assert!(!with_hole.occupied(cx, hole_y), "the hole must actually be empty");
+
+        let s_no_hole = eval_board(&no_hole);
+        let s_with_hole = eval_board(&with_hole);
+        prop_assert!(
+            s_with_hole > s_no_hole + 1.0,
+            "a buried hole must raise the score: with_hole={} vs no_hole={} (col {}, cover {})",
+            s_with_hole, s_no_hole, cx, cover
+        );
+    }
+
+    /// A LOWER, FLATTER stack scores better (lower) than a TALLER, ROUGHER one.
+    /// Two sub-claims in one construction:
+    ///  * Lower is better: a 1-high single-column stack vs an H-high one (same
+    ///    column) — the taller stack has the larger height + variance penalties.
+    ///  * No full rows in either (only one column filled), so the line bonus
+    ///    never confounds it.
+    #[test]
+    fn taller_stack_scores_worse(
+        cx in 0i32..10,
+        tall in 6i32..24,
+    ) {
+        let h = 28;
+        // short: just the floor cell in column cx.
+        let mut short = Board::standard(false);
+        short.set(cx, h - 1, Some(brick()));
+        // tall: column cx filled `tall` rows high (top at h-tall).
+        let mut taller = Board::standard(false);
+        fill_column_from(&mut taller, cx, h - tall);
+
+        prop_assert!(
+            eval_board(&taller) > eval_board(&short) + 1.0,
+            "taller stack must score worse: tall={} short={} (col {}, height {})",
+            eval_board(&taller), eval_board(&short), cx, tall
+        );
+    }
+
+    /// A FLAT full-width-but-one stack scores better than a ROUGH one of the same
+    /// max height (variance term). Both leave column 9 empty so NO row is ever
+    /// complete (no line bonus) and neither has holes (each column is solid from
+    /// its own top to the floor). Same global top (max height k), so the height
+    /// penalty is identical — only the variance differs.
+    #[test]
+    fn rough_surface_scores_worse_than_flat(
+        k in 4i32..18,
+    ) {
+        let h = 28;
+        let flat_top = h - k;
+        // flat: columns 0..=8 all filled to the same height; column 9 empty.
+        let mut flat = Board::standard(false);
+        for x in 0..9 {
+            fill_column_from(&mut flat, x, flat_top);
+        }
+        // rough: columns 0..=8 alternate between max height k and a low stub
+        // (height 1), so the surface is jagged. Same MAX height (a full-k column
+        // exists), column 9 empty. No holes (each column solid to the floor).
+        let mut rough = Board::standard(false);
+        for x in 0..9 {
+            let col_top = if x % 2 == 0 { flat_top } else { h - 1 };
+            fill_column_from(&mut rough, x, col_top);
+        }
+        // Confirm the max height matches (so global top, hence height_pen, agrees).
+        prop_assert!(rough.occupied(0, flat_top), "rough must reach the flat max height");
+
+        prop_assert!(
+            eval_board(&rough) > eval_board(&flat) + 1.0,
+            "a rough surface must score worse than a flat one of equal max height: \
+             rough={} flat={} (k={})",
+            eval_board(&rough), eval_board(&flat), k
+        );
+    }
+
+    /// A board with a COMPLETED line scores better (lower) than the same board
+    /// one cell short of completing it. Construction: a SOLID block of `rows`
+    /// full rows sitting on the floor (so there are no holes underneath) vs the
+    /// same block with one corner cell of the TOP row removed — nothing is above
+    /// it, so the incomplete board just has one fewer complete line (and no
+    /// covered hole at the gap). The block is tall enough that its top is ABOVE
+    /// the midline (top_row < MIDLINE = 14), where `eval_board` rewards each
+    /// cleared line with a POSITIVE bonus it SUBTRACTS — so the completed board,
+    /// with one extra line, must score strictly lower. (Below the midline the
+    /// original deliberately PENALISES sub-tetris clears, so this property
+    /// targets the rewarding branch.) Kills a dropped/sign-flipped line bonus.
+    #[test]
+    fn completing_a_line_scores_better(
+        rows in 15i32..24,
+        gap in 0i32..10,
+    ) {
+        let w = 10;
+        let h = 28;
+        let top_row = h - rows; // topmost full row of the block (< MIDLINE)
+        prop_assert!(top_row < 14, "block top must be above the midline for the rewarding branch");
+        // complete: a solid block of `rows` full rows resting on the floor.
+        let mut complete = Board::standard(false);
+        for y in top_row..h {
+            for x in 0..w {
+                complete.set(x, y, Some(brick()));
+            }
+        }
+        // incomplete: remove the gap cell from the TOP row — nothing is above it,
+        // so it's not a covered hole; the column's top simply drops by one and
+        // that row is no longer complete.
+        let mut incomplete = complete.clone();
+        incomplete.set(gap, top_row, None);
+
+        // Sanity: complete has `rows` full rows; incomplete has one fewer.
+        let full_rows = |b: &Board| (0..h).filter(|&y| (0..w).all(|x| b.occupied(x, y))).count();
+        prop_assert_eq!(full_rows(&complete), rows as usize, "complete must have all rows full");
+        prop_assert_eq!(full_rows(&incomplete), (rows - 1) as usize,
+            "incomplete must have exactly one fewer full row");
+
+        prop_assert!(
+            eval_board(&complete) < eval_board(&incomplete),
+            "a completed line must score better than an incomplete one: \
+             complete={} incomplete={} (rows {}, gap {})",
+            eval_board(&complete), eval_board(&incomplete), rows, gap
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    /// `VsComputer`'s difficulty `level` must actually CHANGE Ernie's placement
+    /// cadence (`place_period = AI_LEVELS[level]`): a faster level places pieces
+    /// more often, so after a fixed tick budget a fast Ernie has committed strictly
+    /// MORE pieces (more board cells) than a slow one — under the SAME seed. A
+    /// mutant that ignores the level (`let idx = 0`) makes every difficulty behave
+    /// identically, so the two boards become equal and this fails. (The
+    /// record→replay property can't catch this — live and replay route through the
+    /// same constructor, so both make the identical mistake.)
+    #[test]
+    fn vs_computer_level_changes_ernie_cadence(seed in any::<u64>()) {
+        use bt_ai::VsComputer;
+        // Ernie's PLACEMENT count is monotone in its score: each committed drop adds
+        // a flat `BT_BOARD_HGT/2` via `ai_begin_drop` (independent of line clears,
+        // which only change cell COUNT — so score, not cells, is the robust cadence
+        // proxy here).
+        fn ai_score(vs: &VsComputer) -> i64 { vs.ai().score().score }
+
+        // Slow Ernie (level 0 = Comatose, 4000ms/place) vs fast Ernie (the last
+        // level = Bionic, 0ms/place). Same seed -> same piece stream + decisions,
+        // so the ONLY difference is how many pieces each has had time to place.
+        let slow_level = 0usize;
+        let fast_level = bt_ai::AI_LEVELS.len() - 1;
+        let mut slow = VsComputer::new(seed, slow_level);
+        let mut fast = VsComputer::new(seed, fast_level);
+
+        // Run a fixed budget of ticks. Don't touch the human side (so only Ernie's
+        // cadence drives the divergence).
+        for _ in 0..400 {
+            if slow.result() != 0 && fast.result() != 0 { break; }
+            slow.tick(16);
+            fast.tick(16);
+            let _ = slow.drain_events();
+            let _ = fast.drain_events();
+        }
+
+        let (slow_score, fast_score) = (ai_score(&slow), ai_score(&fast));
+        // The Bionic Ernie must have placed strictly more pieces than the Comatose
+        // one in the same budget (~6.4s of ticks): 4000ms/place allows <=1 or 2
+        // placements; 0ms places essentially every drop, banking far more score.
+        prop_assert!(fast_score > slow_score,
+            "a faster difficulty must place more pieces (higher AI score): \
+             fast(level {})={} vs slow(level {})={}",
+            fast_level, fast_score, slow_level, slow_score);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // (c) Computer::take_turn never panics and advances game state
 // ---------------------------------------------------------------------------
@@ -284,5 +510,153 @@ proptest! {
             piece_x_before, piece_x_after,
             piece_orient_before, piece_orient_after,
         );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// `take_turn` must actually STEER the piece to `best_placement`'s target,
+    /// not just hard-drop it where it spawned. "Anything changed" (above) is too
+    /// weak: a driver that calls `ai_begin_drop()` without any rotate/move passes
+    /// it (the falling piece still moves down). Here we compute the target
+    /// independently, and on a board where the target (x, orientation) DIFFERS
+    /// from the spawn pose, we assert the piece reached EXACTLY that pose BEFORE
+    /// the drop tick (begin_drop only engages the fast cadence — it doesn't move
+    /// the piece until the next tick). A "skip the alignment" mutant leaves the
+    /// piece at spawn and fails.
+    #[test]
+    fn take_turn_steers_piece_to_best_placement(
+        seed in any::<u64>(),
+        pre_ticks in 0u64..500u64,
+    ) {
+        let mut g = Game::new(seed);
+        for _ in 0..pre_ticks {
+            if g.is_game_over() { break; }
+            g.tick(16);
+        }
+        if g.is_game_over() { return Ok(()); }
+        let Some(piece) = g.current_piece().cloned() else { return Ok(()); };
+
+        // Independent target (same search the driver uses).
+        let target = best_placement(g.board(), &piece);
+        let (spawn_x, spawn_o) = (piece.x, piece.orientation);
+
+        // Only interesting when the AI must MOVE/ROTATE off the spawn pose.
+        prop_assume!((target.x, target.orientation) != (spawn_x, spawn_o));
+
+        let mut ernie = Computer::new();
+        ernie.take_turn(&mut g);
+
+        // Right after take_turn (no tick yet) the piece must sit at the target —
+        // the driver rotated then slid it there. (If the slide were blocked the
+        // target wouldn't have been an enterable/reachable best_placement; the
+        // companion enterability property guards that.)
+        let Some(after) = g.current_piece() else { return Ok(()); };
+        prop_assert_eq!(
+            (after.x, after.orientation),
+            (target.x, target.orientation),
+            "take_turn did not steer to best_placement: spawn=({},{}) target=({},{}) got=({},{})",
+            spawn_x, spawn_o, target.x, target.orientation, after.x, after.orientation
+        );
+        // And it genuinely left the spawn pose (non-vacuity).
+        prop_assert_ne!((after.x, after.orientation), (spawn_x, spawn_o),
+            "take_turn left the piece at its spawn pose despite a differing target");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// eval_board GOLDEN FIXTURES (exact numeric values).
+//
+// The directional properties above pin the SHAPE of the heuristic, and the
+// `eval_penalty_weights_match_btcomputer` unit test pins the named CONSTANTS, but
+// neither pins that the FORMULA assembles them correctly (right coefficients /
+// powers / branch). A mutant like `height_pen = fraction^3 * HEIGHT_PENALTY`
+// (wrong power) or `variance_raw * 50.0 * (1-f)^2` (wrong cubic) keeps the
+// constants and the directional orderings, yet changes the number. These hand-
+// derived exact values (from the BTCBoard::eval formula) catch that.
+#[test]
+fn eval_board_matches_hand_derived_golden_values() {
+    let approx = |got: f64, want: f64, label: &str| {
+        assert!((got - want).abs() < 1e-6, "{label}: eval_board = {got}, expected {want}");
+    };
+
+    // (1) Empty board: no variance, no holes, top == h so height fraction = 0,
+    //     no lines. eval == 0 exactly.
+    let empty = Board::standard(false);
+    approx(eval_board(&empty), 0.0, "empty board");
+
+    // (2) A single filled FLOOR cell at (0, 27):
+    //     top=27, fraction_top=27/28.
+    //     variance_raw = 2 (the C++ ptops_[1]-seeded scan over one step at each
+    //       edge of the lone column), variance = 2*50*(1/28)^3.
+    //     height_pen = (1/28)^2 * 30000.  No holes, no lines.
+    let mut one = Board::standard(false);
+    one.set(0, 27, Some(brick()));
+    let f = 1.0_f64 / 28.0;
+    let want_one = 2.0 * 50.0 * f * f * f + f * f * 30_000.0;
+    approx(eval_board(&one), want_one, "single floor cell");
+
+    // (3) A complete bottom row (all 10 cols at y=27):
+    //     top=27, variance 0 (flat), height_pen = (1/28)^2*30000, ONE full line.
+    //     top(27) is NOT < MIDLINE(14), so the line bonus uses the ELSE branch:
+    //       LINE_BONUS * (-4 + 1) * fraction_top = 5000 * -3 * 27/28, and eval
+    //       SUBTRACTS it (so it adds +14464.2857…).
+    let mut row = Board::standard(false);
+    for x in 0..10 { row.set(x, 27, Some(brick())); }
+    let ftop = 27.0_f64 / 28.0;
+    let height_pen = f * f * 30_000.0;
+    let line_bonus = 5_000.0 * (-4.0 + 1.0) * ftop; // negative
+    let want_row = height_pen - line_bonus;
+    approx(eval_board(&row), want_row, "full bottom row");
+
+    // (4) ONE CLOSED HOLE — the term the directional `buried_hole` property only
+    //     bounds (`> +1.0`), so a `CLOSED_HOLE_PENALTY 10_000 -> 9_000` mutant
+    //     survives it. Columns 0 and 1 filled rows 25..=27, with (0,26) punched
+    //     out: it's a hole (filled above at (0,25)), blocked left by the wall and
+    //     right by (1,26) -> CLOSED. No full rows (only 2 columns). Exact terms:
+    //       tops = [25,25,28,28,28,28,28,28,28,28], top = 25, f25 = 25/28.
+    //       variance_raw = 9 (the single 3-step at the col1->col2 edge, doubled by
+    //         the C++ "furthest column" repeat is 0 here), variance = 9*50*(3/28)^3.
+    //       one closed hole: hole_pen = 1 * 10_000; cov: depth0,blocks1 ->
+    //         cov_hole_pen = 1 * 3_000.
+    //       height_pen = (3/28)^2 * 30_000. No line bonus.
+    let mut hole = Board::standard(false);
+    for x in 0..2 {
+        for y in 25..28 { hole.set(x, y, Some(brick())); }
+    }
+    hole.set(0, 26, None); // punch the closed hole
+    let g = 3.0_f64 / 28.0; // 1 - 25/28
+    let variance = 9.0 * 50.0 * g * g * g;
+    let want_hole = variance + 3_000.0 /* cov */ + 10_000.0 /* closed hole */ + g * g * 30_000.0;
+    approx(eval_board(&hole), want_hole, "one closed hole");
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// `take_turn` must engage Ernie's FLAT placement score (`ai_begin_drop` ->
+    /// `BT_BOARD_HGT / 2`, BTComputer.C:1255), NOT the human hard-drop bonus
+    /// (`begin_drop` -> `BT_BOARD_HGT - y`). On a FRESH game the piece is at the
+    /// spawn row (y = 0), so the human bonus would be `BT_BOARD_HGT` (= 28) while
+    /// the AI's flat award is `BT_BOARD_HGT / 2` (= 14) — distinct values. We
+    /// assert the score jumps by EXACTLY the flat amount when take_turn fires the
+    /// drop, killing an `ai_begin_drop()` -> `begin_drop()` substitution.
+    #[test]
+    fn take_turn_uses_the_flat_ai_drop_score(seed in any::<u64>()) {
+        use bt_core::constants::BT_BOARD_HGT;
+        let mut g = Game::new(seed);
+        // Fresh game: the piece is at spawn (y = 0). take_turn rotates/slides (no
+        // vertical move) then fires the drop, so the score award is computed at y=0.
+        prop_assert_eq!(g.piece_pos().1, 0, "fresh piece must be at the spawn row");
+        let score_before = g.score().score;
+
+        let mut ernie = Computer::new();
+        ernie.take_turn(&mut g); // engages ai_begin_drop (synchronous score award)
+
+        let delta = g.score().score - score_before;
+        prop_assert_eq!(delta, (BT_BOARD_HGT / 2) as i64,
+            "take_turn must award the FLAT AI drop score {} (not the human {}-y bonus); got {}",
+            BT_BOARD_HGT / 2, BT_BOARD_HGT, delta);
     }
 }

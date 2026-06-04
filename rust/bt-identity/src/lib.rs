@@ -105,7 +105,20 @@ pub fn verify_token_with(secret: &[u8], token: &str) -> Option<String> {
     mac.update(signing_input.as_bytes());
     mac.verify_slice(&sig).ok()?;
 
-    // Signature checks out — decode the claims and pull the name.
+    // The MAC is valid — but also REQUIRE the declared algorithm/type to be the
+    // ones we issue (HS256 / JWT). Without this, a token whose header says
+    // `alg:"none"` (or any other algorithm) but happens to carry a valid HS256 MAC
+    // would be accepted — the classic JWT algorithm-confusion footgun. Since we
+    // only ever issue HS256, anything else is forged/invalid even if it MACs.
+    let header_claims: Value =
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(header).ok()?).ok()?;
+    if header_claims.get("alg").and_then(|v| v.as_str()) != Some("HS256")
+        || header_claims.get("typ").and_then(|v| v.as_str()) != Some("JWT")
+    {
+        return None;
+    }
+
+    // Signature + header check out — decode the claims and pull the name.
     let claims: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).ok()?).ok()?;
     let name = claims.get("name")?.as_str()?;
     sanitize_name(name)

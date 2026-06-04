@@ -18,7 +18,9 @@
 
 use bt_core::constants::{BT_BOARD_HGT, BT_BOARD_WTH};
 use bt_core::rng::Rng;
+use bt_core::weapons::WeaponToken;
 use bt_core::{Board, Cell};
+use proptest::prelude::*;
 
 /// Independent reference: clear full rows bottom-up, cascading everything above
 /// a cleared row down by one (standard gravity), accumulating `value` and
@@ -142,6 +144,55 @@ fn line_clear_matches_independent_reference() {
         "line-clear coverage too thin (single={saw_single_clear}, multi={saw_multi_clear}, \
          multi_nonzero_value={saw_multi_nonzero_value}); the value/funds comparison may be vacuous"
     );
+}
+
+// ---------------------------------------------------------------------------
+// FORCE line-clear semantics (the no-gravity weapon). The main differential is
+// scoped to weapons OFF, so a `let force = self.is_active(WeaponToken::Force)` ->
+// `let force = false` mutant in check_lines/remove_line survived it. With FORCE
+// active, a cleared full row is emptied IN PLACE — the stack above does NOT
+// cascade down. We pin both: WITHOUT force the marker above a cleared row falls
+// by one; WITH force it stays put.
+// ---------------------------------------------------------------------------
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    #[test]
+    fn force_clears_in_place_without_gravity(
+        marker_x in 0i32..BT_BOARD_WTH,
+        // The marker's row, strictly above the cleared floor row.
+        marker_y in 4i32..(BT_BOARD_HGT - 2),
+    ) {
+        let w = BT_BOARD_WTH;
+        let floor = BT_BOARD_HGT - 1;
+
+        // Build identical boards: a full floor row + a lone marker cell above it.
+        let build = || {
+            let mut b = Board::standard(false);
+            for x in 0..w { b.set(x, floor, Some(Cell::die(2))); }
+            b.set(marker_x, marker_y, Some(Cell::die(5)));
+            b
+        };
+
+        // WITHOUT force: clearing the floor row shifts the marker DOWN by one.
+        let mut plain = build();
+        let lc_plain = plain.check_lines();
+        prop_assert_eq!(lc_plain.lines, 1, "the floor row must clear");
+        prop_assert!(plain.get(marker_x, marker_y).is_none(),
+            "without force the marker must have left its original row");
+        prop_assert_eq!(plain.get(marker_x, marker_y + 1).map(|c| c.value()), Some(5),
+            "without force the marker must fall exactly one row (gravity)");
+
+        // WITH force: the floor row is emptied in place; the marker stays put.
+        let mut forced = build();
+        forced.set_active(WeaponToken::Force, true);
+        let lc_force = forced.check_lines();
+        prop_assert_eq!(lc_force.lines, 1, "the floor row must still clear under force");
+        prop_assert_eq!(forced.get(marker_x, marker_y).map(|c| c.value()), Some(5),
+            "WITH force the marker must NOT move (no gravity cascade)");
+        prop_assert!(forced.get(marker_x, floor).is_none(),
+            "WITH force the cleared floor row must be empty");
+    }
 }
 
 /// Compact board dump for failure messages: '.' empty, digit = cell value.

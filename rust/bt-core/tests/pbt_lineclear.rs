@@ -117,6 +117,61 @@ proptest! {
         }
     }
 
+    /// (d) GAME-LEVEL FUNDS CREDIT: when `Game::place` clears lines, the player's
+    /// `score.funds` must increase by EXACTLY `value * lines` (the funds the clear
+    /// is worth, BTBoardManager.C). The board-level differential pins
+    /// `check_lines().funds`, but NOT that `place` credits the right field — a
+    /// mutant crediting `clear.value` (the raw pip sum) instead of `clear.funds`
+    /// (= value*lines) diverges only when lines >= 2. We prefill 2 full die rows so
+    /// the next lock clears >= 2 lines with non-zero value, then assert the funds
+    /// delta equals the Locked event's `value * lines`.
+    #[test]
+    fn place_credits_funds_value_times_lines(
+        seed in any::<u64>(),
+        // pip value 1..=6 so value > 0 (and varies the magnitude).
+        pip in 1u8..=6,
+    ) {
+        let mut g = Game::new(seed);
+        // Two full rows of die(pip) on the floor -> the next lock clears both.
+        {
+            let b = g.board_mut();
+            let (w, h) = (b.width, b.height);
+            for y in [h - 1, h - 2] {
+                for x in 0..w { b.set(x, y, Some(Cell::die(pip))); }
+            }
+        }
+        let funds_before = g.score().funds;
+
+        // Drop + tick until the lock clears the rows; capture the Locked event.
+        g.begin_drop();
+        let mut cleared: Option<(i32, i32)> = None; // (lines, value)
+        for _ in 0..1200 {
+            for ev in g.take_events() {
+                if let GameEvent::Locked { lines, value, .. } = ev {
+                    if lines > 0 { cleared = Some((lines, value)); }
+                }
+            }
+            if cleared.is_some() || g.is_game_over() { break; }
+            g.tick(16);
+        }
+        let Some((lines, value)) = cleared else {
+            // The piece may have landed without completing (rare with full
+            // pre-rows it shouldn't, but guard against a degenerate spawn).
+            return Ok(());
+        };
+        prop_assert!(lines >= 2, "the two prefilled rows must clear together (got {})", lines);
+        prop_assert!(value > 0, "die rows must have non-zero pip value");
+
+        let delta = g.score().funds - funds_before;
+        prop_assert_eq!(delta, (value * lines) as i64,
+            "place must credit funds = value * lines = {} * {} = {}, got {}",
+            value, lines, value * lines, delta);
+        // And it must NOT merely credit `value` (the mutant) — non-vacuous because
+        // lines >= 2 makes value*lines strictly greater than value.
+        prop_assert_ne!(delta, value as i64,
+            "funds delta equals the raw value (not value*lines) — wrong credit field");
+    }
+
     /// (c) `check_lines` on a CONSTRUCTED board: removes exactly the full rows,
     /// conserves cells, leaves NO full row, and shifts the survivors (filled AND
     /// empty rows, in order) down so they're bottom-aligned. This forces real

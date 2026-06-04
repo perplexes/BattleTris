@@ -167,6 +167,119 @@ proptest! {
     }
 
     // -----------------------------------------------------------------------
+    // (c0') ISSUED HEADER content. The tamper test only flips an already-signed
+    //       header; it never checks what `issue_token_with` actually PUTS there.
+    //       A mutant issuing `{"alg":"none",...}` (or a wrong `typ`) self-signs a
+    //       token that still verifies (the MAC covers whatever header was emitted),
+    //       so verification-only tests miss it. Decode the issued header and pin
+    //       the exact `alg` = HS256 and `typ` = JWT.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn issued_header_declares_hs256_jwt(raw in "[a-zA-Z0-9]{1,30}") {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        let Some(clean) = sanitize_name(&raw) else { return Ok(()); };
+        let token = issue_token_with(&secret_a(), &clean, IAT);
+        let header_b64 = token.split('.').next().expect("token has a header segment");
+        let header_bytes = URL_SAFE_NO_PAD.decode(header_b64)
+            .expect("header must be valid base64url");
+        let header: serde_json::Value = serde_json::from_slice(&header_bytes)
+            .expect("header must be valid JSON");
+        prop_assert_eq!(header.get("alg").and_then(|v| v.as_str()), Some("HS256"),
+            "issued JWT header must declare alg=HS256 (got {:?})", header.get("alg"));
+        prop_assert_eq!(header.get("typ").and_then(|v| v.as_str()), Some("JWT"),
+            "issued JWT header must declare typ=JWT (got {:?})", header.get("typ"));
+    }
+
+    // -----------------------------------------------------------------------
+    // (c1') Tampered HEADER fails verification. The MAC covers `header.payload`,
+    //       so flipping a byte of the header segment (e.g. forging `alg`/`typ`)
+    //       must break verification. The payload/signature tamper tests never
+    //       touch the header, so a mutant that signs/verifies the PAYLOAD ONLY
+    //       (while still emitting `header.payload.sig`) survived them — a forged
+    //       header would then pass. Here we demand rejection.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn tampered_header_rejected(
+        raw in "[a-zA-Z0-9]{1,30}",
+        flip_idx in any::<usize>(),
+    ) {
+        let Some(clean) = sanitize_name(&raw) else {
+            return Ok(());
+        };
+        let secret = secret_a();
+        let token = issue_token_with(&secret, &clean, IAT);
+
+        // The header is the FIRST dot-separated segment.
+        let first_dot = token.find('.').unwrap();
+        let (header, rest) = token.split_at(first_dot); // rest starts with '.'
+        let mut header_bytes = header.as_bytes().to_vec();
+        if header_bytes.is_empty() {
+            return Ok(());
+        }
+        let idx = flip_idx % header_bytes.len();
+        header_bytes[idx] ^= 0xFF; // any change
+        let tampered = format!("{}{}", String::from_utf8_lossy(&header_bytes), rest);
+        // (Guard: if the flip happened to be a no-op, skip — it never is for ^0xFF.)
+        prop_assume!(tampered != token);
+
+        prop_assert!(
+            verify_token_with(&secret, &tampered).is_none(),
+            "a tampered header must be rejected (the MAC must cover the header); got {:?}",
+            verify_token_with(&secret, &tampered)
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // (c1'') A CORRECTLY-SIGNED token with a BAD `alg`/`typ` header is rejected.
+    //        The tamper test breaks the MAC; here we instead forge a header
+    //        (`alg:"none"` or a wrong `typ`) and RE-SIGN header.payload with the
+    //        REAL secret, so the MAC is valid. A verifier that only checks the MAC
+    //        (the JWT algorithm-confusion footgun) would accept it; we require
+    //        rejection. This pins the verifier's header validation, which the
+    //        MAC-only tests could never reach (a valid MAC + bad header).
+    // -----------------------------------------------------------------------
+    #[test]
+    fn correctly_signed_bad_header_is_rejected(
+        raw in "[a-zA-Z0-9]{1,20}",
+        // Pick a forged header to plant.
+        which in 0usize..3,
+    ) {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let Some(clean) = sanitize_name(&raw) else { return Ok(()); };
+        let secret = secret_a();
+
+        // A forged header that is NOT the issuer's {"alg":"HS256","typ":"JWT"}.
+        let forged_header_json = match which {
+            0 => r#"{"alg":"none","typ":"JWT"}"#,
+            1 => r#"{"alg":"HS512","typ":"JWT"}"#,
+            _ => r#"{"alg":"HS256","typ":"NOTJWT"}"#,
+        };
+        let header_b64 = URL_SAFE_NO_PAD.encode(forged_header_json.as_bytes());
+        let payload_b64 = URL_SAFE_NO_PAD.encode(
+            serde_json::json!({ "name": clean, "iat": IAT }).to_string(),
+        );
+        let signing_input = format!("{header_b64}.{payload_b64}");
+
+        // RE-SIGN with the REAL secret, exactly as bt-identity does — so the MAC
+        // is genuinely valid over this forged header.
+        let mut mac = Hmac::<Sha256>::new_from_slice(&secret).unwrap();
+        mac.update(signing_input.as_bytes());
+        let sig_b64 = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+        let forged = format!("{signing_input}.{sig_b64}");
+
+        prop_assert!(
+            verify_token_with(&secret, &forged).is_none(),
+            "a validly-MAC'd token with header {} must be REJECTED (alg-confusion guard)",
+            forged_header_json
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // (c2) Tampered payload (swap to a different name) fails verification.
     // -----------------------------------------------------------------------
     #[test]
@@ -209,18 +322,39 @@ proptest! {
     }
 
     // -----------------------------------------------------------------------
-    // (c4) No panics on arbitrary byte-string secrets (any length, any bytes).
+    // (c4) ANY byte-string secret round-trips: for every generated secret — empty,
+    //      arbitrary binary, non-alpha — `verify_token_with(s, issue_token_with(s,
+    //      name, iat))` must return `Some(name)`, not merely "no panic". The old
+    //      no-panic-only check let a mutant that REJECTS non-alpha (or empty)
+    //      secrets pass — issuing/verifying both silently failing in the same way.
+    //      Here we DEMAND the name comes back, so a secret-validation regression
+    //      that breaks signing/verification for binary secrets is caught.
     // -----------------------------------------------------------------------
     #[test]
-    fn verify_with_arbitrary_secret_never_panics(
-        raw in "[a-zA-Z]{1,20}",
+    fn arbitrary_secret_round_trips_to_the_name(
+        // `valid_name` survives sanitization to itself, so the recovered name is
+        // exactly `name` (no re-sanitize surprise).
+        name in valid_name(),
         secret in prop::collection::vec(any::<u8>(), 0..64),
     ) {
-        let Some(clean) = sanitize_name(&raw) else {
-            return Ok(());
-        };
-        let token = issue_token_with(&secret, &clean, IAT);
-        let _ = verify_token_with(&secret, &token);
+        let token = issue_token_with(&secret, &name, IAT);
+        prop_assert_eq!(
+            verify_token_with(&secret, &token),
+            Some(name.clone()),
+            "issue+verify under secret of len {} must recover the name {:?}",
+            secret.len(), name
+        );
+    }
+
+    /// The EMPTY secret specifically must also round-trip (a common edge a
+    /// "reject empty key" mutant would break). Covered as a dedicated case so the
+    /// random `0..64` strategy isn't relied on to hit length 0 often.
+    #[test]
+    fn empty_secret_round_trips(name in valid_name()) {
+        let secret: Vec<u8> = Vec::new();
+        let token = issue_token_with(&secret, &name, IAT);
+        prop_assert_eq!(verify_token_with(&secret, &token), Some(name.clone()),
+            "the empty secret must still sign+verify the name {:?}", name);
     }
 
     // -----------------------------------------------------------------------
