@@ -983,6 +983,127 @@ fn carter_buy_uncursed_sell_cursed_is_an_intentional_arbitrage_boon() {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(48))]
 
+    /// THE GIMP converts every removable box to a "gimp" box but PRESERVES its
+    /// value and position — looks different, plays the same. So the value grid +
+    /// cell count are unchanged, and every box is now a Gimp kind.
+    #[test]
+    fn gimp_preserves_values_and_converts_every_box(
+        fills in prop::collection::vec((0i32..BT_BOARD_WTH, 0i32..BT_BOARD_HGT, 1u8..=6u8), 0..50)
+    ) {
+        let mut rng = Rng::new(7);
+        let mut b = Board::standard(false);
+        b.clear();
+        for (x, y, v) in &fills { b.set(*x, *y, Some(Cell::die(*v))); }
+        let before = value_grid(&b);
+        let cnt = cell_count(&b);
+        b.apply_weapon(WeaponToken::Gimp, &mut rng);
+        prop_assert_eq!(value_grid(&b), before, "Gimp preserves every value + position");
+        prop_assert_eq!(cell_count(&b), cnt, "Gimp preserves the cell count");
+        for y in 0..b.height { for x in 0..b.width {
+            if let Some(c) = b.get(x, y) {
+                prop_assert!(matches!(c.kind, CellKind::Gimp(_)),
+                    "box at ({},{}) must become a Gimp kind", x, y);
+            }
+        }}
+    }
+
+    /// MISSING PIECES removes EXACTLY ONE box (the first removable cell from a
+    /// random origin) — no more, no less.
+    #[test]
+    fn missing_removes_exactly_one_box(
+        fills in prop::collection::vec((0i32..BT_BOARD_WTH, 0i32..BT_BOARD_HGT, 1u8..=6u8), 1..50),
+        seed in any::<u64>(),
+    ) {
+        let mut rng = Rng::new(seed);
+        let mut b = Board::standard(false);
+        b.clear();
+        for (x, y, v) in &fills { b.set(*x, *y, Some(Cell::die(*v))); }
+        let cnt = cell_count(&b);
+        prop_assume!(cnt >= 1);
+        b.apply_weapon(WeaponToken::Missing, &mut rng);
+        prop_assert_eq!(cell_count(&b), cnt - 1, "Missing removes exactly one box");
+    }
+
+    /// THE TWILIGHT ZONE makes every box invisible — but only COSMETICALLY: the
+    /// cell count and every value/position are preserved; cells just become hidden
+    /// (Invisible kind). A mutant that drops cells or mangles values fails.
+    #[test]
+    fn twilight_hides_every_box_preserving_values(
+        fills in prop::collection::vec((0i32..BT_BOARD_WTH, 0i32..BT_BOARD_HGT, 1u8..=6u8), 0..50)
+    ) {
+        let mut rng = Rng::new(9);
+        let mut b = Board::standard(false);
+        b.clear();
+        for (x, y, v) in &fills { b.set(*x, *y, Some(Cell::die(*v))); }
+        let before = value_grid(&b);
+        let cnt = cell_count(&b);
+        b.apply_weapon(WeaponToken::Twilight, &mut rng);
+        prop_assert_eq!(value_grid(&b), before, "Twilight preserves every value + position");
+        prop_assert_eq!(cell_count(&b), cnt, "Twilight preserves the cell count");
+        for y in 0..b.height { for x in 0..b.width {
+            if let Some(c) = b.get(x, y) {
+                prop_assert!(c.hidden,
+                    "box at ({},{}) must have its hidden flag set (id() -> -1)", x, y);
+            }
+        }}
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    /// SWAP MEET is an exact board EXCHANGE and an INVOLUTION (first-principles):
+    /// one swap puts each player's grid on the other's board exactly; a second
+    /// swap restores both boards byte-for-byte. (Bottle/Upbyside aren't planted,
+    /// so the only effect is the grid exchange.)
+    #[test]
+    fn swap_meet_exchanges_and_is_an_involution(
+        af in prop::collection::vec((0i32..BT_BOARD_WTH, 0i32..BT_BOARD_HGT, 1u8..=6u8), 0..40),
+        bf in prop::collection::vec((0i32..BT_BOARD_WTH, 0i32..BT_BOARD_HGT, 1u8..=6u8), 0..40),
+    ) {
+        let mut a = Game::new(1);
+        let mut b = Game::new(2);
+        for (x, y, v) in &af { a.board_mut().set(*x, *y, Some(Cell::die(*v))); }
+        for (x, y, v) in &bf { b.board_mut().set(*x, *y, Some(Cell::die(*v))); }
+        let a0 = value_grid(a.board());
+        let b0 = value_grid(b.board());
+
+        a.swap_board_with(&mut b);
+        prop_assert_eq!(value_grid(a.board()), b0.clone(), "after swap, A holds B's grid");
+        prop_assert_eq!(value_grid(b.board()), a0.clone(), "after swap, B holds A's grid");
+
+        a.swap_board_with(&mut b);
+        prop_assert_eq!(value_grid(a.board()), a0, "swap twice restores A exactly");
+        prop_assert_eq!(value_grid(b.board()), b0, "swap twice restores B exactly");
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    /// LAWYER'S DELITE 1:1 (first-principles counting): a Lawyers-cursed board
+    /// rises by EXACTLY one garbage row per line the opponent clears. On an empty
+    /// board, after the opponent's line count climbs by K, the board must hold
+    /// exactly K garbage rows = K*(width-1) cells (each garbage row has one gap).
+    #[test]
+    fn lawyers_rises_one_garbage_row_per_opponent_line(k in 1i64..7) {
+        let mut g = Game::new(11);
+        prop_assume!(receive_and_flush(&mut g, WeaponToken::Lawyers));
+        // Start from an empty board (the flush lock left one piece behind).
+        let (w, h) = (g.board().width as usize, g.board().height as usize);
+        for y in 0..h as i32 { for x in 0..w as i32 { g.board_mut().set(x, y, None); } }
+        // Opponent clears K lines (relayed: op_lines climbs 0 -> K).
+        g.receive_op_score(0, k, 0);
+        let _ = g.take_events();
+        prop_assert_eq!(cell_count(g.board()), (k as usize) * (w - 1),
+            "Lawyers must rise EXACTLY {} garbage rows ({} cells) for {} opponent lines",
+            k, (k as usize) * (w - 1), k);
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(48))]
+
     /// BUY-THEN-LAUNCH REPLAY: a full economic flow (enter bazaar -> buy a weapon
     /// with banked funds -> leave -> launch it at the opponent -> relay delivers ->
     /// victim flushes it) is DETERMINISTIC. Two independent Versus instances driven
