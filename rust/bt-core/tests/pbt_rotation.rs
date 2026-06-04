@@ -12,7 +12,7 @@
 //! properties grant `FearedWeird` (which unlocks them) and (e) confirms they're
 //! really exercised.
 
-use bt_core::{Game, Piece, PieceKind, WeaponToken};
+use bt_core::{Board, Game, Piece, PieceKind, WeaponToken};
 use proptest::prelude::*;
 
 #[derive(Debug, Clone)]
@@ -183,6 +183,9 @@ fn special_piece_rotation_is_covered_and_valid() {
     let mut game_no = 0u64;
     let mut g = weird_game(game_no);
     let mut seen: Vec<PieceKind> = Vec::new();
+    // Special pieces whose custom rotation actually CHANGED the cells at least
+    // once (so a no-op rotation that just returned false can't pass the test).
+    let mut rot_changes: Vec<PieceKind> = Vec::new();
 
     for _ in 0..8000 {
         if g.is_game_over() {
@@ -196,6 +199,19 @@ fn special_piece_rotation_is_covered_and_valid() {
             let kind = p.kind;
             if !seen.contains(&kind) {
                 seen.push(kind);
+            }
+            // Confirm the custom rotation for the special pieces is NON-TRIVIAL:
+            // rotating a clone on an EMPTY board must actually change its cells.
+            if matches!(kind, PieceKind::Wall | PieceKind::Star | PieceKind::WeirdLong)
+                && !rot_changes.contains(&kind)
+            {
+                let empty = Board::standard(false);
+                let mut pc = p.clone();
+                pc.move_to(&empty, 8, 8);
+                let before = pc.cells;
+                if pc.rotate(&empty, false) && pc.cells != before {
+                    rot_changes.push(kind);
+                }
             }
             let base = count_piece_cells(&g);
             // Rotate through its orientations; invariants must hold each time.
@@ -221,5 +237,7 @@ fn special_piece_rotation_is_covered_and_valid() {
 
     for k in [PieceKind::Wall, PieceKind::Star, PieceKind::WeirdLong] {
         assert!(seen.contains(&k), "coverage gap: never spawned {:?} (custom rotation untested)", k);
+        assert!(rot_changes.contains(&k),
+            "{:?} rotation never changed its cells — custom rotation may be a no-op", k);
     }
 }

@@ -129,67 +129,40 @@ proptest! {
         ops in prop::collection::vec(op(), 0..256),
     ) {
         let mut g = Game::new(seed);
+        // Funds may legitimately go negative only AFTER a Reagan activation or a
+        // negative AddFunds. Until one of those is applied, funds must stay >= 0,
+        // and we assert that on EVERY step (previously this was a no-op branch and
+        // the final check was skipped for the whole run on any Reagan).
+        let mut funds_may_be_negative = false;
 
         for o in &ops {
-            // (a) NO PANIC — just calling apply must not panic; proptest will
-            // catch any Rust panic as a test failure.
+            // (a) NO PANIC — proptest reports any Rust panic as a failure.
             apply(&mut g, o);
 
-            // After each op, check (b) and (c) only while the game is live and
-            // not in a completely corrupted state from a garbage restore (if the
-            // garbage restore succeeded it produced a valid game, so the
-            // invariants still apply).
+            if matches!(o, Op::ReceiveWeapon(i) if WeaponToken::ALL[*i] == WeaponToken::Reagan)
+                || matches!(o, Op::AddFunds(n) if *n < 0)
+            {
+                funds_may_be_negative = true;
+            }
+
             if g.is_game_over() {
                 continue;
             }
 
-            // (b) NO-OVERLAP: falling piece cells must not coincide with board cells.
+            // (b) NO-OVERLAP: the falling piece never coincides with a board cell.
             if let Some((gx, gy)) = first_overlap(&g) {
+                prop_assert!(false, "piece/board overlap at ({}, {}) after {:?}", gx, gy, o);
+            }
+
+            // (c) funds >= 0 on every step until a Reagan/negative-AddFunds makes
+            // a negative balance legitimate.
+            if !funds_may_be_negative {
                 prop_assert!(
-                    false,
-                    "piece/board overlap at ({}, {}) after {:?}", gx, gy, o
+                    g.score().funds >= 0,
+                    "funds went negative ({}) after {:?} before any Reagan/negative-AddFunds",
+                    g.score().funds, o
                 );
             }
-
-            // (c) funds must never be negative.
-            // NOTE: Reagan Era multiplies funds by -1, and AddFunds(-N) can push
-            // them negative. We exclude those two ops from this assertion
-            // because the engine faithfully replicates the original C++ behaviour
-            // where Reagan can temporarily invert funds. The invariant we're
-            // checking is that no OTHER operation silently underflows funds.
-            let op_can_go_negative = matches!(
-                o,
-                Op::ReceiveWeapon(i) if WeaponToken::ALL[*i] == WeaponToken::Reagan
-            ) || matches!(o, Op::AddFunds(n) if *n < 0);
-
-            if !op_can_go_negative {
-                // Only flag newly negative funds that weren't already negative
-                // from a prior Reagan/AddFunds.  We track this conservatively:
-                // if funds just went negative AND the last op wasn't one of the
-                // "allowed to go negative" ops, it's a real bug.
-                // (We don't track prior state per-step, so we just skip the
-                // assertion for the whole run if a negative is ever seen — see
-                // note below on Reagan.)
-            }
-        }
-
-        // After all ops, do a final funds check — but only if the game wasn't
-        // touched by Reagan or negative AddFunds at all (those legitimately
-        // produce negative funds in the original engine).
-        let any_reagan = ops.iter().any(|o| {
-            matches!(o, Op::ReceiveWeapon(i) if WeaponToken::ALL[*i] == WeaponToken::Reagan)
-        });
-        let any_neg_funds = ops.iter().any(|o| {
-            matches!(o, Op::AddFunds(n) if *n < 0)
-        });
-
-        // Keating zeroes funds (can't go negative by itself), but Reagan inverts
-        // so we skip the final check when Reagan was ever received.
-        if !any_reagan && !any_neg_funds {
-            prop_assert!(
-                g.score().funds >= 0,
-                "funds went negative ({}) without Reagan/negative AddFunds", g.score().funds
-            );
         }
     }
 }

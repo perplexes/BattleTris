@@ -498,6 +498,21 @@ mod tests {
             ops in prop::collection::vec((0usize..2, noninjecting_input()), 0..256),
         ) {
             let mut b = Bout::new(seed_a, seed_b);
+            // Stock both arsenals with BENIGN (non-funds) weapons so LaunchWeapon
+            // actually fires rather than being a no-op (the launch path was
+            // otherwise untested). None of these credit/debit the launcher's funds
+            // via the apply, and none make a side's funds go negative on delivery.
+            for tok in [
+                bt_core::WeaponToken::RiseUp,
+                bt_core::WeaponToken::FlipOut,
+                bt_core::WeaponToken::Bottle,
+                bt_core::WeaponToken::Susan,
+                bt_core::WeaponToken::NoSlide,
+                bt_core::WeaponToken::Speedy,
+            ] {
+                b.versus.game_mut(Side::A).grant_weapon(tok);
+                b.versus.game_mut(Side::B).grant_weapon(tok);
+            }
             let mut next_seq = [1u64, 1u64];
 
             for (side_idx, input) in ops {
