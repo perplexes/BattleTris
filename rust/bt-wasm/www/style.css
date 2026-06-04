@@ -445,7 +445,7 @@ body {
 .bazaar-overlay {
     position: fixed;
     inset: 0;
-    background-color: #cccccc;
+    background-color: #BDBDBD;
     display: none;
     justify-content: center;   /* center the content column horizontally */
     align-items: stretch;      /* fill the height */
@@ -459,7 +459,7 @@ body.bazaar-open #touchControls { display: none !important; }
 .bazaar-panel {
     width: 100%;
     max-width: 880px;
-    background-color: #cccccc;
+    background-color: #BDBDBD;   /* gray75 window (BTBazaar*background) */
     display: flex;
     flex-direction: column;
     min-height: 0;             /* let the inner lists own the scroll */
@@ -468,10 +468,10 @@ body.bazaar-open #touchControls { display: none !important; }
 /* Bazaar banner image */
 .bazaar-banner {
     display: block;
-    width: 100%;
-    max-width: 520px;
-    height: auto;
-    margin: 4px auto 8px;
+    width: 490px;               /* desktop: original size (490x164), left-justified */
+    max-width: 100%;            /* never overflow a narrow container */
+    height: auto;               /* keep aspect ratio */
+    margin: 4px 0 8px;
     image-rendering: pixelated;
     image-rendering: crisp-edges;
     flex-shrink: 0;
@@ -614,6 +614,19 @@ body.bazaar-open #touchControls { display: none !important; }
 
 .bazaar-action-btn { padding: 9px 6px; font-size: 15px; min-height: 40px; }
 .bazaar-done-btn { padding: 12px 6px; font-size: 30px; min-height: 64px; margin-top: 4px; }
+
+/* Online bazaar barrier readiness prompt (under the Done button). Empty while
+   both players are still shopping; reserves its line so the layout doesn't jump. */
+.bazaar-barrier-status {
+    min-height: 1.4em;
+    margin-top: 8px;
+    text-align: center;
+    font-family: 'lucidatypewriter';
+    font-weight: bold;
+    font-size: 15px;
+    line-height: 1.4;
+    color: #556b2f;   /* darkolivegreen — the original BTBazaar baz_message color */
+}
 
 /* Selected-weapon description: a band spanning the bottom of the bazaar
    (BTBazaar.C weap_desc at 340,600 -> 780,780), not jammed in the middle col. */
@@ -935,7 +948,8 @@ body.bazaar-open #touchControls { display: none !important; }
        nothing is squished. */
     .bazaar-overlay { padding: 8px; }
     .bazaar-panel { max-width: 100%; gap: 8px; }
-    .bazaar-banner { max-height: 84px; order: 0; }
+    /* Mobile: half the original size (245x82), left-justified; ratio kept. */
+    .bazaar-banner { width: 245px; max-width: 100%; height: auto; order: 0; }
 
     /* Flatten the three columns into the panel (display: contents drops the
        body's own box) so the weapon description — a sibling of .bazaar-body —

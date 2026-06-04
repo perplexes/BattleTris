@@ -54,6 +54,7 @@ const newGameBtn = document.getElementById('newGameBtn');
 const bazaarOverlay = document.getElementById('bazaarOverlay');
 const bazaarFunds = document.getElementById('bazaarFunds');
 const bazaarDoneBtn = document.getElementById('bazaarDoneBtn');
+const bazaarBarrierStatus = document.getElementById('bazaarBarrierStatus');
 const bazaarAddBtn = document.getElementById('bazaarAddBtn');
 const bazaarRemoveBtn = document.getElementById('bazaarRemoveBtn');
 const bazaarWeaponList = document.getElementById('bazaarWeaponList');
@@ -510,7 +511,12 @@ function sendInput(repr) {
 // every frame); local modes use the engine flag. Used to gate input + replay so
 // the client never sends/replays a non-shopping action the server would reject.
 function inBazaar() {
-    return (authoritative && authSelf) ? authSelf.in_bazaar : game.is_in_bazaar();
+    if (authoritative && authSelf) {
+        // Barrier active while EITHER side is still shopping — keep gameplay
+        // inputs blocked (and the overlay up) until BOTH players have hit Done.
+        return authSelf.in_bazaar || !!(authOpp && authOpp.in_bazaar);
+    }
+    return game.is_in_bazaar();
 }
 
 // Re-apply a not-yet-acked input to the (just-restored) local game, WITHOUT
@@ -713,6 +719,35 @@ async function initGame() {
     // player picks Practice / Play Computer / Find Match / accepts a challenge.
     updatePlayComputerLabel();
     showLobby();
+    applyScreenFromUrl();
+}
+
+// Dev: jump straight to a screen via the URL (for testing / styling without the
+// normal flow). Examples:
+//   ?screen=lobby
+//   ?screen=practice            (or screen=game)
+//   ?screen=vscomputer
+//   ?screen=online              (kicks off matchmaking)
+//   ?screen=bazaar              (force the bazaar overlay open, both shopping)
+//   ?screen=bazaar&baz=waiting  (preview the "Waiting for opponent..." prompt)
+//   ?screen=bazaar&baz=oppready (preview the "Your opponent is waiting..." prompt)
+function applyScreenFromUrl() {
+    const p = new URLSearchParams(location.search);
+    const screen = p.get('screen');
+    if (!screen) return;
+    switch (screen) {
+        case 'lobby': showLobby(); break;
+        case 'practice':
+        case 'game': startGame('practice'); break;
+        case 'vscomputer': startGame('vscomputer'); break;
+        case 'online': startGame('online'); break;
+        case 'bazaar':
+            startGame('practice');
+            // Force the overlay open for preview; `baz` picks the barrier prompt.
+            debugBazaar = p.get('baz') || 'both';
+            break;
+        default: break;
+    }
 }
 
 function startGame(newMode) {
@@ -1008,6 +1043,8 @@ function populateBazaar() {
 // both boards until both players hit Done — the client reads authSelf.in_bazaar);
 // in local modes the engine's own flag drives it.
 let bazaarWasOpen = false;
+// Dev preview override set by ?screen=bazaar&baz=… : 'both' | 'waiting' | 'oppready'.
+let debugBazaar = null;
 
 // Reset per-match overlay state when a new game starts.
 function resetMatchState() {
@@ -1016,10 +1053,21 @@ function resetMatchState() {
 }
 
 function updateBazaarOverlay() {
-    // The bazaar is a server-authoritative barrier online: open/close on the
-    // authoritative in_bazaar (prompt every frame), not the slightly-lagged local
-    // prediction. Local modes use the engine's own flag.
-    const inBaz = (authoritative && authSelf) ? authSelf.in_bazaar : game.is_in_bazaar();
+    // The bazaar is a server-authoritative BARRIER online: it stays open until
+    // BOTH players hit Done, so it tracks `you.in_bazaar || opp.in_bazaar` (each
+    // prompt every frame) — not just our own flag, which clears the instant WE
+    // hit Done. Local modes use the engine's own flag.
+    const online = authoritative && authSelf;
+    let youShopping, oppShopping;
+    if (debugBazaar) {
+        // Dev preview: 'waiting' = you've hit Done; 'oppready' = opponent has.
+        youShopping = debugBazaar !== 'waiting';
+        oppShopping = debugBazaar !== 'oppready';
+    } else {
+        youShopping = online ? authSelf.in_bazaar : game.is_in_bazaar();
+        oppShopping = online ? !!(authOpp && authOpp.in_bazaar) : false;
+    }
+    const inBaz = youShopping || oppShopping;
     // The bazaar is a full-screen page: while it's open the gameplay touch
     // controls are useless and would overlap it, so hide them (CSS keys off this).
     document.body.classList.toggle('bazaar-open', inBaz);
@@ -1035,14 +1083,34 @@ function updateBazaarOverlay() {
             }
         } else {
             // Keep funds and arsenal display fresh while open
-            bazaarFunds.textContent = (authoritative && authSelf) ? authSelf.funds : game.funds();
+            bazaarFunds.textContent = online ? authSelf.funds : game.funds();
             refreshBazaarArsenal();
         }
+        if (online || debugBazaar) updateBazaarBarrierStatus(youShopping, oppShopping);
     } else {
         if (bazaarWasOpen) {
             bazaarOverlay.style.display = 'none';
             bazaarWasOpen = false;
         }
+    }
+}
+
+// Surface both sides' readiness during the online bazaar barrier:
+//   • I hit Done, opponent still shopping  → "Waiting for opponent…" (Done locked)
+//   • Opponent hit Done, I'm still shopping → "Opponent is ready" (I can keep buying)
+//   • Both still shopping                   → no prompt
+function updateBazaarBarrierStatus(youShopping, oppShopping) {
+    if (!bazaarBarrierStatus) return;
+    if (!youShopping && oppShopping) {
+        bazaarBarrierStatus.textContent = 'Waiting for opponent...';
+        bazaarBarrierStatus.className = 'bazaar-barrier-status waiting';
+        if (bazaarDoneBtn) bazaarDoneBtn.disabled = true;
+    } else if (youShopping && !oppShopping) {
+        bazaarBarrierStatus.textContent = 'Your opponent is waiting...';
+        bazaarBarrierStatus.className = 'bazaar-barrier-status opp-ready';
+    } else {
+        bazaarBarrierStatus.textContent = '';
+        bazaarBarrierStatus.className = 'bazaar-barrier-status';
     }
 }
 
@@ -1421,7 +1489,12 @@ bazaarDoneBtn.addEventListener('click', () => {
         // in_bazaar (via the next keyframe / you-status) once BOTH players are done.
         predict('LeaveBazaar');
         bazaarDoneBtn.disabled = true;
-        bazaarDoneBtn.textContent = 'WAITING FOR OPPONENT...';
+        // Optimistic prompt; the authoritative status (updateBazaarBarrierStatus)
+        // takes over next frame and flips to "Opponent is ready" if they finish.
+        if (bazaarBarrierStatus) {
+            bazaarBarrierStatus.textContent = 'Waiting for opponent...';
+            bazaarBarrierStatus.className = 'bazaar-barrier-status waiting';
+        }
     } else {
         game.leave_bazaar();
         bazaarOverlay.style.display = 'none';

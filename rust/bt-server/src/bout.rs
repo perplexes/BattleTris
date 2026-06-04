@@ -100,6 +100,11 @@ pub struct OppView {
     pub score: i64,
     pub lines: i64,
     pub game_over: bool,
+    /// Whether the opponent is still in the bazaar. Both sides enter the bazaar
+    /// together (combined-line trigger), so during the barrier this tells the
+    /// client whether the opponent has hit Done yet — driving the "opponent is
+    /// ready" / "waiting for opponent" prompt. Not sensitive (no board/funds).
+    pub in_bazaar: bool,
 }
 
 /// One authoritative frame sent to a client. Per-frame frames are LIGHT — the
@@ -347,6 +352,7 @@ impl Bout {
                 score: them.score().score,
                 lines: them.score().lines,
                 game_over: them.is_game_over(),
+                in_bazaar: them.is_in_bazaar(),
             },
             spying: spy.is_some(),
             spy_board,
