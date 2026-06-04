@@ -27,3 +27,6 @@ serde_json = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 # Identity tokens (HS256 JWT) live in the shared `bt-identity` crate so the
 # server (verify) and the bots (self-mint) speak the exact same format.
+
+[dev-dependencies]
+proptest = "1"

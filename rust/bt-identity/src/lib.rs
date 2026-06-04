@@ -49,13 +49,17 @@ pub fn secret() -> Vec<u8> {
 }
 
 /// Trim + bound a requested name. Returns `None` for an empty (post-trim) name;
-/// otherwise the name capped at [`MAX_NAME_LEN`] chars.
+/// otherwise the name capped at [`MAX_NAME_LEN`] chars. Trims AGAIN after the
+/// cap so truncation can't strand trailing whitespace — this keeps `sanitize_name`
+/// idempotent (verify re-sanitizes the signed name, so a non-idempotent cap could
+/// verify a boundary-length name to a different string than was issued).
 pub fn sanitize_name(raw: &str) -> Option<String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
+    let capped: String = raw.trim().chars().take(MAX_NAME_LEN).collect();
+    let capped = capped.trim();
+    if capped.is_empty() {
         return None;
     }
-    Some(trimmed.chars().take(MAX_NAME_LEN).collect())
+    Some(capped.to_string())
 }
 
 fn sign(secret: &[u8], signing_input: &str) -> String {

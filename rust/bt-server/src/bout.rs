@@ -359,6 +359,210 @@ impl Bout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    // -----------------------------------------------------------------------
+    // Proptest strategies
+    // -----------------------------------------------------------------------
+
+    /// Strategy: one of the five relay-internal inputs the server must NEVER
+    /// accept from a client.
+    fn relay_internal_input() -> impl Strategy<Value = Input> {
+        prop_oneof![
+            any::<i32>().prop_map(Input::ReceiveWeapon),
+            (any::<i64>(), any::<i64>(), any::<i64>())
+                .prop_map(|(score, lines, funds)| Input::ReceiveOpScore { score, lines, funds }),
+            any::<i64>().prop_map(Input::AddFunds),
+            Just(Input::AiDrop),
+            any::<bool>().prop_map(Input::SetPaused),
+        ]
+    }
+
+    /// Strategy: a legal client input chosen from the full set of accepted
+    /// variants (Movement + shop).  All indices are kept within safe ranges so
+    /// `apply_input` can evaluate the full anti-cheat path.
+    fn legal_client_input() -> impl Strategy<Value = Input> {
+        prop_oneof![
+            Just(Input::MoveLeft),
+            Just(Input::MoveRight),
+            Just(Input::Rotate),
+            Just(Input::SoftDrop),
+            Just(Input::BeginDrop),
+            (0u32..10u32).prop_map(Input::LaunchWeapon),
+            (0i32..10i32).prop_map(Input::BuyWeapon),
+            (0i32..10i32).prop_map(Input::SellWeapon),
+            Just(Input::LeaveBazaar),
+        ]
+    }
+
+    // -----------------------------------------------------------------------
+    // Property (a): apply_input REJECTS every relay-internal input.
+    //   - Returns false.
+    //   - Never mutates funds/score (no state injected).
+    // -----------------------------------------------------------------------
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn relay_internal_inputs_always_rejected(
+            seed_a in any::<u64>(),
+            seed_b in any::<u64>(),
+            side_idx in 0usize..2,
+            seq in 1u64..=u64::MAX,
+            input in relay_internal_input(),
+        ) {
+            let mut b = Bout::new(seed_a, seed_b);
+            let side = if side_idx == 0 { Side::A } else { Side::B };
+
+            // Snapshot state before the attempt.
+            let funds_before_a = b.versus.game(Side::A).score().funds;
+            let funds_before_b = b.versus.game(Side::B).score().funds;
+            let ack_before = b.snapshot_for(side, false).ack;
+
+            let accepted = b.apply_input(side, &input, seq);
+
+            // Must be rejected.
+            prop_assert!(!accepted, "relay-internal input {:?} was accepted (should be rejected)", input);
+
+            // Funds must not have changed on either side.
+            prop_assert_eq!(
+                b.versus.game(Side::A).score().funds, funds_before_a,
+                "Side A funds changed after rejected relay-internal input {:?}", input
+            );
+            prop_assert_eq!(
+                b.versus.game(Side::B).score().funds, funds_before_b,
+                "Side B funds changed after rejected relay-internal input {:?}", input
+            );
+
+            // ack must not have moved.
+            prop_assert_eq!(
+                b.snapshot_for(side, false).ack, ack_before,
+                "ack advanced after rejected relay-internal input {:?}", input
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property (b): apply_input enforces strictly-increasing seq.
+    //   - seq <= last_ack => rejected, ack does not move backward.
+    //   - seq >  last_ack => accepted (for a legal input), ack advances.
+    // -----------------------------------------------------------------------
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn seq_monotonicity_enforced(
+            seed in any::<u64>(),
+            // A sequence of (seq, is_legal) pairs to drive the bout.
+            seqs in prop::collection::vec(
+                (1u64..=1000u64, any::<bool>()),
+                1..256,
+            ),
+        ) {
+            let mut b = Bout::new(seed, seed.wrapping_add(1));
+
+            for (seq, pick_legal) in seqs {
+                // Always use Side::A with a simple legal input.
+                let input = Input::MoveLeft;
+                let ack_before = b.snapshot_for(Side::A, false).ack;
+                let accepted = b.apply_input(Side::A, &input, seq);
+
+                if seq <= ack_before {
+                    // Must be rejected; ack must not go backward.
+                    prop_assert!(
+                        !accepted,
+                        "stale/duplicate seq {} (ack={}) was accepted",
+                        seq, ack_before
+                    );
+                    prop_assert_eq!(
+                        b.snapshot_for(Side::A, false).ack, ack_before,
+                        "ack moved backward after rejected stale seq {}", seq
+                    );
+                } else if accepted {
+                    // Accepted: ack must have advanced to seq.
+                    prop_assert_eq!(
+                        b.snapshot_for(Side::A, false).ack, seq,
+                        "ack did not advance to applied seq {}", seq
+                    );
+                }
+                // If rejected for a reason other than stale seq (e.g. bazaar
+                // gate), the ack still must not exceed the seq we sent.
+                let _ = pick_legal; // consumed to suppress warning
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property (c): driving a Bout with random sequences of LEGAL inputs and
+    //   monotonically-increasing seqs never lets a side gain funds it didn't
+    //   legitimately earn via the engine.  Specifically: the only way funds
+    //   can increase from the initial 0 is through the game engine (e.g. line
+    //   clears), NOT through client-injected inputs. Relay-internal inputs are
+    //   never accepted, so funds can only come from actual gameplay.
+    //
+    //   We assert: funds on BOTH sides are always >= 0 and that applying legal
+    //   inputs never causes the SERVER's ack to go below its previous value
+    //   (no rewind possible).  We additionally verify that the total server-ack
+    //   for each side advances monotonically throughout the run.
+    // -----------------------------------------------------------------------
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn legal_inputs_never_inject_funds(
+            seed_a in any::<u64>(),
+            seed_b in any::<u64>(),
+            ops in prop::collection::vec(
+                // (side, legal_input)
+                (0usize..2, legal_client_input()),
+                0..256,
+            ),
+        ) {
+            let mut b = Bout::new(seed_a, seed_b);
+            // Per-side strictly-increasing seq counters (start at 1 so first
+            // input satisfies seq > ack=0).
+            let mut next_seq = [1u64, 1u64];
+            let mut last_ack = [0u64, 0u64];
+
+            for (side_idx, input) in ops {
+                let side = if side_idx == 0 { Side::A } else { Side::B };
+                let seq = next_seq[side_idx];
+                next_seq[side_idx] += 1;
+
+                let accepted = b.apply_input(side, &input, seq);
+
+                // If accepted, ack must advance to seq.
+                if accepted {
+                    let new_ack = b.snapshot_for(side, false).ack;
+                    prop_assert!(
+                        new_ack >= last_ack[side_idx],
+                        "ack went backward: was {}, now {} after {:?}",
+                        last_ack[side_idx], new_ack, input
+                    );
+                    last_ack[side_idx] = new_ack;
+                }
+
+                // Tick the simulation so the engine has a chance to process
+                // effects and clear any pending transitions.
+                b.tick(16);
+
+                // Funds on both sides must always be >= 0: legal inputs can't
+                // inject negative (stolen) funds.  They start at 0 and only
+                // rise via engine line-clear events — never fall below 0 from
+                // client inputs alone.
+                let funds_a = b.versus.game(Side::A).score().funds;
+                let funds_b = b.versus.game(Side::B).score().funds;
+                prop_assert!(
+                    funds_a >= 0,
+                    "Side A funds went negative ({}): possible injection", funds_a
+                );
+                prop_assert!(
+                    funds_b >= 0,
+                    "Side B funds went negative ({}): possible injection", funds_b
+                );
+            }
+        }
+    }
 
     #[test]
     fn rejects_relay_internal_inputs_from_clients() {

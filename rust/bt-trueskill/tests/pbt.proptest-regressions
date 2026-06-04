@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 7111c3ec14e43580b77750424f76af83ebe6c3a2f48f6e58420d1750c38a49d2 # shrinks to w = Rating { mu: 21.655879333345723, sigma: 0.1 }, l = Rating { mu: 0.0, sigma: 0.1 }
+cc 6611a8fbae5d2b8272ff54bffabea903e3fdf5f7ecbfeb1544b5bd67003e4446 # shrinks to w = Rating { mu: 26.419223220802795, sigma: 0.1 }, l = Rating { mu: 0.0, sigma: 0.1 }, w_lines = 0, l_lines = 0
+cc 23beb409fcfac3a5190c2e86c71c272c1fa74deb08557a6144c31b3246f28342 # shrinks to (w, l) = (Rating { mu: 8.883298403912638, sigma: 1.0 }, Rating { mu: 0.0, sigma: 1.0 }), w_lines = 0, l_lines = 17

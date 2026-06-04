@@ -8,3 +8,4 @@ description = "TrueSkill / TrueSkill 2 ratings and matchmaking for 1v1 BattleTri
 [dependencies]
 
 [dev-dependencies]
+proptest = "1"

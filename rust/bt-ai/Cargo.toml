@@ -8,3 +8,6 @@ description = "BattleTris computer opponent (Ernie) — a faithful Rust port of 
 
 [dependencies]
 bt-core = { path = "../bt-core" }
+
+[dev-dependencies]
+proptest = "1"

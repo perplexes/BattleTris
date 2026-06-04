@@ -142,6 +142,7 @@ name = "bt-ai"
 version = "0.1.0"
 dependencies = [
  "bt-core",
+ "proptest",
 ]
 
 [[package]]
@@ -172,6 +173,7 @@ dependencies = [
  "base64",
  "getrandom 0.2.17",
  "hmac",
+ "proptest",
  "serde_json",
  "sha2",
 ]
@@ -182,6 +184,7 @@ version = "0.1.0"
 dependencies = [
  "bt-ai",
  "bt-core",
+ "proptest",
  "serde",
  "serde_json",
 ]
@@ -196,6 +199,7 @@ dependencies = [
  "bt-replay",
  "bt-trueskill",
  "futures-util",
+ "proptest",
  "rusqlite",
  "serde",
  "serde_json",
@@ -206,6 +210,9 @@ dependencies = [
 [[package]]
 name = "bt-trueskill"
 version = "0.1.0"
+dependencies = [
+ "proptest",
+]
 
 [[package]]
 name = "bt-wasm"
