@@ -72,6 +72,7 @@ fn line_clear_matches_independent_reference() {
     // value sum is only meaningful when a non-empty clear actually happens.
     let mut saw_single_clear = 0usize;
     let mut saw_multi_clear = 0usize;
+    let mut saw_multi_nonzero_value = 0usize;
 
     for iter in 0..ITERS {
         // Diverse fill densities: dense boards exercise multi-line cascades,
@@ -104,7 +105,14 @@ fn line_clear_matches_independent_reference() {
 
         match lc.lines {
             1 => saw_single_clear += 1,
-            n if n >= 2 => saw_multi_clear += 1,
+            n if n >= 2 => {
+                saw_multi_clear += 1;
+                // funds = value * lines diverges from `value` only when BOTH
+                // lines >= 2 AND value > 0; pin that exact case was exercised.
+                if lc.value > 0 {
+                    saw_multi_nonzero_value += 1;
+                }
+            }
             _ => {}
         }
 
@@ -130,9 +138,9 @@ fn line_clear_matches_independent_reference() {
     // multi-line clear, so `funds = value * lines` is genuinely distinguished
     // from `funds = value` (they agree only at lines == 1).
     assert!(
-        saw_single_clear > 0 && saw_multi_clear > 0,
-        "line-clear coverage too thin (single={saw_single_clear}, multi={saw_multi_clear}); \
-         the value/funds comparison may be vacuous"
+        saw_single_clear > 0 && saw_multi_clear > 0 && saw_multi_nonzero_value > 0,
+        "line-clear coverage too thin (single={saw_single_clear}, multi={saw_multi_clear}, \
+         multi_nonzero_value={saw_multi_nonzero_value}); the value/funds comparison may be vacuous"
     );
 }
 

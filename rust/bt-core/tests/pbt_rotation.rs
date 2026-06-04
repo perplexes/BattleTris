@@ -272,23 +272,43 @@ fn special_piece_rotation_metadata_cycles_exactly() {
         assert_eq!(p.cells, start_cells, "Star: 2 rotations must restore the original cells");
     }
 
-    // --- Wall / WeirdLong / generic: orientation advances by exactly 1. ---
+    // --- Wall / WeirdLong / generic: orientation advances by exactly 1 each way. ---
     for kind in [PieceKind::Wall, PieceKind::WeirdLong, PieceKind::El] {
         let mut p = Piece::construct(kind, 0, 0, 1);
         assert!(p.move_to(&scratch, 15, 15), "{:?} could not enter scratch board", kind);
         let n = p.orientations.max(1);
         let start_orient = p.orientation;
         let start_cells = p.cells;
+
+        // Forward: orientation += 1 (mod n) per step; a full cycle restores both.
         for step in 0..n {
             let before = p.orientation;
             assert!(p.rotate(&scratch, false), "{:?} forward rotate {} failed on empty board", kind, step);
             assert_eq!(p.orientation, (before + 1) % n,
-                "{:?} orientation must advance by exactly 1: got {} from {} (orientations={})",
+                "{:?} forward orientation must advance by exactly 1: got {} from {} (orientations={})",
                 kind, p.orientation, before, n);
         }
         assert_eq!(p.orientation, start_orient,
-            "{:?}: a full {}-rotation cycle must restore the starting orientation", kind, n);
+            "{:?}: a full {}-rotation forward cycle must restore the starting orientation", kind, n);
         assert_eq!(p.cells, start_cells,
-            "{:?}: a full {}-rotation cycle must restore the original cells", kind, n);
+            "{:?}: a full {}-rotation forward cycle must restore the original cells", kind, n);
+
+        // Reverse: orientation -= 1 (mod n) per step — and it must stay in
+        // [0, n), never the Rust `-1 % n == -1`. Pins the reverse branch
+        // (piece.rs:367/476) the forward-only checks missed. Full cycle restores.
+        for step in 0..n {
+            let before = p.orientation;
+            assert!(p.rotate(&scratch, true), "{:?} reverse rotate {} failed on empty board", kind, step);
+            assert_eq!(p.orientation, (before - 1 + n) % n,
+                "{:?} reverse orientation must decrement by exactly 1 (mod {}): got {} from {}",
+                kind, n, p.orientation, before);
+            assert!(p.orientation >= 0 && p.orientation < n,
+                "{:?} reverse rotation produced an out-of-range orientation {} (expected 0..{})",
+                kind, p.orientation, n);
+        }
+        assert_eq!(p.orientation, start_orient,
+            "{:?}: a full {}-rotation reverse cycle must restore the starting orientation", kind, n);
+        assert_eq!(p.cells, start_cells,
+            "{:?}: a full {}-rotation reverse cycle must restore the original cells", kind, n);
     }
 }

@@ -260,3 +260,47 @@ proptest! {
             "arsenal (token + quantity per slot) must survive snapshot→restore");
     }
 }
+
+// ---------------------------------------------------------------------------
+// (e') ARSENAL HOLES + quantities survive the keyframe round-trip.
+//     `grant_weapon` only ever fills CONTIGUOUS slots, so (e) couldn't catch a
+//     restore that compacts holes (e.g. rebuild via Arsenal::buy instead of
+//     import_arsenal). Here we plant a deliberately HOLEY layout via
+//     import_arsenal — a filled slot, an empty slot, a qty>1 slot, another hole —
+//     and assert the EXACT per-slot layout (incl. the holes between fills) round
+//     trips. A compaction would shift slot 2's weapon into slot 1 and fail.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn keyframe_preserves_holey_arsenal() {
+    let mut g = Game::new(0xA15E);
+    // [token, qty] per slot; token -1 = empty. Hole at slot 1 and 3; qty>1 at 2 & 4.
+    #[rustfmt::skip]
+    let layout: Vec<i32> = vec![
+        5, 1,    // slot 0
+        -1, 0,   // slot 1  <- HOLE before a fill
+        7, 4,    // slot 2  <- qty > 1
+        -1, 0,   // slot 3  <- HOLE between fills
+        2, 3,    // slot 4  <- qty > 1
+        -1, 0, -1, 0, -1, 0, -1, 0, -1, 0,  // slots 5..9 empty
+    ];
+    g.import_arsenal(&layout);
+
+    // Sanity: the holey layout actually took (else the test is vacuous).
+    assert_eq!(g.arsenal_token(0), 5);
+    assert_eq!(g.arsenal_token(1), -1, "slot 1 must be a genuine hole, not compacted away");
+    assert_eq!((g.arsenal_token(2), g.arsenal_quantity(2)), (7, 4));
+    assert_eq!(g.arsenal_token(3), -1, "slot 3 must be a genuine hole");
+
+    let before: Vec<(i32, u16)> =
+        (0..10).map(|s| (g.arsenal_token(s), g.arsenal_quantity(s))).collect();
+
+    let bytes = g.snapshot_bytes();
+    let mut h = Game::new(1);
+    assert!(h.restore_bytes(&bytes), "restore_bytes must accept a valid snapshot");
+
+    let after: Vec<(i32, u16)> =
+        (0..10).map(|s| (h.arsenal_token(s), h.arsenal_quantity(s))).collect();
+    assert_eq!(after, before,
+        "holey arsenal (incl. the gaps between filled slots) must survive snapshot→restore");
+}

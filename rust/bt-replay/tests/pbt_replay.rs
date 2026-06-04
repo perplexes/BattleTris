@@ -48,6 +48,7 @@ enum Op {
     MoveRight,
     Rotate,
     BeginDrop,
+    AiDrop,
     SoftDrop,
     ReceiveWeapon(i32),
     Tick,
@@ -60,6 +61,7 @@ fn op() -> impl Strategy<Value = Op> {
         1 => Just(Op::MoveRight),
         1 => Just(Op::Rotate),
         1 => Just(Op::BeginDrop),
+        1 => Just(Op::AiDrop),
         1 => Just(Op::SoftDrop),
         1 => (0_i32..MAX_WEAPONS).prop_map(Op::ReceiveWeapon),
     ]
@@ -92,6 +94,10 @@ fn apply_op(g: &mut Game, rec: &mut Recorder, o: &Op) {
         Op::BeginDrop => {
             g.begin_drop();
             rec.record(Input::BeginDrop);
+        }
+        Op::AiDrop => {
+            g.ai_begin_drop();
+            rec.record(Input::AiDrop);
         }
         Op::SoftDrop => {
             g.soft_drop();

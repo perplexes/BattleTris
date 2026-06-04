@@ -40,7 +40,16 @@ fn arb_name() -> impl Strategy<Value = String> {
 /// trivially if `sanitize_name` ever degenerates to `-> None`, so we need at
 /// least one property that *demands* `Some` with a concrete expected value.
 fn valid_name() -> impl Strategy<Value = String> {
-    prop::string::string_regex("[a-zA-Z0-9_-]{1,32}").unwrap()
+    prop_oneof![
+        // ASCII, no whitespace.
+        prop::string::string_regex("[a-zA-Z0-9_-]{1,32}").unwrap(),
+        // Unicode + internal spaces: first/last char non-space so `trim` is a
+        // no-op, and <= ~20 chars so the 32-char cap never truncates. These must
+        // ALSO sanitize to themselves — `sanitize_name` only trims + caps, it does
+        // NOT filter to ASCII, so a sneaky `if !capped.is_ascii() { None }` would
+        // be caught here (the ASCII-only anchor missed it).
+        prop::string::string_regex("[a-zA-Zé漢🙂0-9][a-zA-Zé漢🙂0-9 _-]{0,18}[a-zA-Zé漢🙂0-9]").unwrap(),
+    ]
 }
 
 proptest! {

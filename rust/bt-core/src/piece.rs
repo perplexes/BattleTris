@@ -364,7 +364,7 @@ impl Piece {
 
         // Update orientation
         if reverse {
-            self.orientation = (self.orientation - 1) % self.orientations;
+            self.orientation = (self.orientation - 1 + self.orientations) % self.orientations;
         } else {
             self.orientation = (self.orientation + 1) % self.orientations;
         }
@@ -473,7 +473,7 @@ impl Piece {
 
         self.state = new_state;
         if reverse {
-            self.orientation = (self.orientation - 1) % self.orientations;
+            self.orientation = (self.orientation - 1 + self.orientations) % self.orientations;
         } else {
             self.orientation = (self.orientation + 1) % self.orientations;
         }

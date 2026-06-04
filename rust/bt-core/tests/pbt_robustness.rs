@@ -221,11 +221,13 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
     #[test]
-    fn receive_weapon_never_changes_funds_synchronously(
+    fn receive_weapon_never_changes_score_synchronously(
         seed in any::<u64>(),
         // Seed some arsenal variety (grant_weapon is free — never touches funds).
         grants in prop::collection::vec(weapon_idx(), 0..6),
-        tok in weapon_idx(),
+        // A SEQUENCE of incoming weapons: a second/third receive must be just as
+        // inert as the first (catches a mutant that fires only on a repeat).
+        recvs in prop::collection::vec(weapon_idx(), 1..8),
     ) {
         let mut g = Game::new(seed);
         // Build up a non-zero balance + some board state WITHOUT any receive, so
@@ -234,15 +236,25 @@ proptest! {
         for _ in 0..30 { g.tick(16); g.take_events(); }
         for &i in &grants { g.grant_weapon(WeaponToken::ALL[i]); }
 
-        let before = g.score().funds;
-        // The ONLY op between snapshot and check: receive the incoming weapon.
-        g.receive_weapon(WeaponToken::ALL[tok]);
-        prop_assert_eq!(
-            g.score().funds, before,
-            "receive_weapon({:?}) changed funds synchronously ({} -> {}); every \
-             funds effect must defer to the next lock/flush",
-            WeaponToken::ALL[tok], before, g.score().funds
-        );
+        // Snapshot the WHOLE score (not just funds): receiving must not move
+        // score/lines/funds NOR the opponent mirror fields either.
+        let snap = |g: &Game| {
+            let s = g.score();
+            (s.score, s.lines, s.funds, s.op_score, s.op_lines, s.op_funds)
+        };
+        let before = snap(&g);
+        // The ONLY ops between snapshot and each check: receive (queue) a weapon.
+        // No tick/lock to flush, so the score can only move if receive itself
+        // (illegitimately) touches it.
+        for &t in &recvs {
+            g.receive_weapon(WeaponToken::ALL[t]);
+            prop_assert_eq!(
+                snap(&g), before,
+                "receive_weapon({:?}) changed the score synchronously; every funds/score \
+                 effect must defer to the next lock/flush",
+                WeaponToken::ALL[t]
+            );
+        }
     }
 }
 
