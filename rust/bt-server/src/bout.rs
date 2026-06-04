@@ -1218,19 +1218,24 @@ mod tests {
             let condor = degrade_board(ids.clone(), WeaponToken::Condor);
 
             let (h_ames, h_ace, h_condor) = (hidden(&ames), hidden(&ace), hidden(&condor));
+            let pct = |h: usize| (h as f64) / (total as f64) * 100.0;
 
-            // Ames: a partial view — hides SOME (privacy) and reveals SOME (useful).
-            prop_assert!(h_ames > 0,
-                "Ames must HIDE some opponent cells (a full reveal is an info leak); hid {}/{}",
-                h_ames, total);
-            prop_assert!(h_ames < total,
-                "Ames must REVEAL some opponent cells; hid all {}/{}", h_ames, total);
+            // Ames hides ~50% (`spy_hide_pct(Ames)`). The hide is a DETERMINISTIC
+            // hash, so over a full board the fraction is stable; pin it to a BAND
+            // around the spec so a mutant that drifts the rate (e.g. `Ames => 2`,
+            // a near-full info leak, or `Ames => 95`, a near-blackout) FAILS — the
+            // old "hides some / reveals some" check let a 2% hider pass.
+            prop_assert!((35.0..=65.0).contains(&pct(h_ames)),
+                "Ames must hide ~50% of cells (in [35,65]); hid {:.1}% ({}/{})",
+                pct(h_ames), h_ames, total);
 
-            // Ace is more accurate than Ames: it hides strictly fewer.
+            // Ace hides ~15% — a band around its spec, and strictly fewer than Ames.
+            prop_assert!((5.0..=30.0).contains(&pct(h_ace)),
+                "Ace must hide ~15% of cells (in [5,30]); hid {:.1}% ({}/{})",
+                pct(h_ace), h_ace, total);
             prop_assert!(h_ace < h_ames,
-                "Ace must hide FEWER cells than Ames (it's the more accurate spy): ace={} ames={}",
+                "Ace must hide FEWER cells than Ames (the more accurate spy): ace={} ames={}",
                 h_ace, h_ames);
-            prop_assert!(h_ace > 0, "Ace still hides some cells; hid {}", h_ace);
 
             // Condor is perfect: it hides NOTHING (reveals the whole board).
             prop_assert_eq!(h_condor, 0,
