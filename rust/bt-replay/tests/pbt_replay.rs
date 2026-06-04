@@ -477,6 +477,43 @@ proptest! {
             "side-B diverged after backward seek (hi={}, lo={})", hi, lo);
     }
 
+    // ── (b⁗) seek BEYOND tick_count clamps to the end ───────────────────────
+    //
+    // `seek` clamps `target` to `tick_count`. Seeking to a tick PAST the end must
+    // land exactly at the end — same `tick_index` and state as `run_to_end()`.
+    // The existing seek tests only use `target <= tick_count`, so the clamp was
+    // unexercised. Covers both the single-player and versus players.
+    #[test]
+    fn seek_past_end_equals_run_to_end(
+        replay in random_replay(200, 64),
+        vreplay in random_versus_replay(200, 64),
+        overshoot in 1_u32..1_000_000,
+    ) {
+        // Single-player.
+        let mut sought = ReplayPlayer::new(replay.clone());
+        sought.seek(replay.tick_count.saturating_add(overshoot));
+        let mut ran = ReplayPlayer::new(replay.clone());
+        ran.run_to_end();
+        prop_assert_eq!(sought.tick_index(), ran.tick_index(),
+            "seek-past-end tick_index must clamp to run_to_end (single)");
+        prop_assert_eq!(sought.tick_index(), replay.tick_count,
+            "seek-past-end must land exactly at tick_count (single)");
+        prop_assert_eq!(fingerprint(sought.player()), fingerprint(ran.player()),
+            "seek-past-end state must equal run_to_end (single)");
+
+        // Versus.
+        let mut vsought = VersusReplayPlayer::new(vreplay.clone());
+        vsought.seek(vreplay.tick_count.saturating_add(overshoot));
+        let mut vran = VersusReplayPlayer::new(vreplay.clone());
+        vran.run_to_end();
+        prop_assert_eq!(vsought.tick_index(), vran.tick_index(),
+            "seek-past-end tick_index must clamp to run_to_end (versus)");
+        prop_assert_eq!(vsought.tick_index(), vreplay.tick_count,
+            "seek-past-end must land exactly at tick_count (versus)");
+        prop_assert_eq!(fingerprint(vsought.game(true)), fingerprint(vran.game(true)),
+            "seek-past-end side-A must equal run_to_end (versus)");
+    }
+
     // ── (c) Replay JSON round-trip ──────────────────────────────────────────
     //    Uses the FULL-variety `json_replay` (every Mode, optional ai_level/title,
     //    every Input variant) so a serde mutant that drops/renames `title` or

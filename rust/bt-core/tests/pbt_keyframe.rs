@@ -246,6 +246,58 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
+// (a''') RESTORE CLEARS STALE EVENTS. `restore` ends with `self.events.clear()`
+//        so a freshly-restored game starts with an EMPTY event queue — otherwise
+//        a stale event left over from the target's prior play (a Locked / Scored /
+//        WeaponLaunched) would surface on the next `take_events()` and the
+//        Versus/Bout relay would act on a phantom (e.g. re-deliver a weapon, re-
+//        credit a score). The keyframe round-trip tests restore into FRESH games
+//        with empty queues, so removing `self.events.clear()` survived them. Here
+//        we restore INTO a game that already has queued events and demand the
+//        queue is empty afterward.
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    #[test]
+    fn restore_clears_stale_events(
+        seed in any::<u64>(),
+        ops in prop::collection::vec(op(), 0..128),
+    ) {
+        // Source: a valid snapshot to restore FROM (drain its events first so the
+        // bytes we restore aren't themselves carrying a queue — snapshot doesn't
+        // serialise events anyway, but be explicit).
+        let mut src = Game::new(seed);
+        for o in &ops {
+            if src.is_game_over() { break; }
+            apply(&mut src, o);
+        }
+        src.leave_bazaar();
+        let bytes = src.snapshot_bytes();
+
+        // Target: leave at least one QUEUED, UNDRAINED event. `launch_weapon`
+        // pushes `WeaponLaunched` synchronously, so grant+launch leaves a non-empty
+        // queue. Clone it to confirm the queue really is non-empty (non-vacuity)
+        // without draining the real target.
+        let mut tgt = Game::new(seed.wrapping_add(123));
+        tgt.grant_weapon(WeaponToken::RiseUp);
+        tgt.launch_weapon(0);
+        prop_assert!(!tgt.clone().take_events().is_empty(),
+            "precondition: the target must have a queued event before restore");
+
+        // Restore over the dirty target (do NOT drain its queue first).
+        prop_assert!(tgt.restore_bytes(&bytes), "restore must accept the valid snapshot");
+
+        // The restored game must start with an EMPTY event queue — no phantom
+        // event from the target's prior play survives. (Otherwise the relay would
+        // act on it: re-deliver the weapon, re-credit a score, etc.)
+        prop_assert!(tgt.take_events().is_empty(),
+            "restore must clear stale events; a phantom event survived the restore");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // (b) POST-RESTORE DETERMINISM
 //     The restored clone and the original, given the SAME ~20 inputs+ticks,
 //     stay identical (render_ids + score) at each step.

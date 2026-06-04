@@ -560,6 +560,27 @@ fn eval_board_matches_hand_derived_golden_values() {
     let line_bonus = 5_000.0 * (-4.0 + 1.0) * ftop; // negative
     let want_row = height_pen - line_bonus;
     approx(eval_board(&row), want_row, "full bottom row");
+
+    // (4) ONE CLOSED HOLE — the term the directional `buried_hole` property only
+    //     bounds (`> +1.0`), so a `CLOSED_HOLE_PENALTY 10_000 -> 9_000` mutant
+    //     survives it. Columns 0 and 1 filled rows 25..=27, with (0,26) punched
+    //     out: it's a hole (filled above at (0,25)), blocked left by the wall and
+    //     right by (1,26) -> CLOSED. No full rows (only 2 columns). Exact terms:
+    //       tops = [25,25,28,28,28,28,28,28,28,28], top = 25, f25 = 25/28.
+    //       variance_raw = 9 (the single 3-step at the col1->col2 edge, doubled by
+    //         the C++ "furthest column" repeat is 0 here), variance = 9*50*(3/28)^3.
+    //       one closed hole: hole_pen = 1 * 10_000; cov: depth0,blocks1 ->
+    //         cov_hole_pen = 1 * 3_000.
+    //       height_pen = (3/28)^2 * 30_000. No line bonus.
+    let mut hole = Board::standard(false);
+    for x in 0..2 {
+        for y in 25..28 { hole.set(x, y, Some(brick())); }
+    }
+    hole.set(0, 26, None); // punch the closed hole
+    let g = 3.0_f64 / 28.0; // 1 - 25/28
+    let variance = 9.0 * 50.0 * g * g * g;
+    let want_hole = variance + 3_000.0 /* cov */ + 10_000.0 /* closed hole */ + g * g * 30_000.0;
+    approx(eval_board(&hole), want_hole, "one closed hole");
 }
 
 proptest! {

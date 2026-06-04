@@ -144,23 +144,23 @@ proptest! {
         let mut g = Game::new(seed);
         let Some(p) = g.current_piece() else { return Ok(()); };
         let orientations = p.orientations;
-        // Skip pieces that don't actually turn (rot==0 → rotate is a no-op).
-        // We detect that by attempting a rotate and seeing if orientation moves
-        // at all; if not, there's nothing to pin.
         let o0 = p.orientation;
-        if orientations <= 1 { return Ok(()); }
+        // Skip NON-rotatable pieces by their OWN metadata (`rot == 0`: Box / Die /
+        // Happy / FourByFour have a 0-sized rotation sub-square), NOT by observing
+        // whether `rotate()` did nothing — observing the function under test would
+        // let a `rotate -> no-op` mutant satisfy the property vacuously for every
+        // rotatable piece.
+        if p.rot == 0 || orientations <= 1 { return Ok(()); }
 
         let mut expected = o0;
         // Spin a full cycle plus a bit; on an empty board at spawn every step
         // must land on the next orientation, and after `orientations` steps it
-        // must return to the start (the wrap).
+        // must return to the start (the wrap). Because this piece IS rotatable
+        // (rot != 0) and has room at spawn, EVERY rotate must advance — a no-op
+        // here is now a real failure, not a skip.
         for step in 1..=(orientations + 2) {
             g.rotate();
             let cur = g.current_piece().map(|p| p.orientation);
-            if cur == Some(o0) && step == 1 {
-                // This piece's rotate was a no-op (rot==0) — nothing to assert.
-                return Ok(());
-            }
             expected = (expected + 1) % orientations;
             prop_assert_eq!(cur, Some(expected),
                 "rotate step {} must advance orientation to {} (orientations={})",
@@ -170,6 +170,69 @@ proptest! {
         let full_cycle = g.current_piece().map(|p| p.orientation);
         prop_assert_eq!(full_cycle, Some((o0 + (orientations + 2)) % orientations),
             "orientation must wrap mod orientations");
+    }
+
+    /// SOFT DROP semantic: on a FRESH falling piece (empty board, spawn row),
+    /// `soft_drop()` advances the piece down by EXACTLY one row (`y += delta_y`),
+    /// and never moves it sideways or up. Repeated soft drops step down one row at
+    /// a time until the piece reaches the floor, where the next soft drop enters
+    /// the lock SLIDE instead of advancing (the piece can't go lower). A
+    /// `soft_drop -> return;` no-op (or one that moves the wrong way) is caught.
+    #[test]
+    fn soft_drop_advances_one_row_then_slides_at_floor(seed in any::<u64>()) {
+        let mut g = Game::new(seed);
+        let (x0, y0) = g.piece_pos();
+        prop_assert_eq!(y0, 0, "fresh piece must start at the spawn row");
+
+        // One soft drop -> down exactly one row, same column.
+        g.soft_drop();
+        let (x1, y1) = g.piece_pos();
+        prop_assert_eq!((x1, y1), (x0, y0 + 1),
+            "soft_drop must advance y by exactly 1 (no sideways/upward move)");
+        prop_assert_eq!(g.current_piece().map(|p| (p.x, p.y)), Some((x1, y1)),
+            "the rendered piece must follow the soft-drop step");
+
+        // Keep soft-dropping: each step advances y by 1 until the floor, after
+        // which y stops advancing (the piece has entered the lock slide).
+        let mut prev_y = y1;
+        let mut reached_floor = false;
+        for _ in 0..40 {
+            if g.is_game_over() { break; }
+            g.soft_drop();
+            let yn = g.piece_pos().1;
+            if yn == prev_y {
+                // Can't descend further — at the floor / on a slide.
+                reached_floor = true;
+                break;
+            }
+            prop_assert_eq!(yn, prev_y + 1, "each soft_drop must step down exactly one row");
+            prev_y = yn;
+        }
+        prop_assert!(reached_floor || g.is_game_over(),
+            "the piece must eventually reach the floor (soft drop stops advancing y)");
+    }
+
+    /// HUMAN HARD-DROP scoring: the FIRST `begin_drop()` on a fresh falling piece
+    /// awards exactly `BT_BOARD_HGT - y` points (the further it still had to fall,
+    /// the more it's worth — BTGame.C:729), and a SECOND `begin_drop()` (fast drop
+    /// already engaged) awards NOTHING. Kills `+= 0` (no award) and a double-award.
+    #[test]
+    fn begin_drop_awards_board_height_minus_y_once(seed in any::<u64>()) {
+        use bt_core::constants::BT_BOARD_HGT;
+        let mut g = Game::new(seed);
+        let (_, y) = g.piece_pos();
+        prop_assert_eq!(y, 0, "fresh piece at spawn row");
+        let s0 = g.score().score;
+
+        g.begin_drop();
+        let s1 = g.score().score;
+        prop_assert_eq!(s1 - s0, (BT_BOARD_HGT - y) as i64,
+            "first begin_drop must award BT_BOARD_HGT - y = {}", BT_BOARD_HGT - y);
+
+        // A second begin_drop (fast drop already engaged) must NOT award again.
+        g.begin_drop();
+        prop_assert_eq!(g.score().score, s1,
+            "a second begin_drop must not double-award the hard-drop bonus");
     }
 }
 

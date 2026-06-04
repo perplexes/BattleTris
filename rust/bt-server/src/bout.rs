@@ -814,6 +814,14 @@ mod tests {
             // this property pins is that the recorded inputs + ticks replay exactly.
             let mut b = Bout::new(seed_a, seed_b);
             let mut next_seq = [1u64, 1u64];
+            // INDEPENDENT oracle of the expected frames: each time `apply_input`
+            // ACCEPTS an input we record exactly what we submitted, stamped with the
+            // tick the bout was at. This is built in the TEST (not via the bout's
+            // own frame-push), so comparing the export against it catches a
+            // recording mutant that mangles a frame's payload (e.g. stamping every
+            // `LaunchWeapon(slot)` as `LaunchWeapon(0)`) — `to_replay().frames ==
+            // b.frames` would NOT, since both sides share the mutated push.
+            let mut expected_frames: Vec<bt_replay::VersusFrame> = Vec::new();
 
             for batch in iters {
                 if b.is_over() { break; }
@@ -821,7 +829,12 @@ mod tests {
                     let side = if side_idx == 0 { Side::A } else { Side::B };
                     let seq = next_seq[side_idx];
                     next_seq[side_idx] += 1;
-                    let _ = b.apply_input(side, &input, seq);
+                    let tick_now = b.tick_count() as u32;
+                    if b.apply_input(side, &input, seq) {
+                        expected_frames.push(bt_replay::VersusFrame {
+                            tick: tick_now, side: side_idx as u8, input: input.clone(),
+                        });
+                    }
                 }
                 // The server ALWAYS ticks after draining a batch of inputs.
                 b.tick(16);
@@ -831,9 +844,14 @@ mod tests {
             let live_b = side_fingerprint(b.versus.game(Side::B));
             let live_result = b.result();
 
-            // Export + replay (through JSON too — the on-disk form).
-            let replay = b.to_replay(TICK_MS, "pbt");
-            let replay = bt_replay::VersusReplay::from_json(&replay.to_json())
+            // Export. The exported frames must EXACTLY equal what the test observed
+            // being ACCEPTED — same tick, side, AND input payload (slot/token).
+            let exported = b.to_replay(TICK_MS, "pbt");
+            prop_assert_eq!(&exported.frames, &expected_frames,
+                "to_replay must export every accepted input verbatim (tick/side/input)");
+
+            // Replay (through JSON too — the on-disk form).
+            let replay = bt_replay::VersusReplay::from_json(&exported.to_json())
                 .expect("to_replay JSON must parse");
             let mut player = VersusReplayPlayer::new(replay);
             player.run_to_end();
@@ -956,6 +974,58 @@ mod tests {
             }
         }
         panic!("RiseUp was not delivered to B by the authoritative bout");
+    }
+
+    // -----------------------------------------------------------------------
+    // Property (f): SPY DEGRADATION privacy. Each spy reveals a DIFFERENT fraction
+    //   of the opponent board, and the degradation is what stops a modified client
+    //   from reading cells the spy didn't earn. The old test only asserted "some
+    //   cells visible", so `Ames => 0` (reveal EVERYTHING — a full info leak)
+    //   survived. Here, over a FULLY-filled board, we pin each token's reveal:
+    //     * Ames  must HIDE some AND REVEAL some (a partial, ~50% view).
+    //     * Ace   must hide FEWER than Ames (it's the more accurate spy).
+    //     * Condor must reveal ALL (perfect satellite — hides nothing).
+    //   `degrade_board` hides by turning a cell to -2 (empty); a revealed cell
+    //   keeps its id. Empty cells (-2) are never "revealed", so we fill the board.
+    // -----------------------------------------------------------------------
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn spy_degradation_hides_the_right_fraction_per_token(
+            // A fully-filled board of arbitrary non-empty render ids (>= 0).
+            ids in prop::collection::vec(0i32..30, 280),
+        ) {
+            // Sanity: the source grid has NO empty cells, so every -2 in the output
+            // is a HIDE the spy imposed (not a pre-existing empty).
+            prop_assert!(ids.iter().all(|&v| v != -2), "source grid must be fully filled");
+            let total = ids.len();
+            let hidden = |grid: &[i32]| grid.iter().filter(|&&v| v == -2).count();
+
+            let ames = degrade_board(ids.clone(), WeaponToken::Ames);
+            let ace = degrade_board(ids.clone(), WeaponToken::Ace);
+            let condor = degrade_board(ids.clone(), WeaponToken::Condor);
+
+            let (h_ames, h_ace, h_condor) = (hidden(&ames), hidden(&ace), hidden(&condor));
+
+            // Ames: a partial view — hides SOME (privacy) and reveals SOME (useful).
+            prop_assert!(h_ames > 0,
+                "Ames must HIDE some opponent cells (a full reveal is an info leak); hid {}/{}",
+                h_ames, total);
+            prop_assert!(h_ames < total,
+                "Ames must REVEAL some opponent cells; hid all {}/{}", h_ames, total);
+
+            // Ace is more accurate than Ames: it hides strictly fewer.
+            prop_assert!(h_ace < h_ames,
+                "Ace must hide FEWER cells than Ames (it's the more accurate spy): ace={} ames={}",
+                h_ace, h_ames);
+            prop_assert!(h_ace > 0, "Ace still hides some cells; hid {}", h_ace);
+
+            // Condor is perfect: it hides NOTHING (reveals the whole board).
+            prop_assert_eq!(h_condor, 0,
+                "Condor (satellite) must reveal the ENTIRE board (hide nothing); hid {}", h_condor);
+            prop_assert_eq!(&condor, &ids, "Condor's output must equal the source grid exactly");
+        }
     }
 
     #[test]

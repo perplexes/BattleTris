@@ -167,6 +167,31 @@ proptest! {
     }
 
     // -----------------------------------------------------------------------
+    // (c0') ISSUED HEADER content. The tamper test only flips an already-signed
+    //       header; it never checks what `issue_token_with` actually PUTS there.
+    //       A mutant issuing `{"alg":"none",...}` (or a wrong `typ`) self-signs a
+    //       token that still verifies (the MAC covers whatever header was emitted),
+    //       so verification-only tests miss it. Decode the issued header and pin
+    //       the exact `alg` = HS256 and `typ` = JWT.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn issued_header_declares_hs256_jwt(raw in "[a-zA-Z0-9]{1,30}") {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        let Some(clean) = sanitize_name(&raw) else { return Ok(()); };
+        let token = issue_token_with(&secret_a(), &clean, IAT);
+        let header_b64 = token.split('.').next().expect("token has a header segment");
+        let header_bytes = URL_SAFE_NO_PAD.decode(header_b64)
+            .expect("header must be valid base64url");
+        let header: serde_json::Value = serde_json::from_slice(&header_bytes)
+            .expect("header must be valid JSON");
+        prop_assert_eq!(header.get("alg").and_then(|v| v.as_str()), Some("HS256"),
+            "issued JWT header must declare alg=HS256 (got {:?})", header.get("alg"));
+        prop_assert_eq!(header.get("typ").and_then(|v| v.as_str()), Some("JWT"),
+            "issued JWT header must declare typ=JWT (got {:?})", header.get("typ"));
+    }
+
+    // -----------------------------------------------------------------------
     // (c1') Tampered HEADER fails verification. The MAC covers `header.payload`,
     //       so flipping a byte of the header segment (e.g. forging `alg`/`typ`)
     //       must break verification. The payload/signature tamper tests never
