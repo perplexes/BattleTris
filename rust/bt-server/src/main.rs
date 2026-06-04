@@ -155,6 +155,19 @@ struct Client {
     /// auto-pair with EACH OTHER — otherwise they'd drain the lobby playing
     /// themselves and leave nobody for a visitor to challenge.
     is_bot: bool,
+    /// Lobby presence captured at the start of the current bout, restored when it
+    /// ends (see [`post_bout_status`]). `None` outside a bout.
+    prev_status: Option<Status>,
+}
+
+/// Presence to restore when a bout ends. A player who had ANY lobby presence
+/// before the match (Available/Searching) returns to Available; a one-off
+/// directed CHALLENGER (no prior presence) leaves the roster instead of being
+/// forced Available — otherwise the moment the match ends they'd be auto-paired
+/// straight back into another one (challenge a bot, top out, get re-matched with
+/// a bot forever), which reads as the board "resetting" mid-session.
+fn post_bout_status(prev: Option<Status>) -> Option<Status> {
+    prev.map(|_| Status::Available)
 }
 
 /// Shared server state.
@@ -523,10 +536,12 @@ fn start_bout(app: &mut App, a: u64, b: u64, quality: Option<f64>) -> Option<Pen
     let tx_b = app.clients[&b].tx.clone();
     if let Some(c) = app.clients.get_mut(&a) {
         c.bout = Some((input_tx.clone(), Side::A));
+        c.prev_status = c.status; // remember presence to restore at bout end
         c.status = Some(Status::InGame);
     }
     if let Some(c) = app.clients.get_mut(&b) {
         c.bout = Some((input_tx, Side::B));
+        c.prev_status = c.status;
         c.status = Some(Status::InGame);
     }
     // quality is optional in the wire frame; a directed challenge omits it.
@@ -695,15 +710,18 @@ async fn run_bout(state: Shared, pb: PendingBout) {
     };
 
     let mut app = state.lock().await;
-    // Match over: both sides leave the bout and (if still connected + named) go
-    // back to Available so the lobby shows them open to a new match.
+    // Match over: both sides leave the bout and return to their PRE-match
+    // presence (see [`post_bout_status`]) — a player who was "open to matches"
+    // goes back to Available; a one-off directed challenger leaves the roster
+    // rather than being force-Available and instantly auto-rematched.
     for cid in [id_a, id_b] {
         if let Some(c) = app.clients.get_mut(&cid) {
             c.bout = None;
             c.peer = None;
             if !c.name.is_empty() {
-                c.status = Some(Status::Available);
+                c.status = post_bout_status(c.prev_status);
             }
+            c.prev_status = None;
         }
     }
     if let Some(a_won) = outcome {
@@ -1011,7 +1029,7 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
             id,
             Client {
                 name: String::new(), tx, peer: None, state: st, bout: None,
-                status: None, geo: None, is_bot: false,
+                status: None, geo: None, is_bot: false, prev_status: None,
             },
         );
     }
@@ -1753,7 +1771,7 @@ mod tests {
             id,
             Client {
                 name: name.to_string(), tx, peer: None, state, bout: None,
-                status: None, geo: None, is_bot: false,
+                status: None, geo: None, is_bot: false, prev_status: None,
             },
         );
         rx
@@ -2100,6 +2118,31 @@ mod tests {
         }
         assert!(is_match_candidate(&app, 3, 1), "a bot IS a valid pair for a human");
         assert!(try_match(&mut app, 3).is_some(), "human auto-pairs into a bot");
+    }
+
+    #[test]
+    fn post_bout_status_keeps_present_players_but_drops_pure_challengers() {
+        // Anyone who had lobby presence before the match returns to Available...
+        assert_eq!(post_bout_status(Some(Status::Available)), Some(Status::Available));
+        assert_eq!(post_bout_status(Some(Status::Searching)), Some(Status::Available));
+        assert_eq!(post_bout_status(Some(Status::InGame)), Some(Status::Available));
+        // ...but a one-off directed challenger (no prior presence) leaves the
+        // roster instead of being force-Available + instantly auto-rematched.
+        assert_eq!(post_bout_status(None), None);
+    }
+
+    #[test]
+    fn start_bout_remembers_pre_match_presence_for_restore() {
+        let mut app = test_app();
+        // A bot (Available) challenged by a human (no presence — a pure challenger).
+        let _bot = add_bot(&mut app, 1, "Tokyo-Ernie");
+        let _human = add_client(&mut app, 2, "human"); // status stays None
+        start_bout(&mut app, 2, 1, None).expect("bout starts");
+        assert_eq!(app.clients[&1].prev_status, Some(Status::Available), "bot was Available");
+        assert_eq!(app.clients[&2].prev_status, None, "challenger had no presence");
+        // Hence at bout end the bot returns to Available, the human to nothing.
+        assert_eq!(post_bout_status(app.clients[&1].prev_status), Some(Status::Available));
+        assert_eq!(post_bout_status(app.clients[&2].prev_status), None);
     }
 
     #[test]
