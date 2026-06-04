@@ -67,6 +67,12 @@ fn line_clear_matches_independent_reference() {
     let h = BT_BOARD_HGT;
     const ITERS: usize = 4_000;
 
+    // Coverage guards so the funds/value comparison can't go vacuous: `funds`
+    // only distinguishes `value * lines` from `value` when lines >= 2, and the
+    // value sum is only meaningful when a non-empty clear actually happens.
+    let mut saw_single_clear = 0usize;
+    let mut saw_multi_clear = 0usize;
+
     for iter in 0..ITERS {
         // Diverse fill densities: dense boards exercise multi-line cascades,
         // sparse boards exercise holes / partial rows / the no-clear path.
@@ -96,6 +102,12 @@ fn line_clear_matches_independent_reference() {
         let lc = board.check_lines();
         let (rl, rv, rf) = ref_check_lines(&mut rows);
 
+        match lc.lines {
+            1 => saw_single_clear += 1,
+            n if n >= 2 => saw_multi_clear += 1,
+            _ => {}
+        }
+
         assert_eq!(
             (lc.lines, lc.value, lc.funds),
             (rl, rv, rf),
@@ -113,6 +125,15 @@ fn line_clear_matches_independent_reference() {
             dump(&rows)
         );
     }
+
+    // Non-vacuity: the run must have exercised both a single-line clear AND a
+    // multi-line clear, so `funds = value * lines` is genuinely distinguished
+    // from `funds = value` (they agree only at lines == 1).
+    assert!(
+        saw_single_clear > 0 && saw_multi_clear > 0,
+        "line-clear coverage too thin (single={saw_single_clear}, multi={saw_multi_clear}); \
+         the value/funds comparison may be vacuous"
+    );
 }
 
 /// Compact board dump for failure messages: '.' empty, digit = cell value.

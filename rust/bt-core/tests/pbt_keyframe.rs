@@ -219,3 +219,44 @@ proptest! {
         prop_assert_eq!(h.score().op_lines, h2.score().op_lines);
     }
 }
+
+// ---------------------------------------------------------------------------
+// (e) ARSENAL survives the keyframe round-trip.
+//     The round-trip tests above only ever drive `ReceiveWeapon`, which queues
+//     incoming garbage rows / effects and NEVER touches the arsenal — so the
+//     snapshot's arsenal section was always 20 empty ints, and a codec that
+//     simply dropped it (serialised zeros) round-tripped vacuously. Here we
+//     GRANT a random multiset of weapons into the arsenal first, then assert
+//     every slot's (token, quantity) is preserved across snapshot→restore.
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    #[test]
+    fn keyframe_preserves_arsenal(
+        seed in any::<u64>(),
+        grants in prop::collection::vec(0usize..34, 1..40),
+    ) {
+        let mut g = Game::new(seed);
+        for &i in &grants {
+            g.grant_weapon(WeaponToken::ALL[i]);
+        }
+        // Guard against vacuity: the arsenal must actually hold something, else a
+        // "drop the arsenal" codec mutant would pass on an already-empty arsenal.
+        let nonempty = (0..10).any(|s| g.arsenal_token(s) >= 0);
+        prop_assert!(nonempty, "precondition: granting >=1 weapon must fill an arsenal slot");
+
+        let before: Vec<(i32, u16)> =
+            (0..10).map(|s| (g.arsenal_token(s), g.arsenal_quantity(s))).collect();
+
+        let bytes = g.snapshot_bytes();
+        let mut h = Game::new(seed.wrapping_add(1));
+        prop_assert!(h.restore_bytes(&bytes), "restore_bytes must accept a valid snapshot");
+
+        let after: Vec<(i32, u16)> =
+            (0..10).map(|s| (h.arsenal_token(s), h.arsenal_quantity(s))).collect();
+        prop_assert_eq!(after, before,
+            "arsenal (token + quantity per slot) must survive snapshot→restore");
+    }
+}

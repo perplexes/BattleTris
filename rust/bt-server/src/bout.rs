@@ -412,9 +412,16 @@ mod tests {
             let mut b = Bout::new(seed_a, seed_b);
             let side = if side_idx == 0 { Side::A } else { Side::B };
 
-            // Snapshot state before the attempt.
-            let funds_before_a = b.versus.game(Side::A).score().funds;
-            let funds_before_b = b.versus.game(Side::B).score().funds;
+            // Snapshot the FULL latent state before the attempt: each board's
+            // complete serialized state (which includes the pending-weapon queue,
+            // arsenal, funds, remaining-effect counters — see Game::snapshot_bytes),
+            // the recorded-frame log, and ack. A rejected input must touch NONE of
+            // it — not even latent state (e.g. a queued ReceiveWeapon) that wouldn't
+            // surface until a later tick. The old test only checked funds + ack, so
+            // a mutant that queued a weapon before returning false survived.
+            let snap_a = b.versus.game(Side::A).snapshot_bytes();
+            let snap_b = b.versus.game(Side::B).snapshot_bytes();
+            let frames_before = b.frames.len();
             let ack_before = b.snapshot_for(side, false).ack;
 
             let accepted = b.apply_input(side, &input, seq);
@@ -422,20 +429,42 @@ mod tests {
             // Must be rejected.
             prop_assert!(!accepted, "relay-internal input {:?} was accepted (should be rejected)", input);
 
-            // Funds must not have changed on either side.
+            // No board/queue/arsenal/funds mutation on EITHER side, no frame
+            // recorded, ack unmoved.
             prop_assert_eq!(
-                b.versus.game(Side::A).score().funds, funds_before_a,
-                "Side A funds changed after rejected relay-internal input {:?}", input
+                &b.versus.game(Side::A).snapshot_bytes(), &snap_a,
+                "Side A latent state changed after rejected relay-internal input {:?}", input
             );
             prop_assert_eq!(
-                b.versus.game(Side::B).score().funds, funds_before_b,
-                "Side B funds changed after rejected relay-internal input {:?}", input
+                &b.versus.game(Side::B).snapshot_bytes(), &snap_b,
+                "Side B latent state changed after rejected relay-internal input {:?}", input
             );
-
-            // ack must not have moved.
+            prop_assert_eq!(
+                b.frames.len(), frames_before,
+                "a frame was recorded for a rejected relay-internal input {:?}", input
+            );
             prop_assert_eq!(
                 b.snapshot_for(side, false).ack, ack_before,
                 "ack advanced after rejected relay-internal input {:?}", input
+            );
+
+            // And NO DELAYED effect: a clean bout that never saw the input must
+            // stay bit-identical through many ticks (a queued weapon would surface
+            // here at the next lock/flush and diverge the boards).
+            let mut control = Bout::new(seed_a, seed_b);
+            for _ in 0..80 {
+                b.tick(16);
+                control.tick(16);
+            }
+            prop_assert_eq!(
+                &b.versus.game(Side::A).snapshot_bytes(),
+                &control.versus.game(Side::A).snapshot_bytes(),
+                "Side A diverged from a clean bout after a rejected input {:?} (latent injection surfaced on a tick)", input
+            );
+            prop_assert_eq!(
+                &b.versus.game(Side::B).snapshot_bytes(),
+                &control.versus.game(Side::B).snapshot_bytes(),
+                "Side B diverged from a clean bout after a rejected input {:?} (latent injection surfaced on a tick)", input
             );
         }
     }
@@ -538,6 +567,62 @@ mod tests {
                 prop_assert!(b.versus.game(Side::B).score().funds >= 0, "Side B funds negative");
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property (c'): the TICK must not credit funds on its own. The ">= 0" check
+    // above is too weak — a per-tick credit like `add_funds(1)` at the top of
+    // Bout::tick keeps funds non-negative and slips through. Here we use the one
+    // window where the legitimate-funds set is provably EMPTY: while a side's
+    // board is still empty going INTO a tick, nothing has locked or cleared, and
+    // a single piece can't lock-and-clear in one tick from an empty board — so
+    // that side's funds MUST still be 0 after the tick. A tick-path injection
+    // shows up on the very first falling tick. (We can't justify post-lock deltas
+    // here because Versus::tick drains the per-game events, and weapon line
+    // insertions confound a board-fill delta — so we pin the clean empty window.)
+    // -----------------------------------------------------------------------
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn tick_never_credits_funds_before_first_lock(
+            seed_a in any::<u64>(),
+            seed_b in any::<u64>(),
+        ) {
+            let mut b = Bout::new(seed_a, seed_b);
+            for _ in 0..400 {
+                // Which sides start this tick with an empty (nothing-locked) board?
+                let pre_empty = [
+                    board_filled(b.versus.game(Side::A)) == 0,
+                    board_filled(b.versus.game(Side::B)) == 0,
+                ];
+                // Both stacks have started — no more provably-empty window left.
+                if !pre_empty[0] && !pre_empty[1] {
+                    break;
+                }
+                b.tick(16);
+                for (i, side) in [Side::A, Side::B].into_iter().enumerate() {
+                    if pre_empty[i] {
+                        prop_assert_eq!(
+                            b.versus.game(side).score().funds, 0,
+                            "side {:?} funds became nonzero over a tick that started with an \
+                             empty board (no lock/clear possible yet) — tick-path funds injection",
+                            side
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Count of occupied board cells (the locked stack — the falling piece is not
+    /// part of the board until it locks).
+    fn board_filled(g: &bt_core::Game) -> i64 {
+        let b = g.board();
+        (0..b.height)
+            .flat_map(|y| (0..b.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| b.get(x, y).is_some())
+            .count() as i64
     }
 
     #[test]

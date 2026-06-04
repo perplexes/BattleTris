@@ -5,7 +5,7 @@
 //!   (b) The returned Placement is legal — piece fits at (x, orientation).
 //!   (c) Computer::take_turn never panics and actually changes game state.
 
-use bt_ai::{best_placement, Computer, Placement};
+use bt_ai::{best_placement, eval_board, Computer, Placement};
 use bt_core::{Board, Game, Piece, PieceKind};
 use proptest::prelude::*;
 
@@ -118,8 +118,76 @@ fn any_enterable(board: &Board, piece: &Piece) -> bool {
     false
 }
 
+/// Replicate best_placement's per-candidate simulation for one (column,
+/// orientation): rotate the piece `o` times (free, on a scratch board), enter at
+/// the spawn row, hard-drop, land into a board clone, clear lines, then
+/// `eval_board`. Returns `None` if the piece can't enter at column `x` (exactly
+/// the candidates best_placement `continue`s past). Uses only public APIs +
+/// the public `eval_board`, so the SELECTION logic is recomputed independently.
+fn simulate_and_eval(board: &Board, piece: &Piece, x: i32, o: i32) -> Option<f64> {
+    let mut b = board.clone();
+    let mut p = rotated_clone(piece, o, board);
+    if !p.move_to(&b, x, 0) {
+        return None;
+    }
+    let mut landed_y = 0;
+    while p.can_move_to(&b, x, landed_y + 1) {
+        landed_y += 1;
+    }
+    if !p.move_to(&b, x, landed_y) {
+        return None;
+    }
+    p.land(&mut b);
+    b.check_lines();
+    Some(eval_board(&b))
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(128))]
+
+    // -----------------------------------------------------------------------
+    // best_placement must return the GLOBAL-MINIMUM eval score, not merely a
+    // legal placement. A "pick the first legal candidate" mutant (e.g. changing
+    // the selection guard `if score < best_score` to `if best_score == f64::MAX`)
+    // keeps every returned placement legal/enterable — so the enterability test
+    // below can't catch it. Here we recompute, over the SAME candidate set and
+    // the SAME land+clear+eval simulation, the minimum achievable score and
+    // assert best_placement actually attains it.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn best_placement_attains_global_minimum_score(
+        (board, piece) in game_board_strategy(),
+    ) {
+        // Only meaningful when at least one placement is possible.
+        if !any_enterable(&board, &piece) {
+            return Ok(());
+        }
+
+        let pl = best_placement(&board, &piece);
+        let chosen = simulate_and_eval(&board, &piece, pl.x, pl.orientation)
+            .expect("best_placement returned a placement that can't even enter");
+
+        // Global minimum over every (orientation, column) in best_placement's
+        // search range. Order is irrelevant for the minimum.
+        let xmin = -(bt_core::constants::BT_PIECE_WIDTH as i32 - 1);
+        let mut global_min = f64::MAX;
+        for o in 0..piece.orientations.max(1) {
+            for x in xmin..board.width {
+                if let Some(s) = simulate_and_eval(&board, &piece, x, o) {
+                    if s < global_min {
+                        global_min = s;
+                    }
+                }
+            }
+        }
+
+        prop_assert!(
+            (chosen - global_min).abs() < 1e-9,
+            "best_placement is sub-optimal: chose score {} at (x={}, o={}) but the \
+             global minimum over all candidates is {}",
+            chosen, pl.x, pl.orientation, global_min
+        );
+    }
 
     #[test]
     fn best_placement_is_in_range_and_enterable(

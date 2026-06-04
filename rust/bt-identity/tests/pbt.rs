@@ -34,8 +34,42 @@ fn arb_name() -> impl Strategy<Value = String> {
     ]
 }
 
+/// Names GUARANTEED to survive sanitization unchanged: non-empty, no whitespace
+/// to trim, within the length cap. The non-vacuous tests below build on this —
+/// every `let Some(clean) = sanitize_name(..) else { return }` test passes
+/// trivially if `sanitize_name` ever degenerates to `-> None`, so we need at
+/// least one property that *demands* `Some` with a concrete expected value.
+fn valid_name() -> impl Strategy<Value = String> {
+    prop::string::string_regex("[a-zA-Z0-9_-]{1,32}").unwrap()
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
+
+    // -----------------------------------------------------------------------
+    // (a0) NON-VACUOUS anchor: a guaranteed-valid name must sanitize to ITSELF
+    //      and survive issue→verify unchanged. This is the property that fails
+    //      the instant `sanitize_name` returns `None` (or mangles the name),
+    //      which the `let Some(clean) = .. else { return }` guards everywhere
+    //      else would silently tolerate.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn valid_names_sanitize_to_self_and_round_trip(name in valid_name()) {
+        prop_assert_eq!(
+            sanitize_name(&name),
+            Some(name.clone()),
+            "a no-whitespace, in-cap name must sanitize to itself, not {:?}",
+            sanitize_name(&name)
+        );
+        let secret = secret_a();
+        let token = issue_token_with(&secret, &name, IAT);
+        prop_assert_eq!(
+            verify_token_with(&secret, &token),
+            Some(name.clone()),
+            "issue→verify must recover the exact name for {:?}",
+            name
+        );
+    }
 
     // -----------------------------------------------------------------------
     // (a) Round-trip: sanitize_name(name) == Some(clean) implies

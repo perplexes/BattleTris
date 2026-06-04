@@ -22,15 +22,18 @@ use proptest::prelude::*;
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
-/// Compact board fingerprint: every cell id, then the falling piece position
-/// and orientation.  This is the "render fingerprint" used throughout.
-fn fingerprint(g: &Game) -> (Vec<i32>, i32, i32, i32) {
+/// Compact state fingerprint: every cell id, the falling piece position +
+/// orientation, AND the score triple (score / lines / funds). Including the
+/// score means a replay that reproduces the board but diverges on scoring or
+/// funds is caught — the render-only fingerprint missed that whole dimension.
+fn fingerprint(g: &Game) -> (Vec<i32>, i32, i32, i32, i64, i64, i64) {
     let ids = g.render_ids();
     let (px, py, po) = g
         .current_piece()
         .map(|p| (p.x, p.y, p.orientation))
         .unwrap_or((-99, -99, -99));
-    (ids, px, py, po)
+    let s = g.score();
+    (ids, px, py, po, s.score, s.lines, s.funds)
 }
 
 const DT: i32 = 16;
@@ -62,29 +65,43 @@ fn op() -> impl Strategy<Value = Op> {
     ]
 }
 
-fn op_to_input(o: &Op) -> Option<Input> {
-    match o {
-        Op::MoveLeft => Some(Input::MoveLeft),
-        Op::MoveRight => Some(Input::MoveRight),
-        Op::Rotate => Some(Input::Rotate),
-        Op::BeginDrop => Some(Input::BeginDrop),
-        Op::SoftDrop => Some(Input::SoftDrop),
-        Op::ReceiveWeapon(t) => Some(Input::ReceiveWeapon(*t)),
-        Op::Tick => None,
-    }
-}
-
 fn apply_op(g: &mut Game, rec: &mut Recorder, o: &Op) {
+    // Drive the LIVE game through DIRECT Game methods — NOT Input::apply_to_game.
+    // The replay reconstructs via Input::apply_to_game, so routing the live
+    // oracle around that mapping makes the record→replay equality independent of
+    // it: a mutant that swaps MoveLeft/MoveRight (or any Input→Game miswiring)
+    // inside apply_to_game now diverges the replay from this live run, instead of
+    // both sides making the identical mistake and cancelling out.
     match o {
         Op::Tick => {
             g.tick(DT);
             rec.on_tick();
         }
-        other => {
-            if let Some(inp) = op_to_input(other) {
-                inp.apply_to_game(g);
-                rec.record(inp);
+        Op::MoveLeft => {
+            g.move_left();
+            rec.record(Input::MoveLeft);
+        }
+        Op::MoveRight => {
+            g.move_right();
+            rec.record(Input::MoveRight);
+        }
+        Op::Rotate => {
+            g.rotate();
+            rec.record(Input::Rotate);
+        }
+        Op::BeginDrop => {
+            g.begin_drop();
+            rec.record(Input::BeginDrop);
+        }
+        Op::SoftDrop => {
+            g.soft_drop();
+            rec.record(Input::SoftDrop);
+        }
+        Op::ReceiveWeapon(t) => {
+            if let Some(tok) = bt_core::WeaponToken::from_index(*t) {
+                g.receive_weapon(tok);
             }
+            rec.record(Input::ReceiveWeapon(*t));
         }
     }
 }

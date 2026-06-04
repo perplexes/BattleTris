@@ -241,3 +241,54 @@ fn special_piece_rotation_is_covered_and_valid() {
             "{:?} rotation never changed its cells — custom rotation may be a no-op", k);
     }
 }
+
+/// (f) Rotation METADATA cycles exactly. The cell-only invariants in (b)/(e)
+/// survive a counter mutant — e.g. `rotate_wall`'s `orientation += 2` instead of
+/// `+= 1` (piece.rs:478): the transformed cells stay valid while the orientation
+/// counter silently drifts. This pins the counter itself:
+///   * Wall / WeirdLong / a generic piece: each forward rotate advances
+///     `orientation` by exactly 1 (mod orientations); a full `orientations`-step
+///     cycle returns to the starting orientation.
+///   * Star: orientation NEVER moves (faithful to BTStarPiece — only `state`
+///     advances); `state` toggles every rotate and 2 rotations restore the cells.
+#[test]
+fn special_piece_rotation_metadata_cycles_exactly() {
+    // Large empty board so rotation is never blocked and never clips an edge.
+    let scratch = Board::new(40, 40, true);
+
+    // --- Star: orientation fixed, state toggles, 2 rotations restore cells. ---
+    {
+        let mut p = Piece::construct(PieceKind::Star, 0, 0, 1);
+        assert!(p.move_to(&scratch, 15, 15), "Star could not enter scratch board");
+        let start_cells = p.cells;
+        let start_orient = p.orientation;
+        for step in 0..2 {
+            let before_state = p.state;
+            assert!(p.rotate(&scratch, false), "Star forward rotate {step} failed on empty board");
+            assert_eq!(p.orientation, start_orient,
+                "Star must NOT change orientation (only state advances) — step {step}");
+            assert_ne!(p.state, before_state, "Star state must toggle each rotate — step {step}");
+        }
+        assert_eq!(p.cells, start_cells, "Star: 2 rotations must restore the original cells");
+    }
+
+    // --- Wall / WeirdLong / generic: orientation advances by exactly 1. ---
+    for kind in [PieceKind::Wall, PieceKind::WeirdLong, PieceKind::El] {
+        let mut p = Piece::construct(kind, 0, 0, 1);
+        assert!(p.move_to(&scratch, 15, 15), "{:?} could not enter scratch board", kind);
+        let n = p.orientations.max(1);
+        let start_orient = p.orientation;
+        let start_cells = p.cells;
+        for step in 0..n {
+            let before = p.orientation;
+            assert!(p.rotate(&scratch, false), "{:?} forward rotate {} failed on empty board", kind, step);
+            assert_eq!(p.orientation, (before + 1) % n,
+                "{:?} orientation must advance by exactly 1: got {} from {} (orientations={})",
+                kind, p.orientation, before, n);
+        }
+        assert_eq!(p.orientation, start_orient,
+            "{:?}: a full {}-rotation cycle must restore the starting orientation", kind, n);
+        assert_eq!(p.cells, start_cells,
+            "{:?}: a full {}-rotation cycle must restore the original cells", kind, n);
+    }
+}

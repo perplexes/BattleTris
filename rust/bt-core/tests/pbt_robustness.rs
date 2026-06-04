@@ -205,6 +205,47 @@ proptest! {
 // no weapon noise — pure movement/gravity).
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Focused: receiving an INCOMING weapon (queuing it) must NEVER synchronously
+// change the victim's funds.
+//
+// Every funds effect (Reagan seizure, Mondale tax, Keating) is deferred to the
+// next piece lock / weapon flush (the port's weapq-at-lock model). The broad
+// property above exempts funds < 0 the instant a Reagan is *received*, which
+// masks a mutant that debits funds right inside `receive_weapon`. This pins the
+// receive path directly: NO tick/lock between the receive and the funds check,
+// so funds can only move if receive itself (illegitimately) touches them.
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    #[test]
+    fn receive_weapon_never_changes_funds_synchronously(
+        seed in any::<u64>(),
+        // Seed some arsenal variety (grant_weapon is free — never touches funds).
+        grants in prop::collection::vec(weapon_idx(), 0..6),
+        tok in weapon_idx(),
+    ) {
+        let mut g = Game::new(seed);
+        // Build up a non-zero balance + some board state WITHOUT any receive, so
+        // a debit at receive-time would be a clear regression from `before`.
+        g.add_funds(500);
+        for _ in 0..30 { g.tick(16); g.take_events(); }
+        for &i in &grants { g.grant_weapon(WeaponToken::ALL[i]); }
+
+        let before = g.score().funds;
+        // The ONLY op between snapshot and check: receive the incoming weapon.
+        g.receive_weapon(WeaponToken::ALL[tok]);
+        prop_assert_eq!(
+            g.score().funds, before,
+            "receive_weapon({:?}) changed funds synchronously ({} -> {}); every \
+             funds effect must defer to the next lock/flush",
+            WeaponToken::ALL[tok], before, g.score().funds
+        );
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(128))]
 
