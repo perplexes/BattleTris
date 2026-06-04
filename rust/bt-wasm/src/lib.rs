@@ -704,6 +704,66 @@ impl WasmVersusReplayPlayer {
     pub fn lines_b(&self) -> i32 {
         self.inner.game(false).score().lines as i32
     }
+
+    // ── HUD: funds, bazaar, arsenal, active effects (per side) ───────────────
+    pub fn funds_a(&self) -> i32 {
+        self.inner.game(true).score().funds as i32
+    }
+    pub fn funds_b(&self) -> i32 {
+        self.inner.game(false).score().funds as i32
+    }
+    pub fn lines_til_bazaar_a(&self) -> i32 {
+        self.inner.game(true).lines_til_bazaar()
+    }
+    pub fn lines_til_bazaar_b(&self) -> i32 {
+        self.inner.game(false).lines_til_bazaar()
+    }
+    pub fn in_bazaar_a(&self) -> bool {
+        self.inner.game(true).is_in_bazaar()
+    }
+    pub fn in_bazaar_b(&self) -> bool {
+        self.inner.game(false).is_in_bazaar()
+    }
+
+    /// Side's arsenal as a flat [token0, qty0, token1, qty1, …] of 10 slots
+    /// (token = -1 for an empty slot). Mirrors the playfield arsenal panel.
+    pub fn arsenal_a(&self) -> Vec<i32> {
+        arsenal_pairs(self.inner.game(true))
+    }
+    pub fn arsenal_b(&self) -> Vec<i32> {
+        arsenal_pairs(self.inner.game(false))
+    }
+
+    /// Active effects on the side, as a flat [tokenIndex, linesRemaining, …]
+    /// for every weapon whose effect is currently in play (remaining > 0).
+    pub fn effects_a(&self) -> Vec<i32> {
+        active_effects(self.inner.game(true))
+    }
+    pub fn effects_b(&self) -> Vec<i32> {
+        active_effects(self.inner.game(false))
+    }
+}
+
+/// Flatten a game's 10 arsenal slots into [token, qty] pairs (token = -1 empty).
+fn arsenal_pairs(g: &bt_core::Game) -> Vec<i32> {
+    let mut out = Vec::with_capacity(20);
+    for i in 0..10usize {
+        out.push(g.arsenal_token(i));
+        out.push(g.arsenal_quantity(i) as i32);
+    }
+    out
+}
+
+/// Collect [tokenIndex, linesRemaining] pairs for every active weapon effect.
+fn active_effects(g: &bt_core::Game) -> Vec<i32> {
+    let mut out = Vec::new();
+    for tok in bt_core::WeaponToken::ALL {
+        if g.weapon_active(tok) {
+            out.push(tok.index() as i32);
+            out.push(g.weapon_remaining(tok));
+        }
+    }
+    out
 }
 
 #[cfg(test)]

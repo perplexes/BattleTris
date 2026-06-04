@@ -1123,12 +1123,24 @@ body.bazaar-open #touchControls { display: none !important; }
     flex-wrap: wrap;
     justify-content: center;
 }
+/* Narrow viewports stack the two columns vertically (one board per row). */
+.replay-boards.stacked {
+    flex-direction: column;
+    align-items: center;
+}
 
-.replay-board {
+.replay-col {
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 4px;
+    gap: 6px;
+}
+/* board on the left, HUD panel on the right — like the original playfield. */
+.replay-col-body {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 10px;
 }
 
 .replay-board-label {
@@ -1137,7 +1149,12 @@ body.bazaar-open #touchControls { display: none !important; }
     color: #333;
 }
 
-.replay-board canvas {
+.replay-board-wrap {
+    position: relative;
+    line-height: 0;            /* no gap under the canvas */
+}
+
+.replay-board-wrap canvas {
     background-color: #000;
     border: 2px solid #808080;
     border-right-color: #fff;
@@ -1146,6 +1163,75 @@ body.bazaar-open #touchControls { display: none !important; }
     border-top-color: #000;
     image-rendering: pixelated;
 }
+
+/* "In the bazaar" badge overlaid on a board while that side is shopping. */
+.replay-bazaar-badge {
+    position: absolute;
+    top: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    background-color: #cd0000;          /* red3 */
+    color: #fff;
+    font-family: 'lucidatypewriter';
+    font-weight: bold;
+    font-size: 13px;
+    letter-spacing: 1px;
+    padding: 3px 10px;
+    border: 2px solid #fff;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.6);
+    white-space: nowrap;
+    pointer-events: none;
+}
+
+/* ─── Per-side HUD panel (score/funds/effects/arsenal) ─────────────────────── */
+.replay-hud {
+    width: 158px;
+    flex: 0 0 158px;
+    box-sizing: border-box;
+    background-color: #a8a8a8;          /* gray66 */
+    border: 2px solid #808080;
+    border-top-color: #ffffff; border-left-color: #ffffff;
+    border-bottom-color: #000000; border-right-color: #000000;
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.replay-hud .rh-stats > div {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-family: 'lucidatypewriter';
+    font-weight: bold;
+    color: #0000ff;                     /* blue (BTScoreManager) */
+    font-size: 14px;
+    line-height: 1.45;
+}
+
+.replay-hud .rh-list {
+    border-top: 1px solid #808080;
+    padding-top: 6px;
+}
+.replay-hud .rh-h {
+    font-family: 'lucidatypewriter';
+    font-weight: bold;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #333;
+    margin-bottom: 3px;
+}
+.replay-hud .rh-list > div {
+    display: flex;
+    justify-content: space-between;
+    font-family: 'lucidatypewriter';
+    font-size: 12px;
+    color: #8b0000;                     /* dark red — weapon list */
+    line-height: 1.4;
+}
+.replay-hud .rh-effects > div b { color: #006400; }   /* lines-remaining */
+.replay-hud .rh-empty { color: #777 !important; }
 
 .replay-controls {
     display: flex;

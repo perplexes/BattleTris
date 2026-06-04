@@ -15,14 +15,26 @@
         <div class="replay-wrap">
             <div id="replayError" class="replay-error" style="display:none;"></div>
 
-            <div class="replay-boards">
-                <div class="replay-board">
-                    <div class="replay-board-label">Player</div>
-                    <canvas id="replayCanvas"></canvas>
+            <div class="replay-boards" id="replayBoards">
+                <div class="replay-col">
+                    <div class="replay-board-label" id="replayLabelA">Player</div>
+                    <div class="replay-col-body">
+                        <div class="replay-board-wrap">
+                            <canvas id="replayCanvas"></canvas>
+                            <div class="replay-bazaar-badge" id="replayBazaarA" style="display:none;">&#127978; BAZAAR</div>
+                        </div>
+                        <div class="replay-hud" id="replayHudA"></div>
+                    </div>
                 </div>
-                <div id="replayAiBoard" class="replay-board" style="display:none;">
-                    <div class="replay-board-label">Ernie</div>
-                    <canvas id="replayAiCanvas"></canvas>
+                <div id="replayAiBoard" class="replay-col" style="display:none;">
+                    <div class="replay-board-label" id="replayLabelB">Ernie</div>
+                    <div class="replay-col-body">
+                        <div class="replay-board-wrap">
+                            <canvas id="replayAiCanvas"></canvas>
+                            <div class="replay-bazaar-badge" id="replayBazaarB" style="display:none;">&#127978; BAZAAR</div>
+                        </div>
+                        <div class="replay-hud" id="replayHudB"></div>
+                    </div>
                 </div>
             </div>
 
