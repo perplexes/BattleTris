@@ -980,6 +980,80 @@ fn carter_buy_uncursed_sell_cursed_is_an_intentional_arbitrage_boon() {
     );
 }
 
+/// Count `tick(16)` calls for the current falling piece to descend one row.
+/// Reflects `drop_time` (private), so it observes the gravity SPEED directly.
+fn ticks_to_fall_one_row(g: &mut Game) -> i32 {
+    let y0 = match g.current_piece() {
+        Some(p) => p.y,
+        None => return -1,
+    };
+    for t in 1..2000 {
+        g.tick(16);
+        let _ = g.take_events();
+        match g.current_piece() {
+            Some(p) if p.y > y0 => return t,
+            None => return -1,
+            _ => {}
+        }
+        if g.is_game_over() {
+            return -1;
+        }
+    }
+    -1
+}
+
+/// SPEEDY speeds gravity up, MEADOW slows it down (first-principles, observable):
+/// a Speedy-cursed piece falls in FEWER ticks/row than baseline; a Meadow-cursed
+/// piece takes MORE. Pins the actual speed effect that the private `drop_time`
+/// hides from direct inspection.
+#[test]
+fn speedy_speeds_up_and_meadow_slows_gravity() {
+    let seed = 2024;
+    let baseline = ticks_to_fall_one_row(&mut Game::new(seed));
+
+    let mut gs = Game::new(seed);
+    assert!(receive_and_flush(&mut gs, WeaponToken::Speedy), "Speedy active");
+    let speedy = ticks_to_fall_one_row(&mut gs);
+
+    let mut gm = Game::new(seed);
+    assert!(receive_and_flush(&mut gm, WeaponToken::Meadow), "Meadow active");
+    let meadow = ticks_to_fall_one_row(&mut gm);
+
+    assert!(baseline > 0 && speedy > 0 && meadow > 0,
+        "pieces must fall: baseline={baseline} speedy={speedy} meadow={meadow}");
+    assert!(speedy < baseline,
+        "Speedy must drop FASTER (fewer ticks/row): baseline {baseline} vs speedy {speedy}");
+    assert!(meadow > baseline,
+        "Meadow must drop SLOWER (more ticks/row): baseline {baseline} vs meadow {meadow}");
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(70))]
+
+    /// DURATION weapons ACCUMULATE on relaunch (first-principles lifecycle): a
+    /// second launch EXTENDS the remaining duration by its full amount again
+    /// (remaining += dur) — it does NOT reset the clock. Relaunching a curse should
+    /// make it last longer, not restart. (We clear the board between flushes so a
+    /// flush-lock can't clear a line and tick the duration down.)
+    #[test]
+    fn duration_weapons_accumulate_on_relaunch(tok_idx in 0usize..34) {
+        let tok = WeaponToken::ALL[tok_idx];
+        let dur = weapon_table()[tok.index()].duration as i32;
+        prop_assume!(dur > 0);
+
+        let mut g = Game::new(31);
+        prop_assume!(receive_and_flush(&mut g, tok));
+        g.board_mut().clear();
+        let one = g.weapon_remaining(tok);
+        prop_assume!(receive_and_flush(&mut g, tok));
+        g.board_mut().clear();
+        let two = g.weapon_remaining(tok);
+
+        prop_assert_eq!(one, dur, "{:?}: first launch sets remaining to its duration", tok);
+        prop_assert_eq!(two, dur * 2, "{:?}: relaunch must ACCUMULATE (remaining += dur), not reset", tok);
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(48))]
 
