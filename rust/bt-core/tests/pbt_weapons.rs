@@ -935,6 +935,71 @@ fn open_bazaar(g: &mut Game) {
     let _ = g.take_events();
 }
 
+/// REAGAN ERA negates funds — and is its own inverse (an INVOLUTION): apply it
+/// twice and funds return to the original value.
+#[test]
+fn reagan_negates_funds_and_is_an_involution() {
+    let mut g = Game::new(7);
+    g.add_funds(137);
+    let x = g.score().funds;
+    let _ = g.take_events();
+    g.receive_weapon(WeaponToken::Reagan);
+    assert!(lock_one(&mut g), "flush Reagan");
+    assert_eq!(g.score().funds, -x, "Reagan must negate funds");
+    g.receive_weapon(WeaponToken::Reagan);
+    assert!(lock_one(&mut g), "flush Reagan again");
+    assert_eq!(g.score().funds, x, "Reagan twice must restore funds (involution)");
+}
+
+// (Keating's seize-all-and-credit-exactly conservation is already pinned by
+// `keating_seizes_all_funds_and_reports_the_exact_amount` above.)
+
+/// LAZY SUSAN exchanges the two players' arsenals and is an INVOLUTION: swap twice
+/// and each arsenal returns to its original slots.
+#[test]
+fn susan_swaps_arsenals_and_is_an_involution() {
+    let mut a = Game::new(1);
+    let mut b = Game::new(2);
+    a.grant_weapon(WeaponToken::RiseUp);
+    a.grant_weapon(WeaponToken::Bottle);
+    b.grant_weapon(WeaponToken::Force);
+    let snap = |g: &Game| (0..10).map(|i| (g.arsenal_token(i), g.arsenal_quantity(i))).collect::<Vec<_>>();
+    let (a0, b0) = (snap(&a), snap(&b));
+
+    a.swap_arsenal_with(&mut b);
+    assert_eq!(snap(&a), b0, "after Susan, A holds B's arsenal");
+    assert_eq!(snap(&b), a0, "after Susan, B holds A's arsenal");
+
+    a.swap_arsenal_with(&mut b);
+    assert_eq!(snap(&a), a0, "Susan twice restores A's arsenal");
+    assert_eq!(snap(&b), b0, "Susan twice restores B's arsenal");
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(48))]
+
+    /// FLIP OUT mirrors the board LEFT<->RIGHT (vs a hand-computed reference) and
+    /// is an INVOLUTION: flip twice = identity, preserving the exact cell multiset.
+    #[test]
+    fn flip_out_mirrors_lr_and_is_an_involution(
+        fills in prop::collection::vec((0i32..BT_BOARD_WTH, 0i32..BT_BOARD_HGT, 1u8..=6u8), 0..50)
+    ) {
+        let mut rng = Rng::new(1);
+        let mut b = Board::standard(false);
+        b.clear();
+        for (x, y, v) in &fills { b.set(*x, *y, Some(Cell::die(*v))); }
+        let (w, h) = (b.width as usize, b.height as usize);
+        let before = value_grid(&b);
+        let mut mirror = vec![None; w * h];
+        for y in 0..h { for x in 0..w { mirror[y * w + x] = before[y * w + (w - 1 - x)]; } }
+
+        b.apply_weapon(WeaponToken::FlipOut, &mut rng);
+        prop_assert_eq!(value_grid(&b), mirror, "FlipOut must mirror the board left<->right");
+        b.apply_weapon(WeaponToken::FlipOut, &mut rng);
+        prop_assert_eq!(value_grid(&b), before, "FlipOut twice must be the identity");
+    }
+}
+
 /// CARTER ARBITRAGE — an INTENTIONAL, faithful-to-1994 economic nuance, kept on
 /// purpose (NOT a bug). Both the buy price and the sell refund track the CURRENT
 /// Carter multiplier (BTBazaar.C:415 buy / :458 sell — `price_ * (1 + carter_)`),
