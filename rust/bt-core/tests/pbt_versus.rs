@@ -446,6 +446,62 @@ proptest! {
             "the seized funds must be credited to the attacker (A)");
     }
 
+    /// MONDALE relayed from A to B taxes B's LINE-CLEAR funds and credits A the 30%
+    /// cut — the recurring (per-clear) sibling of Keating's one-shot seizure, routed
+    /// through the same `FundsStolen` relay arm but driven by a real line clear. We
+    /// Mondale B, prefill B's bottom row of known die value, drive B to clear it, and
+    /// assert: B keeps floor(funds*0.70) and A is credited the matching tax. Routing
+    /// the tax to the wrong side (or not taxing) fails.
+    #[test]
+    fn mondale_taxes_victim_line_funds_and_credits_attacker(
+        seed_a in any::<u64>(),
+        seed_b in any::<u64>(),
+        die in 1u8..=6,
+    ) {
+        let mut v = Versus::new(seed_a, seed_b);
+        let a_funds0 = v.game(Side::A).score().funds;
+        // A Mondales B; flush it onto B at a lock (no clear yet -> no tax yet).
+        v.game_mut(Side::A).grant_weapon(WeaponToken::Mondale);
+        v.game_mut(Side::A).launch_weapon(0);
+        v.tick(16);
+        for _ in 0..600 {
+            if v.is_over() { break; }
+            v.game_mut(Side::B).begin_drop();
+            v.tick(16);
+            if v.game(Side::B).weapon_active(WeaponToken::Mondale) { break; }
+        }
+        prop_assume!(!v.is_over() && v.game(Side::B).weapon_active(WeaponToken::Mondale));
+        let b_funds_before = v.game(Side::B).score().funds;
+        let a_funds_before = v.game(Side::A).score().funds;
+
+        // Prefill B's bottom row with dice; B's next lock clears it for value*lines.
+        let (w, h) = (v.game(Side::B).board().width, v.game(Side::B).board().height);
+        for x in 0..w { v.game_mut(Side::B).board_mut().set(x, h - 1, Some(Cell::die(die))); }
+        let raw_funds = w * die as i32; // one row -> value = w*die, lines = 1
+
+        // Independent oracle (BTScoreManager.C:154-160).
+        let kept = (raw_funds as f64 * 0.70) as i64;
+        let tax = (((1.0 / 0.70) * kept as f64) * 0.30) as i64;
+        prop_assume!(tax > 0);
+
+        // Drive B to clear the prebuilt row.
+        for _ in 0..600 {
+            if v.is_over() { break; }
+            v.game_mut(Side::B).begin_drop();
+            v.tick(16);
+            if v.game(Side::B).score().funds > b_funds_before { break; }
+        }
+        prop_assume!(!v.is_over());
+
+        prop_assert_eq!(v.game(Side::B).score().funds - b_funds_before, kept,
+            "Mondale victim keeps floor(funds*0.70) on the taxed clear (die={})", die);
+        // A is credited the tax (its funds rose by exactly `tax` beyond where it was;
+        // A banks nothing else here because it never clears).
+        prop_assert_eq!(v.game(Side::A).score().funds - a_funds_before, tax,
+            "Mondale must credit the attacker (A) the 30% cut ({}) (die={})", tax, die);
+        let _ = a_funds0;
+    }
+
     /// SCORE/FUNDS relay across sides — in BOTH directions. Whatever score/lines/
     /// funds a side banks must be mirrored into the OTHER side's op_* via the
     /// `Scored` event the relay forwards as `receive_op_score`. We force a real
@@ -561,4 +617,71 @@ proptest! {
         prop_assert_eq!(bottom_row_fill(&vic), vic_bottom0,
             "the victim must be spared when the launcher is mirror-cursed");
     }
+}
+
+// ---------------------------------------------------------------------------
+// (f) VERSUS-LEVEL SPY FIZZLE when the launcher is Mirror-cursed (D6).
+//   The server's authoritative match runs through `Versus`, NOT `VsComputer`, so
+//   the spy-fizzle-when-cursed gate in versus.rs's relay (`if !weapon_active(Mirror)`
+//   before recording the spy launch) needs its OWN test. A mutant removing that gate
+//   (recording the cursed spy anyway) survived every other test. We cover both
+//   relay arms (A and B as the cursed launcher) plus a positive control.
+// ---------------------------------------------------------------------------
+
+/// Drive `side`'s game in a Versus to a lock (flushing queued weapons / the Mirror
+/// curse) without disturbing the other side.
+fn versus_lock(v: &mut Versus, side: Side) {
+    for _ in 0..600 {
+        if v.game(side).is_game_over() { return; }
+        v.game_mut(side).begin_drop();
+        v.tick(16);
+        // The curse/weapon is flushed once the side's pending queue applies; we
+        // can't see Locked directly here, so just run enough ticks.
+        if v.game(side).weapon_active(WeaponToken::Mirror) { return; }
+    }
+}
+
+#[test]
+fn versus_spy_fizzles_when_the_launcher_is_mirror_cursed() {
+    for cursed_is_a in [true, false] {
+        let mut v = Versus::new(1, 2);
+        let (launcher, attacker_of_curse) = if cursed_is_a {
+            (Side::A, Side::B)
+        } else {
+            (Side::B, Side::A)
+        };
+        // Curse the LAUNCHER: the OTHER side fires Mirror at them; flush it.
+        v.game_mut(attacker_of_curse).grant_weapon(WeaponToken::Mirror);
+        v.game_mut(attacker_of_curse).launch_weapon(0);
+        v.tick(16); // relay delivers Mirror onto the launcher's pending queue
+        versus_lock(&mut v, launcher);
+        assert!(v.game(launcher).weapon_active(WeaponToken::Mirror),
+            "the launcher must be mirror-cursed (cursed_is_a={cursed_is_a})");
+
+        // The cursed launcher fires a spy. It must FIZZLE: NOT recorded for the host.
+        v.game_mut(launcher).grant_weapon(WeaponToken::Ames);
+        let slot = (0..10usize).find(|&i|
+            v.game(launcher).arsenal_token(i) == WeaponToken::Ames.index() as i32).unwrap();
+        v.game_mut(launcher).launch_weapon(slot);
+        v.tick(16);
+        assert!(v.take_spy_launches(launcher).is_empty(),
+            "a mirror-cursed launcher's spy must FIZZLE — not be recorded (cursed_is_a={cursed_is_a})");
+    }
+}
+
+#[test]
+fn versus_spy_is_recorded_for_an_uncursed_launcher() {
+    // Positive control so the fizzle test above isn't vacuous: an UN-cursed spy IS
+    // recorded for the host (the launcher), and NOT delivered to the opponent.
+    let mut v = Versus::new(1, 2);
+    v.game_mut(Side::A).grant_weapon(WeaponToken::Condor);
+    v.game_mut(Side::A).launch_weapon(0);
+    v.tick(16);
+    assert_eq!(v.take_spy_launches(Side::A), vec![WeaponToken::Condor],
+        "an un-cursed launcher's spy must be recorded for the host");
+    assert!(v.take_spy_launches(Side::B).is_empty());
+    // The opponent is never weaponized by being spied on.
+    lock(v.game_mut(Side::B));
+    assert!(!v.game(Side::B).weapon_active(WeaponToken::Condor),
+        "the opponent is unaffected by being spied on");
 }
