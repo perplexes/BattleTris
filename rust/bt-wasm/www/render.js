@@ -90,40 +90,40 @@ export function drawCellOnContext(context, x, y, cellId) {
         context.fillStyle = '#eeee00';
         context.fillRect(px, py, CELL_SIZE - BEVEL_BORDER, CELL_SIZE - BEVEL_BORDER);
 
-        // Draw face
+        // Draw face. Everything is centered on the FACE center (cx) so the
+        // smiley is symmetric — previously the eyes sat left of a centered
+        // mouth, which read as lopsided.
         context.fillStyle = '#000000';
-
-        // Eyes: two ellipses
+        const cx = px + (CELL_SIZE - BEVEL_BORDER) / 2;
         const eyeWidth = 4;
         const eyeHeight = 7;
         const eyeY = py + 5;
+        const eyeDx = 4; // half the eye separation
 
-        // Left eye
+        // Eyes (symmetric about cx)
         context.beginPath();
-        context.ellipse(px + 4, eyeY, eyeWidth / 2, eyeHeight / 2, 0, 0, Math.PI * 2);
+        context.ellipse(cx - eyeDx, eyeY, eyeWidth / 2, eyeHeight / 2, 0, 0, Math.PI * 2);
+        context.fill();
+        context.beginPath();
+        context.ellipse(cx + eyeDx, eyeY, eyeWidth / 2, eyeHeight / 2, 0, 0, Math.PI * 2);
         context.fill();
 
-        // Right eye
-        context.beginPath();
-        context.ellipse(px + 13, eyeY, eyeWidth / 2, eyeHeight / 2, 0, 0, Math.PI * 2);
-        context.fill();
-
-        // Mouth
+        // Mouth (centered on cx)
         if (cellId === 21) {
             // Happy: smile (lower half of arc)
             context.beginPath();
-            context.arc(px + 11.5, py + 12, 5, 0, Math.PI);
+            context.arc(cx, py + 12, 5, 0, Math.PI);
             context.stroke();
         } else {
             // Unhappy: frown (upper half of arc)
             context.beginPath();
-            context.arc(px + 11.5, py + 12, 5, Math.PI, 0);
+            context.arc(cx, py + 12, 5, Math.PI, 0);
             context.stroke();
 
-            // Tear: small blue dot below right eye
+            // Tear: small blue dot below the right eye
             context.fillStyle = '#3050ff';
             context.beginPath();
-            context.arc(px + 13, py + 8, 2, 0, Math.PI * 2);
+            context.arc(cx + eyeDx, py + 8, 2, 0, Math.PI * 2);
             context.fill();
         }
         return;
@@ -137,17 +137,15 @@ export function drawCellOnContext(context, x, y, cellId) {
         context.fillStyle = '#eeeee0';
         context.fillRect(px, py, CELL_SIZE - BEVEL_BORDER, CELL_SIZE - BEVEL_BORDER);
 
-        // Draw pips: a 5x5 gray square with a 3x3 black inset (BTBox.C).
+        // Draw pips: solid black squares (NOT beveled — a die pip is a flat dot).
         const value = cellId - 23;
         const X = [1, 7, 13];
         const Y = [1, 7, 13];
         const pipSize = 5;
 
+        context.fillStyle = '#000000';
         const drawPip = (offsetX, offsetY) => {
-            context.fillStyle = '#a8a8a8';
             context.fillRect(px + offsetX, py + offsetY, pipSize, pipSize);
-            context.fillStyle = '#000000';
-            context.fillRect(px + offsetX + 1, py + offsetY + 1, pipSize - 2, pipSize - 2);
         };
 
         // Pip placement rules
