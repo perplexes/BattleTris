@@ -176,13 +176,14 @@ fn mondale_emits_the_swiped_tax_for_the_attacker() {
                 _ => None,
             })
             .sum();
-        // Faithful to BTScoreManager.C: the attacker's cut is re-grossed from the
-        // victim's truncated kept funds, not simply `gross - kept`.
+        // The attacker gets the EXACT remainder the victim lost (gross - kept), so
+        // the transfer conserves — the engine no longer uses 1994's leaky re-gross
+        // from the already-truncated kept funds (see mondale_transfer_conserves_funds).
         let kept = (gross as f64 * (1.0 - BT_MONDALE_RATE)) as i64;
-        let expected = (((1.0 / (1.0 - BT_MONDALE_RATE)) * kept as f64) * BT_MONDALE_RATE) as i64;
+        let expected = gross - kept;
         assert_eq!(
             stolen, expected,
-            "the swiped tax (re-grossed from kept {kept}) must be emitted for the attacker"
+            "the swiped tax (exact remainder of gross {gross}, kept {kept}) must be emitted for the attacker"
         );
         return;
     }
