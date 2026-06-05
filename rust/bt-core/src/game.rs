@@ -325,29 +325,18 @@ impl Game {
 
             let clear = self.board.check_lines();
             self.score.lines += clear.lines as i64;
-            // BT_FUNDS: Mondale taxes the victim to (1 - 0.30) of funds earned;
-            // the swiped 30% is credited to the attacker by the relay
-            // (`FundsStolen`), faithful to BTScoreManager.C:154-202.
-            let gained = if self.weapons.is_active(WeaponToken::Mondale) {
-                let kept = (clear.funds as f64 * (1.0 - BT_MONDALE_RATE)) as i64;
-                // CORRECTNESS over faithfulness: the attacker gains EXACTLY what the
-                // victim lost (`clear.funds - kept`), so the tax CONSERVES money.
-                // The 1994 original (BTScoreManager.C:154-160) reconstructed the cut
-                // from the victim's already-TRUNCATED funds delta sent over the P2P
-                // wire — a second independent truncation with no shared remainder,
-                // which DESTROYS up to 2 funds per clear (the victim loses more than
-                // the attacker gains; see `mondale_transfer_conserves_funds`). We
-                // have full information at the relay, so we transfer the exact
-                // remainder instead. (Diverges from the binary by <=2 funds/clear.)
-                let tax = clear.funds as i64 - kept;
-                if tax != 0 {
-                    self.events.push(GameEvent::FundsStolen(tax));
-                }
-                kept
-            } else {
-                clear.funds as i64
-            };
-            self.score.funds += gained;
+            // BT_FUNDS: Mondale taxes the victim to (1 - 0.30) of funds earned; the
+            // swiped 30% is credited to the attacker by the relay (`FundsStolen`),
+            // faithful to BTScoreManager.C:154-202. The Mondale tax CONSERVES money
+            // here: the attacker gains EXACTLY what the victim lost (`clear.funds -
+            // kept`). The 1994 original (BTScoreManager.C:154-160) reconstructed the
+            // cut from the victim's already-TRUNCATED funds delta sent over the P2P
+            // wire — a second independent truncation with no shared remainder, which
+            // DESTROYS up to 2 funds per clear (the victim loses more than the
+            // attacker gains; see `mondale_transfer_conserves_funds`). We have full
+            // information at the relay, so we transfer the exact remainder instead.
+            // (Diverges from the binary by <=2 funds/clear.) See `credit_clear_funds`.
+            self.credit_clear_funds(clear.funds);
             self.events.push(GameEvent::Locked {
                 lines: clear.lines,
                 value: clear.value,
@@ -1047,6 +1036,27 @@ impl Game {
         }
     }
 
+    /// Credit a line-clear's funds to this player, applying the Mondale tax if
+    /// active and emitting `FundsStolen` for the swiped remainder. Returns nothing;
+    /// the caller owns the `Locked`/`Scored` events. Faithful to BTScoreManager.C:
+    /// every `BT_FUNDS` send is taxed the same way, so a Bottle-completed line and a
+    /// normal lock-completed line are credited identically.
+    fn credit_clear_funds(&mut self, clear_funds: i32) {
+        let gained = if self.weapons.is_active(WeaponToken::Mondale) {
+            // Victim keeps floor(70%); the attacker gets the EXACT remainder so the
+            // tax CONSERVES money (see place() for the full rationale).
+            let kept = (clear_funds as f64 * (1.0 - BT_MONDALE_RATE)) as i64;
+            let tax = clear_funds as i64 - kept;
+            if tax != 0 {
+                self.events.push(GameEvent::FundsStolen(tax));
+            }
+            kept
+        } else {
+            clear_funds as i64
+        };
+        self.score.funds += gained;
+    }
+
     /// `BTGame::receive(BT_WPN_ON)` + the per-subsystem effects — activate a
     /// weapon on THIS (victim) player.
     fn apply_weapon_on(&mut self, token: WeaponToken) {
@@ -1059,7 +1069,22 @@ impl Game {
         self.remaining[token.index()] += weapon_table()[token.index()].duration as i32;
 
         self.board.set_active(token, true);
-        self.board.apply_weapon(token, &mut self.rng);
+        // Bottle can complete a neck row when its walls go up; credit those funds +
+        // lines exactly like a normal clear (BTBoardManager.C:440 / :613-615), or
+        // they vanish silently (a correctness + faithfulness bug). Every other
+        // weapon returns the empty clear, so this is a no-op for them.
+        let weapon_clear = self.board.apply_weapon(token, &mut self.rng);
+        if weapon_clear.lines > 0 {
+            self.score.lines += weapon_clear.lines as i64;
+            self.credit_clear_funds(weapon_clear.funds);
+            self.tick_durations(weapon_clear.lines);
+            self.update_bazaar();
+            self.events.push(GameEvent::Scored {
+                score: self.score.score,
+                lines: self.score.lines,
+                funds: self.score.funds,
+            });
+        }
         self.pieces.weapon_on(token);
 
         match token {

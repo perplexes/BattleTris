@@ -164,10 +164,18 @@ fn ref_remove_line(
     let idx = |x: i32, y: i32| (y * width + x) as usize;
     let h = BT_BOARD_HGT;
 
+    // x1/x2 are STICKY (faithful to BTBoardManager.C:73): declared once, the bottle
+    // band only ever NARROWS them to the neck and they are NEVER reset back to full
+    // width. So once the upward (or downward) shift passes through the neck band, ALL
+    // rows beyond it shift only over the neck columns — the "shoulders" flanking the
+    // neck walls stay frozen. (A previous version reset x1/x2 every iteration, which
+    // re-widened above the band and diverged from both the C++ and the real engine;
+    // the old single-neck-column fixture masked it.) The trailing top/bottom-row
+    // clear uses the SAME sticky x1/x2 left over from the last loop iteration.
     if !upside || computer {
+        let (mut x1, mut x2) = (0i32, width);
         let mut i = line;
         while i > 0 {
-            let (mut x1, mut x2) = (0i32, width);
             if bottle && i <= h / 2 + BT_BOTTLE_Y && i >= h / 2 - BT_BOTTLE_Y {
                 x1 = BT_BOTTLE_X;
                 x2 = width - BT_BOTTLE_X;
@@ -185,22 +193,14 @@ fn ref_remove_line(
             i -= 1;
         }
         if !force {
-            // Top row over [x1,x2) of the LAST iteration is cleared. The C++ leaves
-            // x1/x2 at their last value; for non-bottle that's [0,width); for
-            // bottle the i=1 row is in the neck only if 1 is in the band, else full.
-            let (mut x1, mut x2) = (0i32, width);
-            if bottle && 1 <= h / 2 + BT_BOTTLE_Y && 1 >= h / 2 - BT_BOTTLE_Y {
-                x1 = BT_BOTTLE_X;
-                x2 = width - BT_BOTTLE_X;
-            }
             for i2 in x1..x2 {
                 g[idx(i2, 0)] = None;
             }
         }
     } else {
+        let (mut x1, mut x2) = (0i32, width);
         let mut i = line;
         while i < height - 1 {
-            let (mut x1, mut x2) = (0i32, width);
             if bottle && i <= h / 2 + BT_BOTTLE_Y && i >= h / 2 - BT_BOTTLE_Y - 1 {
                 x1 = BT_BOTTLE_X;
                 x2 = width - BT_BOTTLE_X;
@@ -218,14 +218,6 @@ fn ref_remove_line(
             i += 1;
         }
         if !force {
-            let (mut x1, mut x2) = (0i32, width);
-            if bottle
-                && (height - 2) <= h / 2 + BT_BOTTLE_Y
-                && (height - 2) >= h / 2 - BT_BOTTLE_Y - 1
-            {
-                x1 = BT_BOTTLE_X;
-                x2 = width - BT_BOTTLE_X;
-            }
             for i2 in x1..x2 {
                 g[idx(i2, height - 1)] = None;
             }
@@ -295,6 +287,16 @@ proptest! {
         // bottle shift) but can never fill a row.
         for &y in &debris_rows {
             b.set(BT_BOTTLE_X, y, Some(Cell::die(3)));
+        }
+        // SHOULDER debris: cells in a WALL column (x=0) ABOVE the neck band. With the
+        // sticky-x1/x2 bottle geometry these MUST stay frozen when a below-neck row
+        // clears (the shift above the band only touches the neck columns); a reset-
+        // x1/x2 oracle would (wrongly) drop them. This is what exercises the sticky
+        // behavior — without it the previous fixture masked the oracle bug.
+        for &y in &debris_rows {
+            if y >= 1 {
+                b.set(0, y - 1, Some(Cell::die(5)));
+            }
         }
         // A full clearable row below the neck.
         for x in 0..w {
@@ -1171,8 +1173,8 @@ proptest! {
 
     /// THE BLIND CLERIC bombs each removable box with probability 1/2 — it only
     /// REMOVES boxes (never adds, never touches a structure cell), and it MUST
-    /// actually remove some. The board is FULLY packed with removable dice (220
-    /// cells), so P(Blind removes nothing) = (1/2)^220 ~= 0 — a no-op Blind
+    /// actually remove some. The board is FULLY packed with removable dice (~279
+    /// cells, 10x28 less one structure), so P(Blind removes nothing) = (1/2)^279 ~= 0 — a no-op Blind
     /// implementation fails the strict "count went DOWN" assertion. (The previous
     /// version asserted only "never adds / structure survives", which a no-op Blind
     /// passed — a weak test caught by mutation.) The structure cell at (0,0) and the
@@ -1524,6 +1526,58 @@ fn carter_expiry_restores_base_bazaar_prices() {
     assert!(!g.weapon_active(WeaponToken::Carter), "Carter expired");
     assert_eq!(g.bazaar_price(probe), base,
         "after Carter expires, bazaar prices must return to base ({} not {})", base, g.bazaar_price(probe));
+}
+
+/// BOTTLE LINE CREDIT (correctness + faithfulness): planting Bottle's neck walls
+/// can COMPLETE a partially filled neck row (the walls supply the flanking cells).
+/// The original (BTBoardManager.C:440 -> checkLines -> :613-615 send BT_FUNDS/BT_LINE)
+/// credits that clear like any other; the Rust board's `apply_weapon` does the
+/// `check_lines` but `apply_weapon_on` MUST forward the funds/lines or they vanish.
+/// Independent oracle: pre-fill ONLY the neck interior of one neck row (so the walls
+/// finish it), flush Bottle, and assert the player banked the value of that cleared
+/// row (value*1) and one line — a `FundsStolen`-conserving amount if Mondale-cursed.
+/// A mutant that discards `Board::apply_weapon`'s returned clear banks 0 and FAILS.
+#[test]
+fn bottle_wall_planting_completes_a_neck_row_and_credits_the_funds() {
+    let mut g = Game::new(5);
+    let (w, h) = (g.board().width, g.board().height);
+    // Empty the board, then fill exactly the neck interior [BOTTLE_X, w-BOTTLE_X)
+    // of the centre neck row with known-value dice. When Bottle plants the 2*BOTTLE_X
+    // wall cells, this row becomes complete (interior + walls = full width).
+    for y in 0..h { for x in 0..w { g.board_mut().set(x, y, None); } }
+    let neck_row = h / 2;
+    let die_val = 4u8;
+    let interior: Vec<i32> = (BT_BOTTLE_X..(w - BT_BOTTLE_X)).collect();
+    for &x in &interior {
+        g.board_mut().set(x, neck_row, Some(Cell::die(die_val)));
+    }
+    // Park the falling piece HIGH ABOVE the neck so it can't disturb our hand-built
+    // neck row: a single non-completing blocker row near the top makes the next lock
+    // happen up there (row ~2), well above the neck (row h/2). It can't complete a
+    // line (one gap), so it earns no funds of its own — the only clear is Bottle's.
+    let blocker_row = 4;
+    for x in 0..w - 1 {
+        g.board_mut().set(x, blocker_row, Some(Cell::structure())); // non-removable: never clears
+    }
+    // The completed row's value is the sum over the FULL width: interior dice +
+    // structure walls (structure value == 0). value = interior_count * die_val.
+    let expected_value = interior.len() as i64 * die_val as i64; // funds = value*1 line
+    let funds_before = g.score().funds;
+    let lines_before = g.score().lines;
+
+    // Flush Bottle directly (no falling-piece interference: drive a lock on the now
+    // mostly-empty board; the flush plants the walls and clears the neck row).
+    assert!(receive_and_flush(&mut g, WeaponToken::Bottle), "Bottle active");
+
+    // The neck interior must be CLEARED (the row completed and removed).
+    let interior_after = interior.iter().filter(|&&x| g.board().get(x, neck_row).is_some()).count();
+    assert_eq!(interior_after, 0,
+        "Bottle's walls must have completed + cleared the neck row (interior left: {interior_after})");
+    // And the funds + line for that clear must be banked (not silently dropped).
+    assert_eq!(g.score().lines - lines_before, 1,
+        "the Bottle-completed row must count as one cleared line");
+    assert_eq!(g.score().funds - funds_before, expected_value,
+        "the Bottle-completed row's funds ({expected_value}) must be credited, not discarded");
 }
 
 /// BOTTLE EXPIRY removes the structure walls (revert_weapon clears the neck cells).

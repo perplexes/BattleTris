@@ -477,8 +477,17 @@ impl Board {
 
     /// The one-shot board mutation for a weapon turning on (`BT_WPN_ON`).
     /// (Set the active flag via [`Board::set_active`] first.)
-    pub fn apply_weapon(&mut self, token: WeaponToken, rng: &mut Rng) {
+    ///
+    /// Returns the [`LineClear`] produced if the mutation completed any rows.
+    /// Only Bottle can do this (planting its neck walls may finish a partially
+    /// filled neck row — `BTBoardManager.C:440` calls `checkLines()` after the
+    /// walls go up). The caller (`Game::apply_weapon_on`) MUST credit those funds
+    /// and lines: the original always sends `BT_FUNDS`/`BT_LINE` from `checkLines`
+    /// (BTBoardManager.C:613-615), so dropping them silently destroys the victim's
+    /// earned funds and line count. Every other weapon returns the empty clear.
+    pub fn apply_weapon(&mut self, token: WeaponToken, rng: &mut Rng) -> LineClear {
         let h = BT_BOARD_HGT;
+        let mut clear = LineClear::default();
         match token {
             WeaponToken::Upbyside => {
                 if !self.upside && !self.computer {
@@ -489,31 +498,28 @@ impl Board {
             WeaponToken::PieceIt | WeaponToken::Bug => {
                 // A box at a random empty spot in the middle two quarters
                 // (`BTBoardManager.C:307-310`: `do { i=rand%w; j=...; } while
-                // (occupied)`). The original's rejection loop is unbounded; in real
-                // play the middle-half band (w * h/2 cells) holds far more than the
-                // ~4 a piece deposits, so an empty slot always exists and the loop
-                // terminates in O(1). We keep the RNG-faithful rejection sampling but
-                // CAP the retries so a pathological FULLY-PACKED band (only reachable
-                // via a crafted board import / keyframe, never via gameplay) can't
-                // hang the server: on cap we deterministically take the first empty
-                // band slot, and if the band is genuinely full we no-op (nowhere to
-                // place). This changes behavior ONLY in the unreachable full-band
-                // case; every reachable case is byte-identical to the original.
-                let mut placed = None;
-                for _ in 0..1024 {
-                    let i = rng.rand_below(self.width);
-                    let j = rng.rand_below(self.height / 2) + self.height / 4;
-                    if !self.occupied(i, j) {
-                        placed = Some((i, j));
-                        break;
+                // (occupied)`). The original's rejection loop is UNBOUNDED — it spins
+                // forever if the middle-half band has no empty cell. In real play the
+                // band (w * h/2 cells) holds far more than the ~4 a piece deposits, so
+                // there is always an empty slot; but a crafted board import / keyframe
+                // could pack the band and hang the server. We GUARD only that case: if
+                // (and only if) the band has no empty cell, no-op; otherwise run the
+                // EXACT original unbounded rejection loop. This preserves the original
+                // RNG draw sequence byte-for-byte in every state with a free slot —
+                // the loop is only entered when it is guaranteed to terminate.
+                let q1 = self.height / 4;
+                let band_has_empty = (q1..q1 + self.height / 2)
+                    .flat_map(|j| (0..self.width).map(move |i| (i, j)))
+                    .any(|(i, j)| !self.occupied(i, j));
+                if band_has_empty {
+                    let (mut i, mut j);
+                    loop {
+                        i = rng.rand_below(self.width);
+                        j = rng.rand_below(self.height / 2) + self.height / 4;
+                        if !self.occupied(i, j) {
+                            break;
+                        }
                     }
-                }
-                let spot = placed.or_else(|| {
-                    (self.height / 4..self.height / 4 + self.height / 2)
-                        .flat_map(|j| (0..self.width).map(move |i| (i, j)))
-                        .find(|&(i, j)| !self.occupied(i, j))
-                });
-                if let Some((i, j)) = spot {
                     let cell = if token == WeaponToken::Bug {
                         Cell::color(BT_INVISIBLE)
                     } else {
@@ -587,11 +593,14 @@ impl Board {
                         self.set(self.width - x - 1, y, Some(Cell::structure()));
                     }
                 }
-                self.check_lines();
+                // The walls may complete a partially filled neck row; the caller
+                // credits the resulting funds/lines (see the doc comment).
+                clear = self.check_lines();
             }
             WeaponToken::RiseUp => self.insert_line(rng),
             _ => {}
         }
+        clear
     }
 
     /// The board mutation for a weapon turning off (`BT_WPN_OFF`).
