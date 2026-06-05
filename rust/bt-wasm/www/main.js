@@ -276,12 +276,20 @@ const BOARD_MIN_SCALE = 0.6;        // keep it playable on short viewports
 const BOARD_MARGIN_Y = 28;          // breathing room above + below the board
 const AI_SCALE_RATIO = 0.55;        // vs-Computer side board, a smaller secondary view
 
-// Scale that makes the board fill the viewport height (minus margins + the
-// wrapper's own chrome). Uses innerHeight, not a live rect, so it's correct even
-// while the game screen is momentarily hidden.
+// Scale that makes the board fill the height that's ACTUALLY available below it —
+// i.e. from the board's own top (everything above it: the game top bar, the mobile
+// stats strip) down to the viewport bottom, minus a margin + the wrapper's chrome.
+// Using only innerHeight (the old behaviour) ignored the top bar, so the board
+// scaled too tall and its bottom rows were clipped off-screen. We measure the
+// board-wrapper's live top when the game screen is visible, and fall back to an
+// estimate of the top chrome when it's momentarily hidden (rect top ≈ 0).
+const ESTIMATED_TOP_CHROME = 64;       // ~game top bar height, for the hidden-screen fallback
 function boardDisplayScale(bufHeightPx) {
     const wrapChromeY = 26;            // wrapper padding (10*2) + border (3*2)
-    const avail = window.innerHeight - BOARD_MARGIN_Y * 2 - wrapChromeY;
+    const wrapper = canvas.parentElement;
+    const top = wrapper ? wrapper.getBoundingClientRect().top : 0;
+    const usableTop = top > 1 ? top : ESTIMATED_TOP_CHROME;
+    const avail = window.innerHeight - usableTop - BOARD_MARGIN_Y - wrapChromeY;
     const scale = avail / bufHeightPx;
     return Math.max(BOARD_MIN_SCALE, Math.min(BOARD_MAX_SCALE, scale));
 }
