@@ -455,11 +455,13 @@ fn is_match_candidate(app: &App, id: u64, cid: u64) -> bool {
     if cid == id {
         return false;
     }
-    // Two bots never auto-pair: that would leave the lobby full of bots playing
-    // each other and nobody Available for a visitor to challenge. (A human can
-    // still challenge or auto-pair INTO a bot — only bot-vs-bot is excluded.)
+    // The auto-matcher pairs only two HUMANS who are both open to play. Bots are
+    // passive: a human reaches a regional bot by CHALLENGING it, and The Count
+    // reaches humans via its own roaming challenges — neither side auto-pairs INTO a
+    // bot. (So an open human stays available for The Count to challenge instead of
+    // being instantly thrown into a regional bot.)
     if app.clients.get(&id).is_some_and(|c| c.is_bot)
-        && app.clients.get(&cid).is_some_and(|c| c.is_bot)
+        || app.clients.get(&cid).is_some_and(|c| c.is_bot)
     {
         return false;
     }
@@ -2242,20 +2244,26 @@ mod tests {
     }
 
     #[test]
-    fn two_bots_do_not_auto_pair_but_a_human_pairs_into_a_bot() {
+    fn auto_match_pairs_only_two_humans_never_a_bot() {
         let mut app = test_app();
         let _b1 = add_bot(&mut app, 1, "Tokyo-Ernie");
         let _b2 = add_bot(&mut app, 2, "London-Ernie");
-        // Neither bot should be matchable against the other.
-        assert!(!is_match_candidate(&app, 1, 2), "bot 2 is not an auto-pair target for bot 1");
-        assert!(try_match(&mut app, 1).is_none(), "a lone-among-bots bot finds no auto-pair");
-        // A human going Available auto-pairs into a waiting bot.
+        // Bots are passive — they never auto-pair (with each other or a human).
+        assert!(!is_match_candidate(&app, 1, 2), "two bots don't auto-pair");
+        // A human going Available is NOT thrown into a waiting bot.
         let _h = add_client(&mut app, 3, "human");
         if let Some(c) = app.clients.get_mut(&3) {
             c.status = Some(Status::Available);
         }
-        assert!(is_match_candidate(&app, 3, 1), "a bot IS a valid pair for a human");
-        assert!(try_match(&mut app, 3).is_some(), "human auto-pairs into a bot");
+        assert!(!is_match_candidate(&app, 3, 1), "a bot is NOT an auto-pair target for a human");
+        assert!(try_match(&mut app, 3).is_none(), "a lone human among only bots finds no auto-pair");
+        // Two open humans DO auto-pair with each other.
+        let _h2 = add_client(&mut app, 4, "human2");
+        if let Some(c) = app.clients.get_mut(&4) {
+            c.status = Some(Status::Available);
+        }
+        assert!(is_match_candidate(&app, 3, 4), "two humans auto-pair");
+        assert!(try_match(&mut app, 3).is_some(), "two open humans auto-pair");
     }
 
     #[test]
