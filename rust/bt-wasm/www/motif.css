@@ -1,0 +1,261 @@
+/* ════════════════════════════════════════════════════════════════════════════
+   motif.css — faithful OSF/Motif widget bevels (loaded AFTER style.css; overrides
+   the bevel COLORS only, never layout).
+
+   The original BattleTris is an Xt/Motif app (usr/src/share/BattleTris.ad: XmList,
+   XmLabel, XmPushButton, XmText, lucidatypewriter). On a LIGHT background Motif does
+   NOT draw a white highlight — its default color algorithm (lib/Xm/Color.c,
+   CalculateColorsForLightBackground) SUBTRACTS from the background:
+       topShadow    = bg − 20%   (XmCOLOR_LITE_TS_FACTOR 20)
+       bottomShadow = bg − 40%   (XmCOLOR_LITE_BS_FACTOR 40)
+   so both bevel edges are darker than the face, top-left less so. That subtle
+   two-gray "engraved" chisel is the Motif look. Computed from the .ad's actual
+   widget backgrounds:
+       gray66  #A8A8A8 →  top #868686  bottom #656565   (score/arsenal/lists/bazaar)
+       gray75  #BFBFBF →  top #999999  bottom #737373   (windows)
+       "gray"  #BEBEBE →  top #989898  bottom #727272   (lobby buttons)
+   Thickness is 2px everywhere (Motif default; the one explicit shadowThickness in
+   the .ad is also 2).
+
+   AUTHORED EMPHASIS: the .ad overrides shadows in exactly one place —
+   BTRoster*XmLabel: topShadowColor white / bottomShadowColor black — because the
+   computed default was too faint for those titled labels. We mirror that escalation
+   ONLY on header/title labels (.motif-emphasis), and leave everything else computed.
+   ════════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* Motif's literal computed shadows (face−20% / −40%) vanish on a modern hi-DPI
+     panel, so we keep the gray-on-gray CHARACTER but boost the contrast for
+     on-screen legibility: a light highlight + a clear shadow (still not the stark
+     #fff/#000 of Windows). */
+  --m66-ts:#e6e6e6; --m66-bs:#5c5c5c;   /* gray66 face */
+  --mlt-ts:#f0f0f0; --mlt-bs:#646464;   /* gray75 / "gray" face (lighter widgets) */
+  /* authored emphasis (the BTRoster*XmLabel escalation) */
+  --m-emph-ts:#ffffff; --m-emph-bs:#000000;
+  /* EMBOSSED Motif arrows: a gray triangle the colour family of the button, carved
+     by a light top-left edge + dark bottom-right edge (NOT a black silhouette) —
+     matching the authentic OSF/Motif+mwm XmArrowButton. */
+  --m-arrow-up:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 2.5 L1.5 13 L14.5 13 Z' fill='%23cfcfcf'/%3E%3Cpath d='M8 2.5 L14.5 13 L1.5 13' fill='none' stroke='%235a5a5a' stroke-width='1.5' stroke-linejoin='round'/%3E%3Cpath d='M8 2.5 L1.5 13' fill='none' stroke='%23f4f4f4' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+  --m-arrow-down:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 13.5 L1.5 3 L14.5 3 Z' fill='%23cfcfcf'/%3E%3Cpath d='M14.5 3 L8 13.5' fill='none' stroke='%235a5a5a' stroke-width='1.5' stroke-linecap='round'/%3E%3Cpath d='M14.5 3 L1.5 3 L8 13.5' fill='none' stroke='%23f4f4f4' stroke-width='1.5' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+/* ── RAISED, gray66 face (score/arsenal boxes, funds boxes, bazaar buttons,
+      bazaar arsenal slots) ─────────────────────────────────────────────────── */
+.score-box, .arsenal-box,
+.bazaar-funds-label, .bazaar-funds-val,
+.bazaar-action-btn, .bazaar-done-btn,
+.bazaar-arsenal-slot {
+  border-top-color: var(--m66-ts); border-left-color: var(--m66-ts);
+  border-bottom-color: var(--m66-bs); border-right-color: var(--m66-bs);
+}
+.bazaar-action-btn:active, .bazaar-done-btn:active {
+  border-top-color: var(--m66-bs); border-left-color: var(--m66-bs);
+  border-bottom-color: var(--m66-ts); border-right-color: var(--m66-ts);
+}
+
+/* ── RAISED, lighter face (lobby buttons "gray"/#bebebe, mode buttons, arsenal
+      slots #cfcfcf) ───────────────────────────────────────────────────────── */
+.lobby-btn, .mode-btn, .arsenal-item {
+  border-top-color: var(--mlt-ts); border-left-color: var(--mlt-ts);
+  border-bottom-color: var(--mlt-bs); border-right-color: var(--mlt-bs);
+}
+.lobby-btn:active:not(:disabled), .mode-btn:active {
+  border-top-color: var(--mlt-bs); border-left-color: var(--mlt-bs);
+  border-bottom-color: var(--mlt-ts); border-right-color: var(--mlt-ts);
+}
+
+/* ── RAISED frame: the "Play Computer" fieldset (gray66-ish) ────────────────── */
+.lobby-frame {
+  border-top-color: var(--m66-ts); border-left-color: var(--m66-ts);
+  border-bottom-color: var(--m66-bs); border-right-color: var(--m66-bs);
+}
+
+/* ── SUNKEN troughs (lists, stats panel, weapon list, info band): inset = the
+      bevel inverted (darker top/left, lighter bottom/right) ─────────────────── */
+.lobby-listbox, .lobby-statsbox,
+.bazaar-weapon-list, .bazaar-info {
+  border-top-color: var(--m66-bs); border-left-color: var(--m66-bs);
+  border-bottom-color: var(--m66-ts); border-right-color: var(--m66-ts);
+}
+
+/* ── AUTHORED EMPHASIS: titled header labels keep white/black (BTRoster*XmLabel).
+      The listbox head ("Players online") is our roster-label analog. ─────────── */
+.lobby-listbox-head {
+  border: 2px solid;
+  border-top-color: var(--m-emph-ts); border-left-color: var(--m-emph-ts);
+  border-bottom-color: var(--m-emph-bs); border-right-color: var(--m-emph-bs);
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   Motif scrollbars (XmScrolledList): chunky 18px, a SINGLE arrow button at each
+   end (Motif, not Win95's double), sunken track, raised thumb. Authentic CDE arrow
+   glyphs. WebKit/Blink (the deploy target) renders these; Firefox falls back to a
+   styled-but-arrowless bar (same tradeoff the CDE Time Capsule made).
+   ════════════════════════════════════════════════════════════════════════════ */
+.lobby-list, .lobby-statsbox, .bazaar-weapon-list, .bazaar-arsenal-list,
+.arsenal-list, .library-list, .leaderboard-list, .replay-hud .rh-list {
+  scrollbar-width: auto;            /* Firefox: keep a real bar */
+}
+.lobby-list::-webkit-scrollbar,
+.lobby-statsbox::-webkit-scrollbar,
+.bazaar-weapon-list::-webkit-scrollbar,
+.bazaar-arsenal-list::-webkit-scrollbar,
+.arsenal-list::-webkit-scrollbar,
+.library-list::-webkit-scrollbar,
+.leaderboard-list::-webkit-scrollbar,
+.replay-hud .rh-list::-webkit-scrollbar {
+  /* The WHOLE bar is one continuous sunken trough (border on the scrollbar element
+     spans full height, behind the arrows + thumb). */
+  width: 19px; height: 19px;
+  background: #a8a8a8;
+  border: 2px solid;
+  border-top-color: var(--m66-bs); border-left-color: var(--m66-bs);
+  border-bottom-color: var(--m66-ts); border-right-color: var(--m66-ts);
+}
+.lobby-list::-webkit-scrollbar-track,
+.lobby-statsbox::-webkit-scrollbar-track,
+.bazaar-weapon-list::-webkit-scrollbar-track,
+.bazaar-arsenal-list::-webkit-scrollbar-track,
+.arsenal-list::-webkit-scrollbar-track,
+.library-list::-webkit-scrollbar-track,
+.leaderboard-list::-webkit-scrollbar-track,
+.replay-hud .rh-list::-webkit-scrollbar-track {
+  /* Track is transparent so the scrollbar's continuous sunken trough shows through
+     between/behind the arrows. */
+  background: transparent;
+  border: none;
+}
+.lobby-list::-webkit-scrollbar-thumb,
+.lobby-statsbox::-webkit-scrollbar-thumb,
+.bazaar-weapon-list::-webkit-scrollbar-thumb,
+.bazaar-arsenal-list::-webkit-scrollbar-thumb,
+.arsenal-list::-webkit-scrollbar-thumb,
+.library-list::-webkit-scrollbar-thumb,
+.leaderboard-list::-webkit-scrollbar-thumb,
+.replay-hud .rh-list::-webkit-scrollbar-thumb {
+  background: #a8a8a8;
+  border: 2px solid;
+  border-top-color: var(--m66-ts); border-left-color: var(--m66-ts);
+  border-bottom-color: var(--m66-bs); border-right-color: var(--m66-bs);
+  min-height: 32px;
+  margin: 1px 2px;          /* small padding off the trough walls */
+}
+.lobby-list::-webkit-scrollbar-thumb:active,
+.bazaar-weapon-list::-webkit-scrollbar-thumb:active,
+.library-list::-webkit-scrollbar-thumb:active {
+  border-top-color: var(--m66-bs); border-left-color: var(--m66-bs);
+  border-bottom-color: var(--m66-ts); border-right-color: var(--m66-ts);
+}
+/* Arrow buttons — raised, one per end. */
+.lobby-list::-webkit-scrollbar-button,
+.lobby-statsbox::-webkit-scrollbar-button,
+.bazaar-weapon-list::-webkit-scrollbar-button,
+.bazaar-arsenal-list::-webkit-scrollbar-button,
+.arsenal-list::-webkit-scrollbar-button,
+.library-list::-webkit-scrollbar-button,
+.leaderboard-list::-webkit-scrollbar-button,
+.replay-hud .rh-list::-webkit-scrollbar-button {
+  /* No button box — just the bare embossed triangle floating in the trough. */
+  background: transparent no-repeat center;
+  background-size: 13px 13px;
+  border: none;
+  height: 15px;
+}
+/* single up arrow at the start, single down at the end (hide the doubles) */
+.lobby-list::-webkit-scrollbar-button:vertical:start:decrement,
+.lobby-statsbox::-webkit-scrollbar-button:vertical:start:decrement,
+.bazaar-weapon-list::-webkit-scrollbar-button:vertical:start:decrement,
+.bazaar-arsenal-list::-webkit-scrollbar-button:vertical:start:decrement,
+.arsenal-list::-webkit-scrollbar-button:vertical:start:decrement,
+.library-list::-webkit-scrollbar-button:vertical:start:decrement,
+.leaderboard-list::-webkit-scrollbar-button:vertical:start:decrement,
+.replay-hud .rh-list::-webkit-scrollbar-button:vertical:start:decrement {
+  display: block; background-image: var(--m-arrow-up);
+}
+.lobby-list::-webkit-scrollbar-button:vertical:end:increment,
+.lobby-statsbox::-webkit-scrollbar-button:vertical:end:increment,
+.bazaar-weapon-list::-webkit-scrollbar-button:vertical:end:increment,
+.bazaar-arsenal-list::-webkit-scrollbar-button:vertical:end:increment,
+.arsenal-list::-webkit-scrollbar-button:vertical:end:increment,
+.library-list::-webkit-scrollbar-button:vertical:end:increment,
+.leaderboard-list::-webkit-scrollbar-button:vertical:end:increment,
+.replay-hud .rh-list::-webkit-scrollbar-button:vertical:end:increment {
+  display: block; background-image: var(--m-arrow-down);
+}
+/* ── Replay library: flat floating cards → one sunken XmScrolledList trough with
+      tight rows + a separator (matches the signed-off mockup). ──────────────── */
+.library-list {
+  background: #a8a8a8;                 /* gray66 trough interior */
+  border: 2px solid;
+  border-top-color: var(--m66-bs); border-left-color: var(--m66-bs);
+  border-bottom-color: var(--m66-ts); border-right-color: var(--m66-ts);
+  max-height: 60vh; overflow-y: auto;
+  gap: 0; padding: 0;
+}
+.library-item {
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid rgba(0,0,0,0.18);
+  padding: 6px 12px;
+}
+.library-item:hover { background-color: #b8b8b8; }
+
+/* hide the second (paired) buttons so each end shows exactly one arrow */
+.lobby-list::-webkit-scrollbar-button:vertical:start:increment,
+.lobby-list::-webkit-scrollbar-button:vertical:end:decrement,
+.lobby-statsbox::-webkit-scrollbar-button:vertical:start:increment,
+.lobby-statsbox::-webkit-scrollbar-button:vertical:end:decrement,
+.bazaar-weapon-list::-webkit-scrollbar-button:vertical:start:increment,
+.bazaar-weapon-list::-webkit-scrollbar-button:vertical:end:decrement,
+.bazaar-arsenal-list::-webkit-scrollbar-button:vertical:start:increment,
+.bazaar-arsenal-list::-webkit-scrollbar-button:vertical:end:decrement,
+.arsenal-list::-webkit-scrollbar-button:vertical:start:increment,
+.arsenal-list::-webkit-scrollbar-button:vertical:end:decrement,
+.library-list::-webkit-scrollbar-button:vertical:start:increment,
+.library-list::-webkit-scrollbar-button:vertical:end:decrement,
+.leaderboard-list::-webkit-scrollbar-button:vertical:start:increment,
+.leaderboard-list::-webkit-scrollbar-button:vertical:end:decrement,
+.replay-hud .rh-list::-webkit-scrollbar-button:vertical:start:increment,
+.replay-hud .rh-list::-webkit-scrollbar-button:vertical:end:decrement {
+  display: none;
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   Custom Motif XmScrolledList scrollbar (motif-scroll.js). Native browser bars
+   can't give the authentic gutter between the content box and the scrollbar, nor
+   a sized/padded thumb — so for these lists we render the bar in real DOM:
+       [ content (its own sunken box) ][ gutter ][ continuous sunken trough ]
+   with bigger bare embossed triangles top/bottom and a raised thumb that's padded
+   off the trough walls so the sunken-box shadow shows around it.
+   ════════════════════════════════════════════════════════════════════════════ */
+.msl-wrap { display: flex; flex: 1 1 auto; align-items: stretch; min-height: 0; min-width: 0; }
+.msl-content { flex: 1 1 0; min-width: 0; scrollbar-width: none; -ms-overflow-style: none; }
+/* Library/leaderboard: the wrap sits in a centered column, so stretch it full width. */
+.library-wrap > .msl-wrap { width: 100%; }
+.msl-content::-webkit-scrollbar { width: 0 !important; height: 0 !important; display: none; }
+
+.msl-bar {
+  flex: 0 0 19px; margin-left: 6px;          /* the GUTTER (window-bg shows through) */
+  display: flex; flex-direction: column; box-sizing: border-box;
+  background: #a8a8a8;
+  border: 2px solid;                          /* one continuous sunken trough */
+  border-top-color: var(--m66-bs); border-left-color: var(--m66-bs);
+  border-bottom-color: var(--m66-ts); border-right-color: var(--m66-ts);
+}
+.msl-arrow {                                   /* bare embossed triangle, no button box */
+  flex: 0 0 17px; cursor: pointer; user-select: none;
+  background: transparent no-repeat center; background-size: 15px 15px;
+}
+.msl-arrow.up   { background-image: var(--m-arrow-up); }
+.msl-arrow.down { background-image: var(--m-arrow-down); }
+.msl-track { position: relative; flex: 1 1 auto; min-height: 0; margin: 2px 1px; }
+.msl-thumb {                                   /* raised slab, padded off the walls */
+  position: absolute; left: 0; right: 0; top: 0; box-sizing: border-box;
+  background: #a8a8a8; border: 2px solid; min-height: 18px;
+  border-top-color: var(--m66-ts); border-left-color: var(--m66-ts);
+  border-bottom-color: var(--m66-bs); border-right-color: var(--m66-bs);
+}
+.msl-thumb.dragging {
+  border-top-color: var(--m66-bs); border-left-color: var(--m66-bs);
+  border-bottom-color: var(--m66-ts); border-right-color: var(--m66-ts);
+}
