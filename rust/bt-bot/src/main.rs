@@ -292,6 +292,10 @@ struct MatchState {
     /// Authoritative "you are in the bazaar" from the latest snapshot — while
     /// set, play is frozen server-side, so we just leave the bazaar and wait.
     in_bazaar: bool,
+    /// "Your opponent is in the bazaar" from the latest snapshot. The bazaar is a
+    /// BARRIER: while either side shops the match is frozen, so we wait this out too
+    /// (don't keep placing — the server rejects it anyway, see Bout::apply_input).
+    opp_in_bazaar: bool,
     /// Did we already shop (buy + LeaveBazaar) for this bazaar visit?
     bazaar_left: bool,
     /// Ticks until the next weapon-launch attempt.
@@ -330,6 +334,7 @@ impl MatchState {
             live_ticks: 0,
             cooldown: place_interval,
             in_bazaar: false,
+            opp_in_bazaar: false,
             bazaar_left: false,
             launch_cooldown: LAUNCH_INTERVAL_TICKS,
             spy_fresh: 0,
@@ -574,6 +579,12 @@ fn handle_text(
                         state.bazaar_left = false; // armed again for the next visit
                     }
                 }
+                // Opponent's bazaar status — the barrier freezes us too while they shop.
+                state.opp_in_bazaar = v
+                    .get("opp")
+                    .and_then(|o| o.get("in_bazaar"))
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false);
                 // The full authoritative board rides the throttled keyframe (a
                 // JSON array of bytes) — restore our local sim to it.
                 if let Some(arr) = v.get("keyframe").and_then(|k| k.as_array()) {
@@ -631,10 +642,12 @@ fn drive_tick(state: &mut MatchState, out: &Out, seq: &mut u64) {
         }
     }
 
-    // Bazaar barrier (authoritative, or our local sim caught up to it): play is
-    // frozen server-side, so shop a smart loadout once, then leave and wait.
-    if state.in_bazaar || state.game.is_in_bazaar() {
-        if !state.bazaar_left {
+    // Bazaar barrier: while EITHER side is shopping the match is frozen server-side.
+    // Shop a smart loadout once when it's OUR bazaar; otherwise just wait out the
+    // opponent's (don't keep placing — the server rejects it during the barrier).
+    if state.in_bazaar || state.opp_in_bazaar || state.game.is_in_bazaar() {
+        let our_bazaar = state.in_bazaar || state.game.is_in_bazaar();
+        if our_bazaar && !state.bazaar_left {
             shop_bazaar(state, out, seq);
             state.bazaar_left = true;
         }

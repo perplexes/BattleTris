@@ -231,18 +231,26 @@ impl Bout {
     ///   * not a legal client action ([`is_legal_client_input`] — anti-cheat),
     ///   * stale / replayed (`seq` not strictly greater than the last applied —
     ///     so a malicious/buggy client can't re-apply old inputs or rewind `ack`),
-    ///   * a non-shopping action while this side is in the bazaar (the match is
-    ///     frozen — only [`is_bazaar_input`] is allowed).
+    ///   * a non-shopping action while EITHER side is in the bazaar — the bazaar is
+    ///     a synchronized BARRIER, so the whole match is frozen (incl. the side that
+    ///     already left); only [`is_bazaar_input`] passes.
     /// On success `seq` becomes this side's `ack` for client reconciliation.
     pub fn apply_input(&mut self, side: Side, input: &Input, seq: u64) -> bool {
         let idx = side_idx(side);
         if !is_legal_client_input(input) || seq <= self.ack[idx] {
             return false;
         }
-        let g = self.versus.game_mut(side);
-        if g.is_in_bazaar() && !is_bazaar_input(input) {
+        // Bazaar BARRIER: while EITHER side is shopping the whole match is frozen, so
+        // even the side that left first can't keep moving/rotating/launching. Only
+        // shopping actions pass (and they only do anything for the side still in the
+        // bazaar). Without this the bot — which leaves the bazaar instantly — kept
+        // nudging its piece for free while the opponent shopped.
+        let barrier = self.versus.game(side).is_in_bazaar()
+            || self.versus.game(side.other()).is_in_bazaar();
+        if barrier && !is_bazaar_input(input) {
             return false;
         }
+        let g = self.versus.game_mut(side);
         input.apply_to_game(g);
         self.ack[idx] = seq;
         // Record it (stamped with the current tick — inputs for tick N are drained
@@ -661,6 +669,52 @@ mod tests {
                 "NO frame must be recorded for a bazaar-rejected input {:?}", input);
             prop_assert_eq!(b.versus.game(side).snapshot_bytes(), game_before,
                 "the game must NOT move on a bazaar-rejected input {:?}", input);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Property (b'): the bazaar is a BARRIER, not a per-side gate. While ONE side is
+    //   shopping the whole match is frozen, so the OTHER side — who left the bazaar
+    //   first (e.g. a bot makes its picks instantly) — must ALSO be frozen: its
+    //   move/rotate/launch is rejected until the shopper is done. Without this the
+    //   side that left kept nudging its piece for free while the opponent shopped.
+    // -----------------------------------------------------------------------
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn bazaar_barrier_freezes_the_side_that_already_left(
+            seed_a in any::<u64>(),
+            seed_b in any::<u64>(),
+            shopper_idx in 0usize..2,
+            seq in 1u64..=u64::MAX,
+            input in non_bazaar_legal_input(),
+        ) {
+            let mut b = Bout::new(seed_a, seed_b);
+            let shopper = if shopper_idx == 0 { Side::A } else { Side::B };
+            let other = shopper.other();
+
+            // One side in the bazaar; the OTHER NOT (it already left / never entered).
+            force_into_bazaar(&mut b, shopper);
+            prop_assert!(b.versus.game(shopper).is_in_bazaar(),
+                "precondition: the shopper is in the bazaar");
+            prop_assert!(!b.versus.game(other).is_in_bazaar(),
+                "precondition: the other side is NOT in the bazaar");
+
+            let ack_before = b.snapshot_for(other, false).ack;
+            let frames_before = b.frames.clone();
+            let game_before = b.versus.game(other).snapshot_bytes();
+
+            // The OTHER side's non-shopping input must be rejected by the barrier.
+            let accepted = b.apply_input(other, &input, seq);
+            prop_assert!(!accepted,
+                "the non-shopping side's input {:?} must be rejected during the opponent's bazaar", input);
+            prop_assert_eq!(b.snapshot_for(other, false).ack, ack_before,
+                "ack must NOT advance for the frozen non-shopping side ({:?})", input);
+            prop_assert_eq!(&b.frames, &frames_before,
+                "NO frame recorded for the frozen non-shopping side's input {:?}", input);
+            prop_assert_eq!(b.versus.game(other).snapshot_bytes(), game_before,
+                "the non-shopping side's board must NOT move during the opponent's bazaar ({:?})", input);
         }
     }
 
