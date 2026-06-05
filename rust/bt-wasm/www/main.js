@@ -29,6 +29,7 @@ let searching = false;    // background matchmaking in progress (queued, not yet
 // monotonic seq), and reconciles against the server's keyframes by restoring the
 // full game state and re-applying its not-yet-acknowledged inputs.
 let authoritative = false; // true during a server-authoritative online match
+let currentMatchId = null; // the live bout's id; parked in the URL for rejoin-on-refresh
 let inputSeq = 0;          // monotonic client input counter
 let unackedInputs = [];    // [{seq, repr}] sent to the server, not yet acked
 let authSelf = null;       // latest authoritative own-status {funds,in_bazaar,lines_til_bazaar}
@@ -89,6 +90,8 @@ const availableToggleGame = document.getElementById('availableToggleGame');
 const statsPanelEl = document.getElementById('statsPanel');
 const playingStatusEl = document.getElementById('playingStatus');
 const ernieSlider = document.getElementById('ernieSlider');
+const nameInput = document.getElementById('nameInput');
+const nameHint = document.getElementById('nameHint');
 
 // Ernie difficulty names (the original slider's labels), index = level 0..14.
 const ERNIE_NAMES = ['Comatose', 'Somnambulant', 'Lethargic', 'Pensive', 'Able',
@@ -113,6 +116,52 @@ function showLobby() {
     document.body.classList.remove('in-game');
     gameScreen.style.display = 'none';
     lobbyScreen.style.display = '';
+}
+
+// ─── Rejoin-on-refresh: park the live match in the URL ───────────────────────
+// While an authoritative match is live the URL carries ?match=<id>, so an
+// accidental browser refresh reconnects straight back into it (the server froze
+// the bout for a grace window and reattaches us). Cleared the moment the match is
+// no longer live, so a later refresh lands cleanly in the lobby.
+function setMatchUrl(id) {
+    if (id === undefined || id === null) return;
+    currentMatchId = id;
+    try { history.replaceState(null, '', '?match=' + encodeURIComponent(id)); } catch (_) {}
+}
+function clearMatchUrl() {
+    currentMatchId = null;
+    try { history.replaceState(null, '', location.pathname); } catch (_) {}
+}
+
+// The reconnect overlay ("Reconnecting…" for us / "Opponent reconnecting…" for the
+// other side) — shown while the server has the bout frozen during a grace window.
+const reconnectOverlay = document.getElementById('reconnectOverlay');
+const reconnectText = document.getElementById('reconnectText');
+let reconnectTimer = null; // the live forfeit countdown (connected side)
+function stopReconnectCountdown() {
+    if (reconnectTimer) { clearInterval(reconnectTimer); reconnectTimer = null; }
+}
+function showReconnect(text) {
+    if (reconnectText) reconnectText.textContent = text;
+    if (reconnectOverlay) reconnectOverlay.style.display = 'flex';
+}
+function hideReconnect() {
+    stopReconnectCountdown();
+    if (reconnectOverlay) reconnectOverlay.style.display = 'none';
+}
+// Tick a visible countdown to the forfeit while the opponent reconnects. The
+// server still decides the actual forfeit (it sends opponentLeft at expiry); this
+// just shows how long is left so the wait doesn't feel open-ended.
+function startReconnectCountdown(secs) {
+    stopReconnectCountdown();
+    let remaining = Math.max(0, secs | 0);
+    const render = () => showReconnect(`Opponent reconnecting…\n${remaining}s to forfeit`);
+    render();
+    reconnectTimer = setInterval(() => {
+        remaining = Math.max(0, remaining - 1);
+        render();
+        if (remaining === 0) stopReconnectCountdown(); // hold at 0 until the server ends it
+    }, 1000);
 }
 
 // The Play Computer button reads "Play <Level> Ernie" off the difficulty slider
@@ -184,7 +233,7 @@ function requestPlayerList() {
 // Challenge the selected player (directed). Needs a signed identity first.
 async function challengeSelected() {
     if (!selectedPlayer) return;
-    await ensureIdentity();
+    if (!await ensureIdentity()) return; // need a name/token first (field is focused)
     if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'challenge', target: selectedPlayer, name: playerName, token: identityToken }));
         setOnlineStatus(`Challenging ${selectedPlayer}…`);
@@ -201,7 +250,12 @@ function syncAvailableUI(v) {
 
 // Open-to-matches: become challengeable AND eligible for auto-pairing.
 async function setAvailable(v) {
-    if (v) await ensureIdentity();
+    if (v && !await ensureIdentity()) {
+        // Can't be challengeable without a signed identity — revert the toggle and
+        // leave the name field focused so the player can fix it.
+        syncAvailableUI(false);
+        return;
+    }
     if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'available', value: v, name: playerName, token: identityToken }));
     }
@@ -354,7 +408,8 @@ function setOnlineStatus(msg) {
 // input). One connection per client = the server's model; it also means a
 // challenge accepted in the lobby flows straight into a match on the same socket.
 let lobbyReconnectTimer = null;
-let pendingQueue = false; // queue for a match as soon as the socket (re)opens
+let pendingQueue = false;   // queue for a match as soon as the socket (re)opens
+let pendingRejoin = null;   // match_id to reattach to as soon as the socket (re)opens
 
 function connectLobby() {
     // Never open a second socket on top of a live one.
@@ -365,6 +420,15 @@ function connectLobby() {
     sock.onopen = () => {
         if (ws !== sock) return; // superseded before it opened
         sock.send(JSON.stringify({ type: 'watch' }));
+        // Rejoin takes priority: reattach to a live bout (after a refresh or a brief
+        // socket drop) before doing any lobby presence. The server reattaches us and
+        // replays matchStart + a keyframe; on failure it sends rejoinFailed.
+        if (pendingRejoin !== null) {
+            const mid = Number(pendingRejoin); // came from the URL (a string) — send a number
+            pendingRejoin = null;
+            sock.send(JSON.stringify({ type: 'rejoin', match_id: mid, token: identityToken, name: playerName }));
+            return;
+        }
         // Re-assert "Open to matches" across a reconnect (else the server forgets).
         if (availableToggle && availableToggle.checked) {
             sock.send(JSON.stringify({ type: 'available', value: true, name: playerName, token: identityToken }));
@@ -379,12 +443,15 @@ function connectLobby() {
     sock.onmessage = onSignalMessage;
     sock.onclose = () => {
         if (ws !== sock) return; // a newer socket already replaced this one
-        // A dropped socket during a match ends it (the server is the only source
-        // of truth — don't keep predicting a zombie game).
-        if (authoritative && !gameEnded) {
-            gameEnded = true;
-            gameOverText.textContent = 'Disconnected from server.';
-            gameOverOverlay.style.display = 'flex';
+        // A socket drop DURING a live match is no longer an instant loss: the server
+        // freezes the bout for a grace window. Queue a rejoin and show the overlay;
+        // the reconnect timer below fires it. (A finished/forfeited match has
+        // gameEnded set, so it falls through to the normal lobby reconnect.)
+        if (authoritative && !gameEnded && currentMatchId !== null) {
+            pendingRejoin = currentMatchId;
+            onlinePaused = true; // stop predicting while we're detached
+            stopReconnectCountdown(); // it's now US reconnecting, not the opponent
+            showReconnect('Reconnecting…');
         }
         unackedInputs = [];
         if (searching) {
@@ -395,37 +462,83 @@ function connectLobby() {
         ws = null;
         renderOnlineList([]); // clear the roster while disconnected
         clearTimeout(lobbyReconnectTimer);
-        lobbyReconnectTimer = setTimeout(connectLobby, 3000);
+        // Reconnect fast when a rejoin is pending (get back into the frozen match
+        // before the grace window expires); the usual cadence otherwise.
+        lobbyReconnectTimer = setTimeout(connectLobby, pendingRejoin !== null ? 600 : 3000);
     };
     sock.onerror = () => {};
 }
 
-// ─── Identity (a signed name token, requested lazily) ────────────────────────
-// Anonymous until the player goes Open-to-matches or challenges someone; then we
-// mint a signed JWT from the server (cached in localStorage) so the name is
-// tamper-evident while held.
+// ─── Identity (a signed name token, set via the always-visible name field) ───
+// Your name is set through the lobby's name field (never a blocking prompt that
+// could be dismissed/blocked, leaving you stuck — the bug this replaces). On a
+// name set/change we mint a signed JWT from the server (cached in localStorage) so
+// the name is tamper-evident while held. Online actions require a name + token.
 let identityToken = null;
+
 function loadIdentity() {
     try {
         identityToken = localStorage.getItem('bt_token');
         playerName = localStorage.getItem('bt_player_name') || playerName;
     } catch (_) {}
+    // Never leave the player nameless: default to a random handle they can edit.
+    if (!playerName) {
+        playerName = 'player' + Math.floor(Math.random() * 900 + 100);
+        try { localStorage.setItem('bt_player_name', playerName); } catch (_) {}
+    }
+    if (nameInput) nameInput.value = playerName;
 }
+
+function setNameHint(msg, isError) {
+    if (!nameHint) return;
+    nameHint.textContent = msg || '';
+    nameHint.classList.toggle('name-hint-error', !!isError);
+}
+
+// Mint (or reuse) a signed token for the current name. Returns the token, or null
+// if there's no name yet or the server call failed — callers must NOT proceed
+// online on null (we surface why instead of silently dropping the player).
 async function ensureIdentity() {
-    if (identityToken && playerName) return identityToken;
-    const name = getPlayerName(); // prompts once, stores bt_player_name
+    if (!playerName) {
+        if (nameInput) nameInput.focus();
+        setNameHint('Enter a name above to play online.', true);
+        return null;
+    }
+    if (identityToken) return identityToken;
     try {
         const res = await fetch('/api/identity', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name }),
+            body: JSON.stringify({ name: playerName }),
         });
         if (res.ok) {
             identityToken = (await res.json()).token;
             try { localStorage.setItem('bt_token', identityToken); } catch (_) {}
+            setNameHint('');
+        } else {
+            setNameHint('Could not register that name. Try another.', true);
+            return null;
         }
-    } catch (_) {}
+    } catch (_) {
+        setNameHint('Network error setting your name. Try again.', true);
+        return null;
+    }
     return identityToken;
+}
+
+// The name field changed: adopt the new name, drop the old token (it signed the old
+// name) and re-mint, then re-assert presence if we were open to matches.
+async function commitNameFromField() {
+    if (!nameInput) return;
+    const raw = (nameInput.value || '').trim().slice(0, 20);
+    if (!raw || raw === playerName) { if (raw) setNameHint(''); return; }
+    playerName = raw;
+    nameInput.value = raw;
+    try { localStorage.setItem('bt_player_name', playerName); } catch (_) {}
+    identityToken = null;
+    try { localStorage.removeItem('bt_token'); } catch (_) {}
+    const tok = await ensureIdentity();
+    if (tok && availableToggle && availableToggle.checked) setAvailable(true);
 }
 
 function updateLiveStats(m) {
@@ -570,14 +683,11 @@ function applySnapshot(msg) {
         game.restore_keyframe(Uint8Array.from(msg.keyframe));
         for (const i of unackedInputs) applyReprToGame(i.repr);
     }
-    if (!gameEnded && msg.result === 1) {
+    if (!gameEnded && (msg.result === 1 || msg.result === 2)) {
         gameEnded = true;
-        gameOverText.textContent = 'YOU WIN!';
+        gameOverText.textContent = msg.result === 1 ? 'YOU WIN!' : 'GAME OVER - You Lost';
         gameOverOverlay.style.display = 'flex';
-    } else if (!gameEnded && msg.result === 2) {
-        gameEnded = true;
-        gameOverText.textContent = 'GAME OVER - You Lost';
-        gameOverOverlay.style.display = 'flex';
+        clearMatchUrl(); // match decided — a refresh now lands in the lobby
     }
 }
 
@@ -591,6 +701,10 @@ function enterAuthoritativeGame(msg) {
     mode = 'online';
     authoritative = true;
     onlineOpponentName = msg.opponent || 'Opponent';
+    // Park the match in the URL so an accidental refresh can rejoin it. This also
+    // fires on a rejoin's matchStart, so the URL stays correct after reconnecting.
+    setMatchUrl(msg.match_id);
+    hideReconnect(); // a rejoin handoff clears the "Reconnecting…" overlay
     updateModeButtons();
     showGame();
 
@@ -632,25 +746,12 @@ function showWin() {
 
 
 
-function getPlayerName() {
-    if (playerName) return playerName;
-    try { playerName = localStorage.getItem('bt_player_name') || null; } catch (_) {}
-    if (!playerName) {
-        // Asked once, then remembered (it's your leaderboard identity). Clear
-        // localStorage 'bt_player_name' to be asked again.
-        const dflt = 'player' + Math.floor(Math.random() * 900 + 100);
-        playerName = prompt('Choose a player name (shown on the leaderboard):', dflt) || dflt;
-        try { localStorage.setItem('bt_player_name', playerName); } catch (_) {}
-    }
-    return playerName;
-}
-
 // Auto-queue for a match over the persistent lobby socket. Requires a signed
 // identity first (so the server knows who you are). `enterAuthoritativeGame`
 // drops you into the playfield when matched.
 async function findMatch() {
     if (searching || mode === 'online') return; // already queued, or already playing online
-    await ensureIdentity();
+    if (!await ensureIdentity()) return;         // no name/token yet (field is focused)
     searching = true;
     findMatchBtn.classList.add('searching');
     onlineStatus.style.display = 'block';
@@ -698,6 +799,33 @@ async function onSignalMessage(ev) {
         if (onlineStatus) onlineStatus.style.display = 'block';
         return;
     }
+    // ── Reconnect (rejoin-on-refresh) ────────────────────────────────────────
+    if (msg.type === 'opponentReconnecting') {
+        // The server froze the bout while our opponent reconnects. Stop predicting
+        // (no snapshots arrive while frozen) and show a countdown to the forfeit.
+        onlinePaused = true;
+        startReconnectCountdown(typeof msg.grace_secs === 'number' ? msg.grace_secs : 12);
+        return;
+    }
+    if (msg.type === 'opponentResumed') {
+        // Both sides back; the server resumes ticking. Un-pause local prediction and
+        // drop the overlay (a keyframe rides right behind this to resync the board).
+        onlinePaused = false;
+        hideReconnect();
+        return;
+    }
+    if (msg.type === 'rejoinFailed') {
+        // No live bout for us (grace expired / match already ended / stale link).
+        // Fail loudly: clear the URL and return to the lobby with a note.
+        clearMatchUrl();
+        authoritative = false;
+        gameEnded = true;
+        hideReconnect();
+        showLobby();
+        setOnlineStatus('That match has ended.');
+        if (onlineStatus) onlineStatus.style.display = 'block';
+        return;
+    }
 
     // ── Match channel ────────────────────────────────────────────────────────
     // Server-authoritative match handoff + per-frame authoritative state.
@@ -725,6 +853,8 @@ async function onSignalMessage(ev) {
         showWatchReplayBtn();
     } else if (msg.type === 'opponentLeft') {
         setOnlineStatus('Opponent left.');
+        hideReconnect();
+        clearMatchUrl(); // match over — a refresh now lands in the lobby
         if (!gameEnded) {
             gameEnded = true;
             gameOverText.textContent = 'Opponent left.';
@@ -763,6 +893,10 @@ async function initGame() {
 //   ?screen=bazaar&baz=oppready (preview the "Your opponent is waiting..." prompt)
 function applyScreenFromUrl() {
     const p = new URLSearchParams(location.search);
+    // ?match=<id> means we were dropped from a live match (an accidental refresh) —
+    // reconnect straight back into it before anything else.
+    const match = p.get('match');
+    if (match) { rejoinMatch(match); return; }
     // ?player=<name> opens a player's profile (stats panel) in the lobby — the
     // target of the replay-library name links.
     const player = p.get('player');
@@ -782,6 +916,22 @@ function applyScreenFromUrl() {
             break;
         default: break;
     }
+}
+
+// Reattach to a live match after an accidental refresh (?match=<id>). Show the
+// game screen with a "Reconnecting…" overlay, then connect + send `rejoin` on open
+// (connectLobby.onopen consumes pendingRejoin). The server answers with either a
+// matchStart handoff + keyframe (we're back in) or rejoinFailed (→ lobby).
+function rejoinMatch(id) {
+    currentMatchId = id;
+    mode = 'online';
+    authoritative = true;
+    gameEnded = false;
+    onlinePaused = true;
+    pendingRejoin = id;
+    showGame();
+    showReconnect('Reconnecting…');
+    connectLobby();
 }
 
 function startGame(newMode) {
@@ -1585,6 +1735,11 @@ if (ernieSlider) {
 // by the presence/identity server work (Phases 3-4); wired here so the buttons
 // exist and degrade gracefully until then.
 if (updateBtn) updateBtn.addEventListener('click', () => requestPlayerList());
+// Name field: commit on blur or Enter (Enter also blurs so it's a single commit).
+if (nameInput) {
+    nameInput.addEventListener('change', () => commitNameFromField());
+    nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') nameInput.blur(); });
+}
 if (challengeBtn) challengeBtn.addEventListener('click', () => challengeSelected());
 if (availableToggle) availableToggle.addEventListener('change', () => setAvailable(availableToggle.checked));
 if (availableToggleGame) availableToggleGame.addEventListener('change', () => setAvailable(availableToggleGame.checked));
@@ -1599,9 +1754,17 @@ const backToLobbyBtn = document.getElementById('backToLobbyBtn');
 const leaveGameBtn = document.getElementById('leaveGameBtn');
 function leaveToLobby() {
     // Forfeit only if leaving a still-live online match (a finished match has
-    // already settled server-side). Dropping the socket makes the server end the
-    // bout via disconnect; it reconnects for the lobby.
+    // already settled server-side). An INTENTIONAL leave forfeits at once via
+    // `leaveMatch` — NOT by dropping the socket, which now triggers the reconnect
+    // grace (that's only for an accidental refresh). We keep the persistent lobby
+    // socket; the server resets us to lobby presence when the bout ends.
     const forfeiting = (mode === 'online' && !gameEnded);
+    if (forfeiting && ws && ws.readyState === WebSocket.OPEN) {
+        try { ws.send(JSON.stringify({ type: 'leaveMatch' })); } catch (_) {}
+    }
+    pendingRejoin = null;        // cancel any queued reconnect — we're leaving on purpose
+    clearMatchUrl();             // a refresh now lands in the lobby, not back in the match
+    hideReconnect();
     cleanupOnline();
     mode = 'practice';           // back to a local/lobby mode so Find Match works again
     gameEnded = true;
@@ -1611,7 +1774,6 @@ function leaveToLobby() {
     lastMatchReplayId = null;
     if (watchReplayBtn) watchReplayBtn.style.display = 'none';
     showLobby();
-    if (forfeiting && ws) { try { ws.close(); } catch (_) {} }
 }
 const leaveGameTop = document.getElementById('leaveGameTop');
 if (backToLobbyBtn) backToLobbyBtn.addEventListener('click', leaveToLobby);
@@ -1780,15 +1942,17 @@ window.bt = { get game() { return game; }, get mode() { return mode; } };
 
 // Initialize and start game loop
 (async () => {
-    await initGame();
+    // Load identity FIRST: initGame's applyScreenFromUrl may rejoin a match from
+    // ?match=<id>, which needs our name + token ready (and populates the name field).
+    loadIdentity();
 
-    // Set up broadcast channel for two-player communication
+    await initGame();
 
     // Wire up on-screen touch control buttons
     setupTouchControls();
 
     // One persistent socket for the lobby (presence/stats/challenge) + matches.
-    loadIdentity();
+    // (A rejoin from ?match=<id> already opened it; this is a no-op then.)
     connectLobby();
 
     requestAnimationFrame(gameLoop);

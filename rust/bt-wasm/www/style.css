@@ -180,6 +180,15 @@ body {
     text-shadow: 3px 3px 0 #8b0000;
     letter-spacing: 4px;
 }
+/* The reconnect/forfeit-countdown overlay reuses .game-over-text but is a status
+   message (two lines), so it's smaller and renders its newline. */
+#reconnectText {
+    font-size: 26px;
+    letter-spacing: 2px;
+    text-align: center;
+    line-height: 1.35;
+    white-space: pre-line;
+}
 
 /* Game-over actions row (Watch replay / Back to lobby). */
 .game-over-buttons {
@@ -1616,6 +1625,21 @@ body.bazaar-open #touchControls { display: none !important; }
 .lobby-frame legend { font-weight: bold; color: #0000ff; padding: 0 6px; font-size: 13px; }
 .lobby-slider { width: 100%; }
 .lobby-toggle { font-size: 13px; color: #333; display: flex; align-items: center; gap: 6px; cursor: pointer; }
+
+/* Identity: always-visible, editable name field. Replaces the old one-shot
+   prompt() that could be dismissed/blocked, leaving you unable to set a name.
+   Styled as a recessed Motif text field (sunken bevel: dark top/left). */
+.lobby-identity { display: grid; grid-template-columns: auto 1fr; gap: 5px 8px; align-items: center; }
+.lobby-identity-label { font-weight: bold; color: #0000ff; font-size: 13px; }
+.lobby-name-input {
+    min-width: 0; font-family: inherit; font-size: 13px; padding: 4px 6px;
+    background-color: #ffffff; color: #111;
+    border: 2px solid #808080;
+    border-top-color: #000000; border-left-color: #000000;
+    border-bottom-color: #ffffff; border-right-color: #ffffff;
+}
+.lobby-name-hint { grid-column: 1 / -1; font-size: 11px; color: #555; font-style: italic; min-height: 1em; }
+.lobby-name-hint.name-hint-error { color: #b00000; font-style: normal; }
 
 /* Right column: shield, actions, stats. */
 .lobby-logo-row { text-align: center; }

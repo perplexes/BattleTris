@@ -30,6 +30,16 @@
                     </div>
                 </div>
 
+                <!-- Your identity. Always visible + editable so you can never get
+                     stuck without a way to set a name (the old prompt-only flow
+                     could wedge). This is your leaderboard name for online play. -->
+                <div class="lobby-identity">
+                    <label class="lobby-identity-label" for="nameInput">You:</label>
+                    <input id="nameInput" class="lobby-name-input" type="text" maxlength="20"
+                           autocomplete="off" spellcheck="false" placeholder="set a name to play online">
+                    <span id="nameHint" class="lobby-name-hint"></span>
+                </div>
+
                 <fieldset class="lobby-frame">
                     <legend>Play Computer</legend>
                     <button id="playComputerBtn" class="lobby-btn">Play Willing Ernie</button>
@@ -116,6 +126,12 @@
                             <button id="watchReplayBtn" class="lobby-btn" style="display:none;">Watch replay</button>
                             <button id="backToLobbyBtn" class="lobby-btn">Back to lobby</button>
                         </div>
+                    </div>
+                    <!-- Shown while a dropped player reconnects (an accidental
+                         refresh): the whole match is frozen on the server until
+                         they're back or the grace window expires. -->
+                    <div id="reconnectOverlay" class="game-over-overlay" style="display:none;">
+                        <div class="game-over-text" id="reconnectText">Reconnecting&hellip;</div>
                     </div>
                     <div id="bazaarOverlay" class="bazaar-overlay">
                         <div class="bazaar-panel">

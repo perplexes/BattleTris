@@ -20,12 +20,17 @@
 //!     {"type":"available","value":true,"token":"<jwt>"}   (open to matches)
 //!     {"type":"challenge","target":"bob"}   (directed challenge)
 //!     {"type":"input","seq":N,"input":<bt_replay::Input>}   (a gameplay action)
+//!     {"type":"rejoin","match_id":N,"token":"<jwt>"}   (reattach after a refresh)
+//!     {"type":"leaveMatch"}                 (intentional leave -> immediate forfeit)
 //!   server -> client:
-//!     {"type":"matchStart","side":"A|B","seed":N,"opponent":"bob",...}
+//!     {"type":"matchStart","side":"A|B","seed":N,"opponent":"bob","match_id":N,...}
 //!     {"type":"snapshot","tick":N,"ack":N,"result":...,"you":...,"opp":...,"keyframe"?:[..]}
 //!     {"type":"rating","mu":...,"sigma":...,"conservative":...,"won":true}
 //!     {"type":"players","players":[{"name":..,"status":"available|searching|ingame"}]}
 //!     {"type":"opponentLeft"}
+//!     {"type":"opponentReconnecting"}       (opponent dropped; bout frozen, grace)
+//!     {"type":"opponentResumed"}            (opponent reattached; play resumes)
+//!     {"type":"rejoinFailed"}               (no such live bout for this identity)
 //!
 //! Every connected client speaks the server-authoritative protocol (sends
 //! `input`, renders `snapshot`); the server runs the only simulation. (The legacy
@@ -145,6 +150,10 @@ struct Client {
     /// While in a match: the channel to the match's tick loop and which side this
     /// client plays. `input` messages are forwarded here.
     bout: Option<(mpsc::Sender<BoutInput>, Side)>,
+    /// The `match_id` of the bout this client is in (keys [`App::bouts`]), so an
+    /// intentional `leaveMatch` can forfeit exactly this client's own bout. `None`
+    /// outside a match. Set with `bout`, cleared when the bout ends.
+    match_id: Option<u64>,
     /// Lobby presence. `None` until the client establishes a name (anonymous
     /// connections don't appear in the roster). See [`Status`].
     status: Option<Status>,
@@ -203,6 +212,10 @@ struct App {
     /// Last `players` roster we broadcast (the de-duped name/status/geo list), so
     /// the presence push only re-sends on a real change.
     last_players: Vec<RosterEntry>,
+    /// Live authoritative bouts, keyed by `match_id`, so a reconnecting player's
+    /// `rejoin` can reattach to the running tick loop. Inserted in [`start_bout`],
+    /// removed when [`run_bout`] ends. See [`BoutHandle`].
+    bouts: HashMap<u64, BoutHandle>,
 }
 
 impl App {
@@ -226,6 +239,7 @@ impl App {
             db,
             challenges: HashMap::new(),
             last_players: Vec::new(),
+            bouts: HashMap::new(),
         }
     }
 
@@ -393,6 +407,39 @@ fn save_ratings(ratings: &HashMap<String, (f64, f64, u32)>) {
 /// spam flood (excess inputs are dropped at the sender via `try_send`).
 const BOUT_INPUT_CAP: usize = 256;
 
+/// How long a bout stays FROZEN after a human side's socket drops, waiting for that
+/// player to reconnect (an accidental browser refresh) before the match is
+/// forfeited. Long enough for a page reload (wasm re-init + ws reconnect), short
+/// enough not to over-stall a genuine quit. A *bot* drop never waits — it forfeits
+/// at once (bots don't refresh).
+const REJOIN_GRACE: Duration = Duration::from_secs(12);
+
+/// An out-of-band control message to a running bout's tick loop, separate from the
+/// per-frame `input` stream. Sent by the `rejoin` handler when a dropped player
+/// reconnects on a brand-new connection.
+enum BoutControl {
+    /// Reattach `side` to a freshly-connected client: swap in its writer `tx` and
+    /// adopt its new connection `id` (the disconnected one was already removed from
+    /// `app.clients`, so the loop must retarget settle/status by the live id).
+    Reattach { side: Side, new_id: u64, tx: mpsc::UnboundedSender<Message> },
+    /// `side` intentionally left the match (the in-app "Leave game" button) — end
+    /// the bout NOW, no reconnect grace, with the other side winning by forfeit.
+    Forfeit { side: Side },
+}
+
+/// A handle to a live bout, kept in [`App::bouts`] keyed by `match_id` so the
+/// `rejoin` handler can hand a reconnecting client straight back into the running
+/// loop. Dropped (removed) when the bout ends.
+struct BoutHandle {
+    /// Deliver a [`BoutControl`] to the tick loop (reattach).
+    control: mpsc::Sender<BoutControl>,
+    /// A clone of the bout's input channel, given to a reconnecting client so its
+    /// inputs flow to the same loop.
+    input_tx: mpsc::Sender<BoutInput>,
+    name_a: String,
+    name_b: String,
+}
+
 /// Everything the async caller needs to spawn an authoritative match's tick
 /// loop, handed back by [`try_match`] when it pairs two authoritative clients.
 /// Player names + rating states are captured here so the bout can settle even
@@ -414,6 +461,11 @@ struct PendingBout {
     tx_a: mpsc::UnboundedSender<Message>,
     tx_b: mpsc::UnboundedSender<Message>,
     input_rx: mpsc::Receiver<BoutInput>,
+    /// Out-of-band reattach messages from the `rejoin` handler (see [`BoutControl`]).
+    control_rx: mpsc::Receiver<BoutControl>,
+    /// Per side: is this a human (eligible for the reconnect grace freeze)? A bot
+    /// drop forfeits at once. Index by side (A = 0, B = 1).
+    human: [bool; 2],
 }
 
 /// A per-match seed from a connection id — distinct across matches (ids are
@@ -548,28 +600,45 @@ fn start_bout(app: &mut App, a: u64, b: u64, quality: Option<f64>) -> Option<Pen
         None => return None,
     };
 
+    // Mint the match id BEFORE the matchStart sends so each side learns it up front
+    // (the client parks it in its URL as `?match=<id>` for rejoin-on-refresh).
+    let match_id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    // Which sides are human? A bot drop forfeits instantly (no reconnect grace).
+    let human_a = !app.clients.get(&a).is_some_and(|c| c.is_bot);
+    let human_b = !app.clients.get(&b).is_some_and(|c| c.is_bot);
+
     let (seed_a, seed_b) = (derive_seed(a), derive_seed(b));
     let (input_tx, input_rx) = mpsc::channel::<BoutInput>(BOUT_INPUT_CAP);
+    // The reattach control channel: the `rejoin` handler delivers a fresh socket to
+    // the running tick loop through here (see [`BoutControl`]).
+    let (control_tx, control_rx) = mpsc::channel::<BoutControl>(4);
     let tx_a = app.clients[&a].tx.clone();
     let tx_b = app.clients[&b].tx.clone();
     if let Some(c) = app.clients.get_mut(&a) {
         c.bout = Some((input_tx.clone(), Side::A));
+        c.match_id = Some(match_id);
         c.prev_status = c.status; // remember presence to restore at bout end
         c.status = Some(Status::InGame);
     }
     if let Some(c) = app.clients.get_mut(&b) {
-        c.bout = Some((input_tx, Side::B));
+        c.bout = Some((input_tx.clone(), Side::B));
+        c.match_id = Some(match_id);
         c.prev_status = c.status;
         c.status = Some(Status::InGame);
     }
+    // Register the live bout so a reconnecting player can find it by `match_id`.
+    app.bouts.insert(
+        match_id,
+        BoutHandle { control: control_tx, input_tx, name_a: a_name.clone(), name_b: b_name.clone() },
+    );
     // quality is optional in the wire frame; a directed challenge omits it.
     let qv = quality.map(|q| json!(q)).unwrap_or(Value::Null);
     // Each side's matchStart carries the OPPONENT's Elo, so a rating-matched bot
     // (The Count) can dial its difficulty to the player it's facing.
     let a_elo = elo_styled(a_state.rating.conservative(3.0));
     let b_elo = elo_styled(b_state.rating.conservative(3.0));
-    send(app, a, &json!({"type":"matchStart","side":"A","seed":seed_a,"opponent":b_name,"opp_elo":b_elo,"quality":qv}));
-    send(app, b, &json!({"type":"matchStart","side":"B","seed":seed_b,"opponent":a_name,"opp_elo":a_elo,"quality":qv}));
+    send(app, a, &json!({"type":"matchStart","side":"A","seed":seed_a,"opponent":b_name,"opp_elo":b_elo,"quality":qv,"match_id":match_id}));
+    send(app, b, &json!({"type":"matchStart","side":"B","seed":seed_b,"opponent":a_name,"opp_elo":a_elo,"quality":qv,"match_id":match_id}));
     metrics::METRICS.matches.inc();
     match quality {
         Some(q) => println!("authoritative match {a} <-> {b} (quality {q:.3})"),
@@ -578,7 +647,7 @@ fn start_bout(app: &mut App, a: u64, b: u64, quality: Option<f64>) -> Option<Pen
     // Roster changed (both went InGame) — let the lobby reflect it.
     maybe_broadcast_players(app);
     Some(PendingBout {
-        match_id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+        match_id,
         id_a: a,
         id_b: b,
         seed_a,
@@ -590,6 +659,8 @@ fn start_bout(app: &mut App, a: u64, b: u64, quality: Option<f64>) -> Option<Pen
         tx_a,
         tx_b,
         input_rx,
+        control_rx,
+        human: [human_a, human_b],
     })
 }
 
@@ -677,13 +748,31 @@ fn record_bout_player_stats(
     }
 }
 
+/// Map a [`Side`] to a 0/1 index for per-side arrays (A = 0, B = 1).
+#[inline]
+fn sidx(s: Side) -> usize {
+    match s {
+        Side::A => 0,
+        Side::B => 1,
+    }
+}
+
 /// The per-match authoritative tick loop. Advances the deterministic engine on
 /// the server's clock, broadcasts a snapshot to each client (~30Hz), and settles
-/// on the natural end (or by forfeit if a client drops).
+/// on the natural end.
+///
+/// **Reconnect grace (pause-both).** A *human* side's socket dropping no longer
+/// forfeits instantly: the whole bout FREEZES (sim + inputs halt) for up to
+/// [`REJOIN_GRACE`] while we wait for that player to reconnect (an accidental
+/// refresh) and reattach via [`BoutControl::Reattach`] (the `rejoin` handler). The
+/// still-connected side is told `opponentReconnecting`; on reattach both get a
+/// keyframe + `opponentResumed` and play resumes from the exact frozen state. If
+/// the grace expires the absent side forfeits. A *bot* side dropping still
+/// forfeits at once (bots don't refresh).
 async fn run_bout(state: Shared, pb: PendingBout) {
     let PendingBout {
-        match_id, id_a, id_b, seed_a, seed_b, name_a, name_b, state_a, state_b, tx_a, tx_b,
-        mut input_rx,
+        match_id, mut id_a, mut id_b, seed_a, seed_b, name_a, name_b, state_a, state_b,
+        mut tx_a, mut tx_b, mut input_rx, mut control_rx, human,
     } = pb;
     let mut bout = Bout::new(seed_a, seed_b);
     let mut ticker = tokio::time::interval(Duration::from_millis(bout::TICK_MS as u64));
@@ -692,8 +781,76 @@ async fn run_bout(state: Shared, pb: PendingBout) {
     // `Some(a_won)` = settle with A as winner/loser; `None` = both gone, nothing to rate.
     let mut frame: u64 = 0;
     let mut want_keyframe = true; // send one on the very first frame
+    let mut connected = [true, true]; // is each side's socket currently attached?
+    let mut grace_until: Option<Instant> = None; // freeze deadline while a human reconnects
     let outcome: Option<bool> = loop {
         ticker.tick().await;
+
+        // ── Control: reattach a reconnecting player, or an intentional leave ─────
+        let mut forfeit_by: Option<Side> = None;
+        while let Ok(ctrl) = control_rx.try_recv() {
+            match ctrl {
+                BoutControl::Reattach { side, new_id, tx } => {
+                    println!("bout {match_id}: reattach side {side:?} new_id {new_id}");
+                    match side {
+                        Side::A => { tx_a = tx.clone(); id_a = new_id; }
+                        Side::B => { tx_b = tx.clone(); id_b = new_id; }
+                    }
+                    connected[sidx(side)] = true;
+                    // The fresh client needs the match handoff, THEN a keyframe to resync.
+                    let (opp, seed, side_str) = match side {
+                        Side::A => (&name_b, seed_a, "A"),
+                        Side::B => (&name_a, seed_b, "B"),
+                    };
+                    let _ = tx.send(Message::Text(
+                        json!({"type":"matchStart","side":side_str,"seed":seed,"opponent":opp,"match_id":match_id}).to_string(),
+                    ));
+                    let _ = tx.send(Message::Text(bout.snapshot_message(side, true)));
+                    // Both back? Lift the freeze, resync both boards, tell both to resume.
+                    if connected[0] && connected[1] {
+                        grace_until = None;
+                        let resumed = json!({"type":"opponentResumed"}).to_string();
+                        let _ = tx_a.send(Message::Text(bout.snapshot_message(Side::A, true)));
+                        let _ = tx_a.send(Message::Text(resumed.clone()));
+                        let _ = tx_b.send(Message::Text(bout.snapshot_message(Side::B, true)));
+                        let _ = tx_b.send(Message::Text(resumed));
+                        want_keyframe = true;
+                    }
+                }
+                BoutControl::Forfeit { side } => forfeit_by = Some(side),
+            }
+        }
+        if let Some(side) = forfeit_by {
+            // Intentional leave: the leaver loses now, no grace. The settle section
+            // tells the still-attached side `opponentLeft` (shared with the grace-
+            // expiry path), so we just end the loop here.
+            break Some(side == Side::B); // A left -> B wins (false); B left -> A wins (true)
+        }
+
+        // ── Frozen (a human side is mid-reconnect): hold the sim, watch the clock ─
+        if !(connected[0] && connected[1]) {
+            // `grace_until` is always set here (only a human drop pauses; a bot drop
+            // forfeits). On expiry the absent side forfeits to whoever remains.
+            if grace_until.is_some_and(|d| Instant::now() >= d) {
+                println!("bout {match_id}: grace expired (connected={connected:?}) -> forfeit");
+                break match (connected[0], connected[1]) {
+                    (true, false) => Some(true),  // A stayed -> A wins
+                    (false, true) => Some(false), // B stayed -> B wins
+                    _ => None,                    // nobody came back
+                };
+            }
+            // Probe any still-connected side (~2Hz) so the expiry verdict stays
+            // accurate if it ALSO drops while we wait (the client ignores this).
+            if frame % 32 == 0 {
+                let hb = json!({"type":"heartbeat"}).to_string();
+                if connected[0] { connected[0] = tx_a.send(Message::Text(hb.clone())).is_ok(); }
+                if connected[1] { connected[1] = tx_b.send(Message::Text(hb)).is_ok(); }
+            }
+            frame = frame.wrapping_add(1);
+            continue;
+        }
+
+        // ── Normal tick (both sides attached) ────────────────────────────────────
         // Drain queued inputs (the channel is bounded, so this is O(cap)).
         while let Ok((side, input, seq)) = input_rx.try_recv() {
             bout.apply_input(side, &input, seq);
@@ -722,17 +879,40 @@ async fn run_bout(state: Shared, pb: PendingBout) {
             }
             let a_ok = tx_a.send(Message::Text(bout.snapshot_message(Side::A, kf))).is_ok();
             let b_ok = tx_b.send(Message::Text(bout.snapshot_message(Side::B, kf))).is_ok();
-            match (a_ok, b_ok) {
-                (false, false) => break None,       // both disconnected
-                (true, false) => break Some(true),  // B dropped -> A wins by forfeit
-                (false, true) => break Some(false), // A dropped -> B wins by forfeit
-                (true, true) => {}
+            connected = [a_ok, b_ok];
+            if !a_ok || !b_ok {
+                // A *bot* dropping (no human is down) forfeits immediately. A human
+                // dropping starts the freeze and waits for a reconnect.
+                let human_down = (!a_ok && human[0]) || (!b_ok && human[1]);
+                if !human_down {
+                    // No human is down — only a bot dropped (incl. a bot-vs-bot match,
+                    // e.g. The Count vs a regional bot). Forfeit immediately; the side
+                    // still attached wins. (If A is down, a_ok=false -> Some(false)=B won.)
+                    break Some(a_ok);
+                }
+                if grace_until.is_none() {
+                    grace_until = Some(Instant::now() + REJOIN_GRACE);
+                    println!("bout {match_id}: human drop (connected={connected:?}) -> freeze {}s", REJOIN_GRACE.as_secs());
+                }
+                // Carry the grace length so the connected side can show a countdown
+                // to the forfeit (the server stays the authority on the actual end).
+                let msg = json!({
+                    "type": "opponentReconnecting",
+                    "grace_secs": REJOIN_GRACE.as_secs(),
+                })
+                .to_string();
+                if a_ok { let _ = tx_a.send(Message::Text(msg.clone())); }
+                if b_ok { let _ = tx_b.send(Message::Text(msg)); }
+                // Next iteration sees `connected` partial and enters the freeze.
             }
         }
         frame += 1;
     };
 
     let mut app = state.lock().await;
+    // The bout is over — drop its reattach registry entry so a late `rejoin` for
+    // this match cleanly fails (`rejoinFailed`) instead of finding a dead loop.
+    app.bouts.remove(&match_id);
     // Match over: both sides leave the bout and return to their PRE-match
     // presence (see [`post_bout_status`]) — a player who was "open to matches"
     // goes back to Available; a one-off directed challenger leaves the roster
@@ -740,6 +920,7 @@ async fn run_bout(state: Shared, pb: PendingBout) {
     for cid in [id_a, id_b] {
         if let Some(c) = app.clients.get_mut(&cid) {
             c.bout = None;
+            c.match_id = None;
             c.peer = None;
             if !c.name.is_empty() {
                 c.status = post_bout_status(c.prev_status);
@@ -748,6 +929,17 @@ async fn run_bout(state: Shared, pb: PendingBout) {
         }
     }
     if let Some(a_won) = outcome {
+        // A forfeit (an intentional leave OR a grace-window expiry — anything that
+        // ISN'T a natural top-out) doesn't latch a game-over on the winner's client
+        // by itself, and the winner may be sitting on the "opponent reconnecting"
+        // freeze. Tell whoever's still attached the opponent left. (The loser's tx
+        // is dead on a disconnect → a harmless no-op; on an intentional leave the
+        // leaver already went to the lobby and ignores it.)
+        if !bout.is_over() {
+            let left = json!({ "type": "opponentLeft" }).to_string();
+            let _ = tx_a.send(Message::Text(left.clone()));
+            let _ = tx_b.send(Message::Text(left));
+        }
         settle_bout(
             &mut app, match_id, id_a, &name_a, state_a, id_b, &name_b, state_b,
             a_won, bout.lines(Side::A), bout.lines(Side::B),
@@ -1040,6 +1232,83 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
                 }
             }
         }
+        // Reconnect after an accidental refresh: the client parked the match in its
+        // URL (`?match=<id>`) and now reattaches to the still-running, frozen bout.
+        // Requires a signed token whose name is one of the two participants — so a
+        // shared/stale link can't hijack someone else's match (it just fails).
+        Some("rejoin") => {
+            // Accept the id as a JSON number OR a numeric string — it round-trips
+            // through the client's `?match=<id>` URL, which is always a string.
+            let mid = v
+                .get("match_id")
+                .and_then(|m| m.as_u64().or_else(|| m.as_str().and_then(|s| s.parse().ok())));
+            let mut app = state.lock().await;
+            let prior = app.clients.get(&id).map(|c| c.name.clone()).unwrap_or_default();
+            let name = resolve_name(&app, &v, &prior);
+            // Find the live bout and which side this identity plays.
+            let found = mid.and_then(|mid| {
+                app.bouts.get(&mid).and_then(|h| {
+                    let side = if !name.is_empty() && h.name_a == name {
+                        Some(Side::A)
+                    } else if !name.is_empty() && h.name_b == name {
+                        Some(Side::B)
+                    } else {
+                        None
+                    };
+                    side.map(|s| (s, h.control.clone(), h.input_tx.clone()))
+                })
+            });
+            let ok = match found {
+                Some((side, control, input_tx)) => {
+                    // Hand this fresh socket to the running loop (it sends the
+                    // matchStart handoff + a keyframe). try_send (not await) so we
+                    // never hold the lock across a send; capacity 4 vs a one-shot
+                    // reattach means it only fails if the loop already ended.
+                    let sent = match app.clients.get(&id).map(|c| c.tx.clone()) {
+                        Some(tx) => {
+                            control.try_send(BoutControl::Reattach { side, new_id: id, tx }).is_ok()
+                        }
+                        None => false,
+                    };
+                    if sent {
+                        let st = app.rating_for(&name);
+                        if let Some(c) = app.clients.get_mut(&id) {
+                            c.name = name;
+                            c.state = st;
+                            c.prev_status = c.status; // restore presence at bout end
+                            c.status = Some(Status::InGame);
+                            c.bout = Some((input_tx, side));
+                            c.match_id = mid; // mid is Some here (found matched)
+                        }
+                        maybe_broadcast_players(&mut app); // back to InGame in the roster
+                    }
+                    sent
+                }
+                None => false,
+            };
+            println!("rejoin id={id} match_id={mid:?} -> {}", if ok { "ok" } else { "failed" });
+            if !ok {
+                // No such live bout / not a participant / the loop just ended — fail
+                // loudly so the client clears the URL and returns to the lobby.
+                send(&app, id, &json!({"type":"rejoinFailed"}));
+            }
+        }
+        // Intentional in-app "Leave game": forfeit THIS client's own bout right away
+        // (no reconnect grace — that's only for an accidental socket drop). We use
+        // the server-side `match_id`/`side` binding (not anything client-supplied),
+        // so a client can only forfeit the match it's actually in.
+        Some("leaveMatch") => {
+            let app = state.lock().await;
+            let target = app.clients.get(&id).and_then(|c| match (c.match_id, c.bout.as_ref()) {
+                (Some(mid), Some((_, side))) => Some((mid, *side)),
+                _ => None,
+            });
+            if let Some((mid, side)) = target {
+                if let Some(h) = app.bouts.get(&mid) {
+                    let _ = h.control.try_send(BoutControl::Forfeit { side });
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -1063,8 +1332,8 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
             id,
             Client {
                 name: String::new(), tx, peer: None, state: st, bout: None,
-                status: None, geo: None, is_bot: false, prev_status: None,
-                ping_sent_at: None, ping_ms: None,
+                match_id: None, status: None, geo: None, is_bot: false,
+                prev_status: None, ping_sent_at: None, ping_ms: None,
             },
         );
     }
@@ -1144,11 +1413,20 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
             clear_challenge(&mut a, cid);
             send(&a, cid, &json!({"type":"challengeDeclined","by":by}));
         }
+        // A mid-bout disconnect is NOT a forfeit anymore: the bout's tick loop sees
+        // the dropped socket and enters the reconnect-grace freeze (the player may be
+        // refreshing), forfeiting only if they don't reattach in time. So only fire
+        // `opponentLeft` for a (non-bout) peer link; the loop owns the in-bout case.
+        // We still remove this dead connection below — the loop holds its own `tx`
+        // clone and detects the drop via send failure.
         let peer = a.clients.get(&id).and_then(|c| c.peer);
+        let in_bout = a.clients.get(&id).is_some_and(|c| c.bout.is_some());
         if let Some(p) = peer {
-            send(&a, p, &json!({"type": "opponentLeft"}));
-            if let Some(c) = a.clients.get_mut(&p) {
-                c.peer = None;
+            if !in_bout {
+                send(&a, p, &json!({"type": "opponentLeft"}));
+                if let Some(c) = a.clients.get_mut(&p) {
+                    c.peer = None;
+                }
             }
         }
         let was_listed = a.clients.get(&id).is_some_and(|c| c.status.is_some());
@@ -1937,6 +2215,7 @@ mod tests {
             db: std::sync::Arc::new(std::sync::Mutex::new(mem_db())),
             challenges: HashMap::new(),
             last_players: Vec::new(),
+            bouts: HashMap::new(),
         }
     }
 
@@ -1951,8 +2230,8 @@ mod tests {
             id,
             Client {
                 name: name.to_string(), tx, peer: None, state, bout: None,
-                status: None, geo: None, is_bot: false, prev_status: None,
-                ping_sent_at: None, ping_ms: None,
+                match_id: None, status: None, geo: None, is_bot: false,
+                prev_status: None, ping_sent_at: None, ping_ms: None,
             },
         );
         rx
@@ -2018,12 +2297,13 @@ mod tests {
         let (tx_a, mut rx_a) = mpsc::unbounded_channel::<Message>();
         let (tx_b, mut rx_b) = mpsc::unbounded_channel::<Message>();
         let (input_tx, input_rx) = mpsc::channel::<BoutInput>(BOUT_INPUT_CAP);
+        let (_control_tx, control_rx) = mpsc::channel::<BoutControl>(4);
         let app0 = test_app();
         let (state_a, state_b) = (app0.rating_for("alice"), app0.rating_for("bob"));
         let pb = PendingBout {
             match_id: 99, id_a: 1, id_b: 2, seed_a: 11, seed_b: 22,
             name_a: "alice".into(), name_b: "bob".into(), state_a, state_b,
-            tx_a, tx_b, input_rx,
+            tx_a, tx_b, input_rx, control_rx, human: [true, true],
         };
         let shared: Shared = Arc::new(Mutex::new(test_app()));
         let handle = tokio::spawn(run_bout(shared, pb));
@@ -2415,6 +2695,82 @@ mod tests {
         let start = ma.iter().find(|v| v["type"] == "matchStart").expect("matchStart");
         assert!(start["quality"].is_null(), "a challenge match carries no quality");
         let _ = &mut rx_b;
+    }
+
+    // --- rejoin-on-refresh + intentional leave -------------------------------
+
+    #[test]
+    fn start_bout_registers_a_rejoinable_handle_with_match_id() {
+        let mut app = test_app();
+        let mut rx_a = add_client(&mut app, 1, "alice");
+        let _rx_b = add_client(&mut app, 2, "bob");
+        set_present(&mut app, 1, Status::Available);
+        set_present(&mut app, 2, Status::Available);
+
+        let mut pending = start_bout(&mut app, 1, 2, None).expect("bout built");
+        let mid = pending.match_id;
+
+        // The bout is registered for rejoin, with both participants recorded, and
+        // each client knows its match_id (so an intentional leave can find it).
+        let handle = app.bouts.get(&mid).expect("bout registered in app.bouts");
+        assert_eq!(handle.name_a, "alice");
+        assert_eq!(handle.name_b, "bob");
+        assert_eq!(app.clients[&1].match_id, Some(mid));
+        assert_eq!(app.clients[&2].match_id, Some(mid));
+
+        // matchStart carries the id the client parks in its URL for rejoin.
+        let start: Value = std::iter::from_fn(|| rx_a.try_recv().ok())
+            .filter_map(|m| match m {
+                Message::Text(t) => serde_json::from_str::<Value>(&t).ok(),
+                _ => None,
+            })
+            .find(|v| v["type"] == "matchStart")
+            .expect("alice matchStart");
+        assert_eq!(start["match_id"].as_u64(), Some(mid));
+
+        // A reattach (from the rejoin handler) reaches the bout's control receiver —
+        // the loop would consume this to swap the socket back in and resume.
+        let (txn, _rxn) = mpsc::unbounded_channel::<Message>();
+        app.bouts[&mid]
+            .control
+            .try_send(BoutControl::Reattach { side: Side::A, new_id: 7, tx: txn })
+            .expect("control send");
+        match pending.control_rx.try_recv() {
+            Ok(BoutControl::Reattach { side, new_id, .. }) => {
+                assert_eq!(side, Side::A);
+                assert_eq!(new_id, 7);
+            }
+            _ => panic!("expected a Reattach on the bout control channel"),
+        }
+    }
+
+    #[test]
+    fn leave_resolves_a_clients_own_bout_from_server_state() {
+        // The `leaveMatch` handler reads (match_id, side) from the client's OWN
+        // server-side binding — never anything client-supplied — so a client can
+        // only forfeit the bout it is actually in. Mirror that resolution here.
+        let mut app = test_app();
+        let _a = add_client(&mut app, 1, "alice");
+        let _b = add_client(&mut app, 2, "bob");
+        set_present(&mut app, 1, Status::Available);
+        set_present(&mut app, 2, Status::Available);
+        let mut pending = start_bout(&mut app, 1, 2, None).expect("bout");
+        let mid = pending.match_id;
+
+        let target = app.clients.get(&2).and_then(|c| match (c.match_id, c.bout.as_ref()) {
+            (Some(m), Some((_, side))) => Some((m, *side)),
+            _ => None,
+        });
+        assert_eq!(target, Some((mid, Side::B)), "bob resolves to his own bout, side B");
+
+        app.bouts[&mid]
+            .control
+            .try_send(BoutControl::Forfeit { side: Side::B })
+            .expect("forfeit send");
+        assert!(matches!(pending.control_rx.try_recv(), Ok(BoutControl::Forfeit { side: Side::B })));
+
+        // The bout ends and unregisters once run_bout settles (asserted via the
+        // run_bout integration test); here we've covered the resolution + routing.
     }
 
     #[test]
