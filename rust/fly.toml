@@ -17,6 +17,13 @@ primary_region = "sjc"
   size = "shared-cpu-1x"
   memory = "256mb"
 
+# Prometheus metrics — fly's managed Grafana (fly-metrics.net) auto-scrapes this
+# endpoint. The server exposes hit rate, ws msgs/sec, ping latency, connections,
+# and matches (see src/metrics.rs).
+[[metrics]]
+  port = 8080
+  path = "/metrics"
+
 # Durable TrueSkill ratings live on a volume (single machine, single volume —
 # matches the in-process matchmaking model). Create with:
 #   fly volumes create data --app battletris --region sjc --size 1

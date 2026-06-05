@@ -54,6 +54,7 @@ use tower_http::services::ServeDir;
 
 /// Server-authoritative online match engine (the client-server migration).
 mod bout;
+mod metrics;
 use bout::Bout;
 
 /// Player identity (HS256 JWT) — now a shared crate so the bots can mint the
@@ -569,6 +570,7 @@ fn start_bout(app: &mut App, a: u64, b: u64, quality: Option<f64>) -> Option<Pen
     let b_elo = elo_styled(b_state.rating.conservative(3.0));
     send(app, a, &json!({"type":"matchStart","side":"A","seed":seed_a,"opponent":b_name,"opp_elo":b_elo,"quality":qv}));
     send(app, b, &json!({"type":"matchStart","side":"B","seed":seed_b,"opponent":a_name,"opp_elo":a_elo,"quality":qv}));
+    metrics::METRICS.matches.inc();
     match quality {
         Some(q) => println!("authoritative match {a} <-> {b} (quality {q:.3})"),
         None => println!("authoritative challenge match {a} <-> {b}"),
@@ -1067,12 +1069,15 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
         );
     }
 
+    metrics::METRICS.ws_connections.inc();
+
     // Writer task: drain the per-client channel to the socket.
     let writer = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             if sender.send(msg).await.is_err() {
                 break;
             }
+            metrics::ws_out();
         }
     });
 
@@ -1100,13 +1105,16 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
     });
 
     while let Some(Ok(msg)) = receiver.next().await {
+        metrics::ws_in();
         match msg {
             Message::Text(t) => handle_message(&state, id, &t).await,
             Message::Pong(_) => {
                 let mut a = state.lock().await;
                 if let Some(c) = a.clients.get_mut(&id) {
                     if let Some(sent) = c.ping_sent_at.take() {
-                        c.ping_ms = Some(sent.elapsed().as_millis() as u32);
+                        let rtt = sent.elapsed().as_millis() as u32;
+                        c.ping_ms = Some(rtt);
+                        metrics::METRICS.ws_ping_ms.observe(rtt as f64);
                     }
                 }
                 // Roster carries the (bucketed) ping, so refresh if it changed.
@@ -1145,6 +1153,7 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
         }
         let was_listed = a.clients.get(&id).is_some_and(|c| c.status.is_some());
         a.clients.remove(&id);
+        metrics::METRICS.ws_connections.dec();
         // If a named/listed client left, the lobby roster changed — push it.
         if was_listed {
             maybe_broadcast_players(&mut a);
@@ -1803,8 +1812,33 @@ async fn player_profile(State(db): State<Db>, Path(name): Path<String>) -> impl 
     Json(player_record_json(&stats)).into_response()
 }
 
+/// Count every served HTTP request (the "hit rate" metric).
+async fn track_http(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    metrics::METRICS.http_requests.inc();
+    next.run(req).await
+}
+
 #[tokio::main]
 async fn main() {
+    // Error tracking — inert until SENTRY_DSN is set (a fly secret). The guard is
+    // held for the whole process; the `panic` integration's hook captures crashes
+    // (including from spawned tasks). No-op + zero overhead when unconfigured.
+    let _sentry_guard = std::env::var("SENTRY_DSN").ok().filter(|d| !d.is_empty()).map(|dsn| {
+        let g = sentry::init((
+            dsn,
+            sentry::ClientOptions {
+                release: sentry::release_name!(),
+                send_default_pii: true,
+                ..Default::default()
+            },
+        ));
+        println!("Sentry error tracking enabled");
+        g
+    });
+
     let conn = open_db();
     let imported = import_dir(&conn, &replays_dir());
     if imported > 0 {
@@ -1843,6 +1877,12 @@ async fn main() {
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
+        .route(
+            "/metrics",
+            get(|| async {
+                ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], metrics::render())
+            }),
+        )
         .route("/api/replays", post(post_replay).get(list_replays))
         .route("/api/replays/:id", get(get_replay))
         .route("/api/leaderboard", get(leaderboard))
@@ -1851,6 +1891,7 @@ async fn main() {
         .route("/replay/:id", get(replay_page))
         .route("/", get(|| async { Redirect::permanent("/www/") }))
         .fallback_service(ServeDir::new(&static_dir))
+        .layer(axum::middleware::from_fn(track_http))
         .with_state(state);
 
     // Bind the IPv6 any-address. On Linux this is dual-stack (IPV6_V6ONLY=0 by

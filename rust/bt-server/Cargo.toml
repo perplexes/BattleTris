@@ -27,6 +27,13 @@ serde_json = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 # Identity tokens (HS256 JWT) live in the shared `bt-identity` crate so the
 # server (verify) and the bots (self-mint) speak the exact same format.
+# Error tracking. The `ureq` transport = rustls + bundled webpki CA roots (pure
+# Rust, no OpenSSL, no system certs), so it works on the static-musl / distroless
+# runtime image. Inert until SENTRY_DSN is set; `panic` captures crashes.
+sentry = { version = "0.34", default-features = false, features = ["backtrace", "contexts", "panic", "ureq"] }
+# Metrics. Pure-Rust Prometheus client; we expose /metrics in text format for fly's
+# managed Grafana to scrape (see [[metrics]] in fly.toml). No C deps.
+prometheus = { version = "0.13", default-features = false }
 
 [dev-dependencies]
 proptest = "1"
