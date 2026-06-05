@@ -5,7 +5,8 @@
 # server over fly's private 6PN network (ws://battletris.internal:8080), in
 # plaintext — so there's no inbound port and no TLS, which keeps the static
 # binary free of any C deps (no openssl/ring/aws-lc). One image; each fly machine
-# becomes a distinctly-named bot from its FLY_REGION.
+# becomes a distinctly-named bot from its FLY_REGION, and picks its persona
+# (aggressive Bert / easy-going Ernie) from its fly process group (FLY_PROCESS_GROUP).
 
 FROM rust:1-bookworm AS builder
 WORKDIR /build
@@ -20,4 +21,7 @@ RUN cargo build -p bt-bot --release --target x86_64-unknown-linux-musl
 # ---- runtime: Chainguard distroless static (nonroot, no shell) ----
 FROM cgr.dev/chainguard/static:latest AS runtime
 COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/bt-bot /app/bt-bot
-ENTRYPOINT ["/app/bt-bot"]
+# CMD (not ENTRYPOINT) so fly's per-process-group command cleanly runs the binary;
+# the persona is selected by FLY_PROCESS_GROUP (set per group), so both the `ernie`
+# and `bert` groups run this same image.
+CMD ["/app/bt-bot"]

@@ -1,12 +1,14 @@
 # Region bots for BattleTris — a separate fly app whose machines each run one
 # headless bt-bot that connects to the main `battletris` app over the private
-# 6PN network and plays real authoritative matches. One machine per region; the
-# bot reads FLY_REGION to pick its name + geo, so the same image yields a
-# distinctly-named bot per region (Tokyo-Ernie, London-Ernie, …).
+# 6PN network and plays real authoritative matches. TWO process groups so every
+# region hosts both personas: `bert` (aggressive — strong eval + smart weapons)
+# and `ernie` (easy-going — faithful placement, no weapons). The bot reads
+# FLY_PROCESS_GROUP for its persona + FLY_REGION for its city, so one image yields
+# e.g. Tokyo-Bert and Tokyo-Ernie per region.
 #
-# Deploy + place machines (one per region) — see the header of Dockerfile.bot:
+# Deploy + place one of each persona per region:
 #   fly deploy -c fly.bots.toml --dockerfile Dockerfile.bot --remote-only
-#   fly scale count 1 --region nrt,lhr,gru,syd,sjc -a battletris-bots
+#   fly scale count bert=1 ernie=1 --region nrt,lhr,gru,syd,sjc -a battletris-bots
 #
 # Requires the SAME BT_JWT_SECRET as the server so the bots' self-minted tokens
 # verify:  fly secrets set BT_JWT_SECRET=<value> -a battletris-bots
@@ -15,6 +17,11 @@ primary_region = "sjc"
 
 [build]
   dockerfile = "Dockerfile.bot"
+
+# Two personas, same image; the bot reads FLY_PROCESS_GROUP ("bert"/"ernie").
+[processes]
+  bert = "/app/bt-bot"
+  ernie = "/app/bt-bot"
 
 [env]
   # The server over fly's private network (plaintext ws, real cross-geo latency).
