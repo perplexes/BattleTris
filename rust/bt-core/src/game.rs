@@ -349,11 +349,17 @@ impl Game {
                 self.events.push(GameEvent::Idiot(reason));
             }
 
-            // BT_LINE: count down active-weapon durations; BT_FUNDS/SCORE +
-            // bazaar trigger; then publish our score for the opponent.
+            // BT_LINE: the `send(BT_LINE)` packet walks the manager ring
+            // board -> ... -> score_manager -> ... -> weapon_manager (BTGame.C:400-406),
+            // so BTScoreManager (the bazaar trigger) sees the line BEFORE
+            // BTWeaponManager (duration expiry). Match that order: open the bazaar
+            // FIRST, then expire durations — otherwise a single line that both opens
+            // the bazaar and expires Carter would charge BASE prices in the bazaar
+            // when the original charges the still-DOUBLED Carter price (the curse
+            // hasn't lifted yet at bazaar-open). Then publish our score.
             if clear.lines > 0 {
-                self.tick_durations(clear.lines);
                 self.update_bazaar();
+                self.tick_durations(clear.lines);
             }
             self.events.push(GameEvent::Scored {
                 score: self.score.score,
@@ -1077,8 +1083,10 @@ impl Game {
         if weapon_clear.lines > 0 {
             self.score.lines += weapon_clear.lines as i64;
             self.credit_clear_funds(weapon_clear.funds);
-            self.tick_durations(weapon_clear.lines);
+            // Same BT_LINE manager-ring order as place(): bazaar trigger before
+            // duration expiry (score_manager precedes weapon_manager in the ring).
             self.update_bazaar();
+            self.tick_durations(weapon_clear.lines);
             self.events.push(GameEvent::Scored {
                 score: self.score.score,
                 lines: self.score.lines,

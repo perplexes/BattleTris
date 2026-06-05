@@ -1528,56 +1528,164 @@ fn carter_expiry_restores_base_bazaar_prices() {
         "after Carter expires, bazaar prices must return to base ({} not {})", base, g.bazaar_price(probe));
 }
 
+/// BT_LINE PROCESSING IS ATOMIC across the bazaar trigger AND duration expiry: a
+/// single line that both opens the bazaar and ticks a duration weapon to zero must
+/// do BOTH — the bazaar opens and the weapon expires on that one line, neither event
+/// cannibalizing the other. (Faithful to the manager ring, where `send(BT_LINE)`
+/// reaches BTScoreManager — bazaar — before BTWeaponManager — expiry —
+/// BTGame.C:400-406; the port mirrors that order in place()/apply_weapon_on.) We arm
+/// Carter at exactly 1 line left, position the bazaar boundary one line away, and
+/// clear that single line.
+#[test]
+fn one_line_both_opens_the_bazaar_and_expires_a_duration_weapon() {
+    let mut g = Game::new(101);
+    assert!(receive_and_flush(&mut g, WeaponToken::Carter), "Carter active");
+    // Drain Carter to EXACTLY 1 line remaining via real clears.
+    let cdur = weapon_table()[WeaponToken::Carter.index()].duration as i32;
+    let drained = clear_n_lines(&mut g, cdur - 1);
+    if g.is_game_over() || drained != cdur - 1 {
+        return; // expiry is also covered by the carter-expiry / countdown properties
+    }
+    assert_eq!(g.weapon_remaining(WeaponToken::Carter), 1, "Carter at 1 line left");
+    if g.is_in_bazaar() { g.leave_bazaar(); }
+
+    // Position the bazaar boundary so the NEXT single cleared line opens it: have the
+    // opponent contribute enough lines that (op_lines + our_lines + 1) is a multiple
+    // of 20 (so combined is currently one short).
+    let our_lines = g.score().lines;
+    let op_lines = ((our_lines / 20) + 1) * 20 - 1 - our_lines;
+    g.receive_op_score(0, op_lines, 0);
+    let _ = g.take_events();
+    assert_eq!(g.lines_til_bazaar(), 1, "one more line opens the bazaar");
+    assert!(g.weapon_active(WeaponToken::Carter), "Carter still active going into the boundary line");
+
+    // Clear exactly ONE line: it both opens the bazaar AND is Carter's last line.
+    let (w, h) = (g.board().width, g.board().height);
+    for y in 0..h { for x in 0..w { g.board_mut().set(x, y, None); } }
+    for x in 0..w { g.board_mut().set(x, h - 1, Some(Cell::die(1))); }
+    g.begin_drop();
+    let mut entered = false;
+    for _ in 0..1200 {
+        g.tick(16);
+        for e in g.take_events() {
+            if matches!(e, GameEvent::EnterBazaar) { entered = true; }
+        }
+        if entered || g.is_in_bazaar() || g.is_game_over() { break; }
+    }
+    if g.is_game_over() { return; }
+    // Both must have happened on the one line: the bazaar opened AND Carter expired.
+    assert!(g.is_in_bazaar(), "the boundary line must have opened the bazaar");
+    assert!(!g.weapon_active(WeaponToken::Carter), "Carter must expire on its final line");
+    assert_eq!(g.weapon_remaining(WeaponToken::Carter), 0, "Carter fully ticked out");
+}
+
+/// Build a Game whose centre neck row's INTERIOR [BOTTLE_X, w-BOTTLE_X) is filled
+/// with `die_val` dice and whose falling piece is parked high above the neck (a
+/// near-full structure blocker row), so flushing Bottle completes + clears exactly
+/// that one neck row with no other interference. Returns (game, interior_value).
+fn bottle_neck_row_ready(seed: u64, die_val: u8) -> (Game, i64) {
+    let mut g = Game::new(seed);
+    let (w, h) = (g.board().width, g.board().height);
+    for y in 0..h { for x in 0..w { g.board_mut().set(x, y, None); } }
+    let neck_row = h / 2;
+    let interior: Vec<i32> = (BT_BOTTLE_X..(w - BT_BOTTLE_X)).collect();
+    for &x in &interior {
+        g.board_mut().set(x, neck_row, Some(Cell::die(die_val)));
+    }
+    // Park the falling piece HIGH above the neck: a near-full (one-gap, so never
+    // clears) structure blocker row near the top makes the next lock happen up there.
+    for x in 0..w - 1 {
+        g.board_mut().set(x, 4, Some(Cell::structure()));
+    }
+    // Completed-row value sums over the full width; structure walls add 0, so it's
+    // interior_count * die_val (one line -> funds = value).
+    (g, interior.len() as i64 * die_val as i64)
+}
+
 /// BOTTLE LINE CREDIT (correctness + faithfulness): planting Bottle's neck walls
 /// can COMPLETE a partially filled neck row (the walls supply the flanking cells).
 /// The original (BTBoardManager.C:440 -> checkLines -> :613-615 send BT_FUNDS/BT_LINE)
 /// credits that clear like any other; the Rust board's `apply_weapon` does the
 /// `check_lines` but `apply_weapon_on` MUST forward the funds/lines or they vanish.
-/// Independent oracle: pre-fill ONLY the neck interior of one neck row (so the walls
-/// finish it), flush Bottle, and assert the player banked the value of that cleared
-/// row (value*1) and one line — a `FundsStolen`-conserving amount if Mondale-cursed.
-/// A mutant that discards `Board::apply_weapon`'s returned clear banks 0 and FAILS.
+/// We pin THREE consequences of the credit, so a mutant that discards the clear OR
+/// credits raw funds (skipping `credit_clear_funds`) OR drops the BT_LINE side
+/// effects all FAIL:
+///  (1) un-taxed: the player banks exactly the cleared row's value + one line;
+///  (2) Mondale-cursed: the player keeps floor(70%) and the swiped remainder is
+///      emitted as FundsStolen (conserving) — pins the Mondale-aware crediting;
+///  (3) the BT_LINE the Bottle clear emits ticks OTHER weapon durations (a SoLong
+///      sitting at 1 line remaining expires) — pins the tick_durations side effect.
 #[test]
 fn bottle_wall_planting_completes_a_neck_row_and_credits_the_funds() {
-    let mut g = Game::new(5);
-    let (w, h) = (g.board().width, g.board().height);
-    // Empty the board, then fill exactly the neck interior [BOTTLE_X, w-BOTTLE_X)
-    // of the centre neck row with known-value dice. When Bottle plants the 2*BOTTLE_X
-    // wall cells, this row becomes complete (interior + walls = full width).
-    for y in 0..h { for x in 0..w { g.board_mut().set(x, y, None); } }
-    let neck_row = h / 2;
     let die_val = 4u8;
-    let interior: Vec<i32> = (BT_BOTTLE_X..(w - BT_BOTTLE_X)).collect();
-    for &x in &interior {
-        g.board_mut().set(x, neck_row, Some(Cell::die(die_val)));
-    }
-    // Park the falling piece HIGH ABOVE the neck so it can't disturb our hand-built
-    // neck row: a single non-completing blocker row near the top makes the next lock
-    // happen up there (row ~2), well above the neck (row h/2). It can't complete a
-    // line (one gap), so it earns no funds of its own — the only clear is Bottle's.
-    let blocker_row = 4;
-    for x in 0..w - 1 {
-        g.board_mut().set(x, blocker_row, Some(Cell::structure())); // non-removable: never clears
-    }
-    // The completed row's value is the sum over the FULL width: interior dice +
-    // structure walls (structure value == 0). value = interior_count * die_val.
-    let expected_value = interior.len() as i64 * die_val as i64; // funds = value*1 line
-    let funds_before = g.score().funds;
-    let lines_before = g.score().lines;
+    let neck_row = Game::new(0).board().height / 2;
 
-    // Flush Bottle directly (no falling-piece interference: drive a lock on the now
-    // mostly-empty board; the flush plants the walls and clears the neck row).
-    assert!(receive_and_flush(&mut g, WeaponToken::Bottle), "Bottle active");
+    // (1) UN-TAXED: exact value + one line banked.
+    {
+        let (mut g, value) = bottle_neck_row_ready(5, die_val);
+        let (funds0, lines0) = (g.score().funds, g.score().lines);
+        assert!(receive_and_flush(&mut g, WeaponToken::Bottle), "Bottle active");
+        let interior_after = (BT_BOTTLE_X..(g.board().width - BT_BOTTLE_X))
+            .filter(|&x| g.board().get(x, neck_row).is_some()).count();
+        assert_eq!(interior_after, 0, "Bottle's walls completed + cleared the neck row");
+        assert_eq!(g.score().lines - lines0, 1, "the Bottle-completed row counts as one line");
+        assert_eq!(g.score().funds - funds0, value,
+            "the Bottle-completed row's funds ({value}) must be credited, not discarded");
+    }
 
-    // The neck interior must be CLEARED (the row completed and removed).
-    let interior_after = interior.iter().filter(|&&x| g.board().get(x, neck_row).is_some()).count();
-    assert_eq!(interior_after, 0,
-        "Bottle's walls must have completed + cleared the neck row (interior left: {interior_after})");
-    // And the funds + line for that clear must be banked (not silently dropped).
-    assert_eq!(g.score().lines - lines_before, 1,
-        "the Bottle-completed row must count as one cleared line");
-    assert_eq!(g.score().funds - funds_before, expected_value,
-        "the Bottle-completed row's funds ({expected_value}) must be credited, not discarded");
+    // (2) MONDALE-CURSED: keeps floor(70%), swiped remainder emitted (conserving).
+    {
+        let (mut g, value) = bottle_neck_row_ready(5, die_val);
+        assert!(receive_and_flush(&mut g, WeaponToken::Mondale), "Mondale active");
+        let funds0 = g.score().funds;
+        let kept = (value as f64 * (1.0 - BT_MONDALE_RATE)) as i64;
+        let tax = value - kept;
+
+        g.receive_weapon(WeaponToken::Bottle);
+        g.begin_drop();
+        let (mut stolen, mut locked) = (0i64, false);
+        for _ in 0..1200 {
+            g.tick(16);
+            for e in g.take_events() {
+                match e {
+                    GameEvent::FundsStolen(a) => stolen += a,
+                    GameEvent::Locked { .. } => locked = true,
+                    _ => {}
+                }
+            }
+            if locked || g.is_game_over() { break; }
+        }
+        assert!(locked && g.weapon_active(WeaponToken::Bottle), "Bottle flushed under Mondale");
+        assert_eq!(g.score().funds - funds0, kept,
+            "Mondale must tax the Bottle-completed row too (keep floor(70%)={kept})");
+        assert_eq!(stolen, tax,
+            "the swiped Bottle-clear remainder ({tax}) must be emitted for the attacker (conserving)");
+    }
+
+    // (3) BT_LINE SIDE EFFECT: the Bottle clear ticks other weapon durations. Arm a
+    // SoLong with exactly 1 line remaining; the Bottle-completed line must expire it.
+    {
+        let mut g = Game::new(5);
+        // Activate SoLong, then drain its duration down to 1 via real line clears.
+        assert!(receive_and_flush(&mut g, WeaponToken::SoLong), "SoLong active");
+        let so_dur = weapon_table()[WeaponToken::SoLong.index()].duration as i32;
+        let drained = clear_n_lines(&mut g, so_dur - 1);
+        if g.is_game_over() || drained != so_dur - 1 {
+            return; // the tick side effect is also pinned by the duration-countdown property
+        }
+        assert_eq!(g.weapon_remaining(WeaponToken::SoLong), 1, "SoLong drained to 1 line left");
+
+        // Rebuild the neck-row fixture (clear_n_lines disturbed the board) so the
+        // Bottle flush completes exactly one line — the BT_LINE that ticks SoLong to 0.
+        let (w, h) = (g.board().width, g.board().height);
+        for y in 0..h { for x in 0..w { g.board_mut().set(x, y, None); } }
+        for x in BT_BOTTLE_X..(w - BT_BOTTLE_X) { g.board_mut().set(x, h / 2, Some(Cell::die(die_val))); }
+        for x in 0..w - 1 { g.board_mut().set(x, 4, Some(Cell::structure())); }
+
+        assert!(receive_and_flush(&mut g, WeaponToken::Bottle), "Bottle flushed");
+        assert!(!g.weapon_active(WeaponToken::SoLong),
+            "the Bottle-completed line's BT_LINE must tick SoLong (1 left) to 0 and expire it");
+    }
 }
 
 /// BOTTLE EXPIRY removes the structure walls (revert_weapon clears the neck cells).

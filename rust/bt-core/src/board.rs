@@ -580,9 +580,17 @@ impl Board {
             WeaponToken::FlipOut => self.flip_vert(),
             WeaponToken::FallOut => {
                 // The middle columns "fall out": repeatedly drop the bottom
-                // (or top, if upside-down) line over the non-ledge columns.
+                // (or top, if upside-down) line over the non-ledge columns. The
+                // branch must mirror BTBoardManager.C:414 EXACTLY —
+                // `!BTActive[UPBYSIDE] || computer_` -> bottom (`height-1`), else top
+                // (`0`). A computer board is NEVER visually flipped, so even with
+                // Upbyside active it falls out from the BOTTOM; using a bare `!upside`
+                // here (ignoring `computer`) diverged for AI boards and was the only
+                // upside branch in this file not honoring `computer` (remove_line /
+                // insert_line both do).
+                let from_bottom = !self.is_active(WeaponToken::Upbyside) || self.computer;
                 for _ in 0..self.height {
-                    let line = if !self.upside { self.height - 1 } else { 0 };
+                    let line = if from_bottom { self.height - 1 } else { 0 };
                     self.remove_line(line, BT_FALL_OUT_LEDGE, self.width - BT_FALL_OUT_LEDGE);
                 }
             }
