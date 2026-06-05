@@ -332,6 +332,7 @@ const ARSENAL_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
 // Keys that count as a "gameplay button" for the players-online activity ping.
 const GAMEPLAY_KEYS = new Set([
     'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', ' ', 'Spacebar', 'p', 'P',
+    'w', 'a', 's', 'd', 'W', 'A', 'S', 'D',
     '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
 ]);
 
@@ -1471,21 +1472,29 @@ function handleKeyDown(e) {
     // stray Tab/Shift doesn't mark you "online").
     if (GAMEPLAY_KEYS.has(key)) markActive();
 
-    // Arrow keys and pause
+    // Arrow keys / WASD and pause.
     switch (key) {
         case 'ArrowLeft':
+        case 'a':
+        case 'A':
             e.preventDefault();
             predict('MoveLeft');
             return;
         case 'ArrowRight':
+        case 'd':
+        case 'D':
             e.preventDefault();
             predict('MoveRight');
             return;
         case 'ArrowUp':
+        case 'w':
+        case 'W':
             e.preventDefault();
             predict('Rotate');
             return;
         case 'ArrowDown':
+        case 's':
+        case 'S':
             // Soft drop one cell; holding repeats via the OS key-repeat.
             e.preventDefault();
             predict('SoftDrop');
