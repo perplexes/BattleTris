@@ -4,6 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>BattleTris - Replay Library</title>
+    <script>
+      window.sentryOnLoad = function () {
+        Sentry.init({ sendDefaultPii: true });
+      };
+    </script>
+    <script src="https://js.sentry-cdn.com/9045832ee730ae053d8a3fc0ea812e0c.min.js" crossorigin="anonymous"></script>
     <link rel="stylesheet" href="style.css">
     <link rel="stylesheet" href="motif.css">
 </head>
