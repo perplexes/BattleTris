@@ -11,7 +11,11 @@
 //! netcode under real cross-geo latency (Tokyo→sjc etc.). Two personas (see
 //! [`Persona`]): aggressive **Bert** (the strong line-clearing eval + smart
 //! weapons, timing board-raisers to when its spy reveals the opponent stacked high)
-//! and easy-going **Ernie** (faithful placement, slower, no weapons).
+//! and easy-going **Ernie** (faithful placement, slower, no weapons). A third,
+//! **The Count** (`BT_BOT_PERSONA=count`), roams the lobby issuing directed
+//! challenges — preferring humans, exponential-backing-off anyone who declines, and
+//! dueling the regional bots when it gets bored — and dials its skill to each
+//! opponent's Elo (carried on `matchStart`) to aim for an even match.
 //!
 //! The bot keeps a LOCAL `bt-core::Game` seeded from `matchStart.seed` (the same
 //! deterministic piece stream the server runs for this side) and reconciles it
@@ -23,13 +27,15 @@
 
 use std::time::Duration;
 
-use bt_ai::{best_placement, best_placement_strong};
 use bt_ai::weapons::{buy_plan, launch_choice};
+use bt_ai::{best_placement, best_placement_skill, best_placement_strong, Placement};
 use bt_core::weapons::WeaponToken;
 use bt_core::Game;
 use bt_replay::Input;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -64,6 +70,148 @@ const SPY_FRESH_TICKS: u32 = 300;
 /// this fraction of the board height.
 const OPP_HIGH_FRAC: f64 = 0.6;
 
+// ─── The Count: roaming-challenger tuning ───────────────────────────────────
+/// Issue a challenge attempt at most this often while idle (eager but polite).
+const ROAM_CADENCE: Duration = Duration::from_secs(10);
+/// First backoff after a decline; doubles each further decline, capped.
+const ROAM_BASE_BACKOFF: Duration = Duration::from_secs(60);
+const ROAM_MAX_BACKOFF: Duration = Duration::from_secs(30 * 60);
+/// Don't re-pick a target while a challenge to them is outstanding (the server's
+/// own answer/timeout window is ~30s).
+const ROAM_PENDING_WAIT: Duration = Duration::from_secs(35);
+/// Cooldown on someone we just played, so we don't immediately re-challenge them.
+const ROAM_POST_MATCH: Duration = Duration::from_secs(90);
+/// Roam difficulty: placement pace at skill 0 (slow) vs skill 1 (brisk).
+const ROAM_PLACE_SLOW: i32 = 50; // ~800ms
+const ROAM_PLACE_FAST: i32 = 22; // ~350ms
+/// Skill at/above which the roamer bothers with weapons.
+const ROAM_WEAPON_SKILL: f64 = 0.4;
+
+/// Map an opponent's Elo (server `elo_styled`: ~700 weak, 1000 new, 1700+ strong)
+/// to a skill in [0,1] for [`best_placement_skill`] + the pace/weapon dials.
+fn elo_to_skill(elo: i64) -> f64 {
+    ((elo as f64 - 700.0) / 1000.0).clamp(0.0, 1.0)
+}
+fn roam_place_ticks(skill: f64) -> i32 {
+    (ROAM_PLACE_SLOW as f64 - skill * (ROAM_PLACE_SLOW - ROAM_PLACE_FAST) as f64).round() as i32
+}
+
+/// A potential challenge target, tracked across roster updates.
+struct Target {
+    is_bot: bool,
+    available: bool,
+    /// Earliest time we may (re)challenge — pushed out by exponential backoff.
+    next_eligible: Instant,
+    declines: u32,
+}
+
+/// The Count's roaming state: who's around, who's in backoff, and the outstanding
+/// challenge. Prefers humans; when none are eligible it gets "bored" and duels the
+/// regional bots.
+struct Roam {
+    me: String,
+    targets: HashMap<String, Target>,
+    /// (target, sent-at) of the challenge we're awaiting an answer to.
+    pending: Option<(String, Instant)>,
+    next_attempt: Instant,
+}
+
+impl Roam {
+    fn new(me: String) -> Roam {
+        Roam { me, targets: HashMap::new(), pending: None, next_attempt: Instant::now() }
+    }
+
+    /// Refresh availability + bot flags from a `players` roster frame.
+    fn update_roster(&mut self, players: &[Value]) {
+        for t in self.targets.values_mut() {
+            t.available = false;
+        }
+        let now = Instant::now();
+        for p in players {
+            let name = match p.get("name").and_then(|n| n.as_str()) {
+                Some(n) if n != self.me => n.to_string(),
+                _ => continue,
+            };
+            let available = p.get("status").and_then(|s| s.as_str()) == Some("available");
+            let is_bot = p.get("bot").and_then(|b| b.as_bool()).unwrap_or(false);
+            let t = self.targets.entry(name).or_insert(Target {
+                is_bot,
+                available: false,
+                next_eligible: now,
+                declines: 0,
+            });
+            t.is_bot = is_bot;
+            t.available = available;
+        }
+    }
+
+    /// A challenge was declined (or timed out) by `who`: exponential backoff.
+    fn on_declined(&mut self, who: &str) {
+        self.pending = None;
+        let now = Instant::now();
+        if let Some(t) = self.targets.get_mut(who) {
+            t.declines += 1;
+            let shift = (t.declines - 1).min(20);
+            let backoff = ROAM_BASE_BACKOFF.saturating_mul(1u32 << shift).min(ROAM_MAX_BACKOFF);
+            t.next_eligible = now + backoff;
+        }
+        self.next_attempt = now + Duration::from_secs(2);
+    }
+
+    /// We matched `opp` (they accepted, or challenged us): clear pending + a polite
+    /// post-match cooldown on them, and reset their decline streak.
+    fn on_matched(&mut self, opp: &str) {
+        self.pending = None;
+        if let Some(t) = self.targets.get_mut(opp) {
+            t.declines = 0;
+            t.next_eligible = Instant::now() + ROAM_POST_MATCH;
+        }
+    }
+
+    fn on_match_end(&mut self) {
+        self.next_attempt = Instant::now() + Duration::from_secs(3);
+    }
+
+    /// Pick someone to challenge: an eligible human first, else (bored) a bot.
+    fn pick(&self, now: Instant) -> Option<String> {
+        let mut bot: Option<&String> = None;
+        let mut human: Option<&String> = None;
+        for (name, t) in &self.targets {
+            if !t.available || t.next_eligible > now {
+                continue;
+            }
+            if t.is_bot {
+                bot = bot.or(Some(name));
+            } else {
+                human = human.or(Some(name));
+            }
+        }
+        human.or(bot).cloned()
+    }
+
+    /// Step while idle; returns Some(target) to send a `challenge` to.
+    fn step(&mut self) -> Option<String> {
+        let now = Instant::now();
+        if let Some((_, sent)) = &self.pending {
+            if now.duration_since(*sent) > ROAM_PENDING_WAIT {
+                self.pending = None; // stale; the server already declined on timeout
+            } else {
+                return None;
+            }
+        }
+        if now < self.next_attempt {
+            return None;
+        }
+        self.next_attempt = now + ROAM_CADENCE;
+        let target = self.pick(now)?;
+        if let Some(t) = self.targets.get_mut(&target) {
+            t.next_eligible = now + ROAM_PENDING_WAIT; // hold while outstanding
+        }
+        self.pending = Some((target.clone(), now));
+        Some(target)
+    }
+}
+
 type Out = mpsc::UnboundedSender<Message>;
 
 /// A bot's difficulty + name. **Bert** is the aggressive adversary — the strong
@@ -83,6 +231,9 @@ struct Persona {
     place_ticks: i32,
     /// Buy + launch weapons.
     weapons: bool,
+    /// The Count: a roaming challenger that matches the opponent's rating per match
+    /// (placement/pace/weapons dialed by `skill`, set from `matchStart.opp_elo`).
+    roam: bool,
 }
 
 fn persona() -> Persona {
@@ -93,17 +244,26 @@ fn persona() -> Persona {
         .unwrap_or_default()
         .to_ascii_lowercase();
     match which.as_str() {
+        "count" | "roam" => Persona {
+            suffix: "The Count", // identity() uses this whole string, un-prefixed
+            strong: true,
+            place_ticks: PLACE_INTERVAL_TICKS, // overridden per match by skill
+            weapons: true,
+            roam: true,
+        },
         "bert" | "strong" | "hard" => Persona {
             suffix: "Bert",
             strong: true,
             place_ticks: PLACE_INTERVAL_TICKS,
             weapons: true,
+            roam: false,
         },
         _ => Persona {
             suffix: "Ernie",
             strong: false,
             place_ticks: 44, // ~700ms — slower, more beatable
             weapons: false,
+            roam: false,
         },
     }
 }
@@ -114,6 +274,15 @@ struct MatchState {
     game: Game,
     /// This bot's difficulty/name persona.
     persona: Persona,
+    /// Skill for this match in [0,1] — 1.0 (Bert), 0.0 (Ernie), or rating-matched
+    /// from the opponent's Elo (The Count). Drives placement noise / pace / weapons.
+    skill: f64,
+    /// Ticks between placements this match (from `skill` for roam, else the persona).
+    place_interval: i32,
+    /// Whether weapons are used this match (skill-gated for roam, else the persona).
+    weapons_on: bool,
+    /// xorshift seed for skill-noise (kept off the engine RNG — see best_placement_skill).
+    rng: u64,
     /// Weapons launched this match (for the end-of-match summary log).
     launched: u32,
     /// Ticks lived this match, for a periodic progress log.
@@ -140,13 +309,26 @@ struct MatchState {
 }
 
 impl MatchState {
-    fn new(seed: u64, persona: Persona) -> MatchState {
+    fn new(seed: u64, persona: Persona, opp_elo: i64) -> MatchState {
+        let skill = if persona.roam {
+            elo_to_skill(opp_elo)
+        } else if persona.strong {
+            1.0
+        } else {
+            0.0
+        };
+        let place_interval = if persona.roam { roam_place_ticks(skill) } else { persona.place_ticks };
+        let weapons_on = if persona.roam { skill >= ROAM_WEAPON_SKILL } else { persona.weapons };
         MatchState {
             game: Game::new(seed),
             persona,
+            skill,
+            place_interval,
+            weapons_on,
+            rng: (seed ^ 0x9E37_79B9_7F4A_7C15) | 1, // non-zero xorshift seed
             launched: 0,
             live_ticks: 0,
-            cooldown: persona.place_ticks,
+            cooldown: place_interval,
             in_bazaar: false,
             bazaar_left: false,
             launch_cooldown: LAUNCH_INTERVAL_TICKS,
@@ -183,7 +365,13 @@ fn identity(p: &Persona) -> (String, String) {
         "" => "Local",
         other => other,
     };
-    let name = std::env::var("BT_BOT_NAME").unwrap_or_else(|_| format!("{city}-{}", p.suffix));
+    let name = std::env::var("BT_BOT_NAME").unwrap_or_else(|_| {
+        if p.roam {
+            p.suffix.to_string() // "The Count" — one roamer, not region-tagged
+        } else {
+            format!("{city}-{}", p.suffix)
+        }
+    });
     let geo = std::env::var("BT_BOT_GEO").unwrap_or_else(|_| city.to_string());
     (name, geo)
 }
@@ -258,6 +446,8 @@ async fn run_session(
 
     let mut ms: Option<MatchState> = None;
     let mut seq: u64 = 0; // monotonic across the whole connection (always > a fresh bout's ack=0)
+    // The Count's roaming state (None for the fixed personas).
+    let mut roam: Option<Roam> = if persona.roam { Some(Roam::new(name.to_string())) } else { None };
 
     let mut ticker = tokio::time::interval(Duration::from_millis(TICK_MS as u64));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -272,7 +462,7 @@ async fn run_session(
                     None => break, // server closed
                 };
                 match msg {
-                    Message::Text(t) => handle_text(&t, &out, &mut ms, persona),
+                    Message::Text(t) => handle_text(&t, &out, &mut ms, persona, &mut roam),
                     Message::Ping(p) => { let _ = out.send(Message::Pong(p)); }
                     Message::Close(_) => break,
                     _ => {}
@@ -287,10 +477,21 @@ async fn run_session(
                             state.game.score().lines, state.launched
                         );
                         ms = None;
+                        if let Some(r) = roam.as_mut() {
+                            r.on_match_end();
+                        }
                         // Back to Available for the next challenger. (The server
                         // already resets us to Available at bout end; this also
-                        // refreshes the geo/bot tags.)
+                        // refreshes the bot tag.)
                         let _ = out.send(available_msg(name, geo, &token));
+                    }
+                } else if let Some(r) = roam.as_mut() {
+                    // Idle + roaming: maybe fire off a directed challenge.
+                    if let Some(target) = r.step() {
+                        println!("[The Count] challenging {target}");
+                        let _ = out.send(Message::Text(
+                            json!({ "type": "challenge", "target": target }).to_string(),
+                        ));
                     }
                 }
             }
@@ -304,7 +505,13 @@ async fn run_session(
 }
 
 /// Dispatch one server→bot text frame.
-fn handle_text(text: &str, out: &Out, ms: &mut Option<MatchState>, persona: Persona) {
+fn handle_text(
+    text: &str,
+    out: &Out,
+    ms: &mut Option<MatchState>,
+    persona: Persona,
+    roam: &mut Option<Roam>,
+) {
     let v: Value = match serde_json::from_str(text) {
         Ok(v) => v,
         Err(_) => return,
@@ -317,12 +524,38 @@ fn handle_text(text: &str, out: &Out, ms: &mut Option<MatchState>, persona: Pers
                 json!({ "type": "challengeAccept", "from": from }).to_string(),
             ));
         }
-        // The match is starting: seed a fresh local sim for our side.
+        // The match is starting: seed a fresh local sim for our side. The Count dials
+        // its difficulty to the opponent's Elo (carried on matchStart).
         Some("matchStart") => {
             let seed = v.get("seed").and_then(|s| s.as_u64()).unwrap_or(0);
-            let opp = v.get("opponent").and_then(|o| o.as_str()).unwrap_or("?");
-            println!("matchStart vs {opp} (seed {seed})");
-            *ms = Some(MatchState::new(seed, persona));
+            let opp = v.get("opponent").and_then(|o| o.as_str()).unwrap_or("?").to_string();
+            let opp_elo = v.get("opp_elo").and_then(|e| e.as_i64()).unwrap_or(1000);
+            let st = MatchState::new(seed, persona, opp_elo);
+            if persona.roam {
+                println!(
+                    "matchStart vs {opp} (elo {opp_elo} -> skill {:.2}, seed {seed})",
+                    st.skill
+                );
+            } else {
+                println!("matchStart vs {opp} (seed {seed})");
+            }
+            if let Some(r) = roam.as_mut() {
+                r.on_matched(&opp);
+            }
+            *ms = Some(st);
+        }
+        // Lobby roster: The Count tracks who's around (+ bot flags) to challenge.
+        Some("players") => {
+            if let (Some(r), Some(arr)) = (roam.as_mut(), v.get("players").and_then(|p| p.as_array())) {
+                r.update_roster(arr);
+            }
+        }
+        // Our challenge was declined (or timed out) — exponential backoff on them.
+        Some("challengeDeclined") => {
+            if let Some(r) = roam.as_mut() {
+                let by = v.get("by").and_then(|b| b.as_str()).unwrap_or("");
+                r.on_declined(by);
+            }
         }
         // Authoritative frame: track result + bazaar, and reconcile on keyframes.
         Some("snapshot") => {
@@ -413,9 +646,9 @@ fn drive_tick(state: &mut MatchState, out: &Out, seq: &mut u64) {
         return; // wait for the authoritative result to end the match
     }
 
-    // Launch a weapon on a cadence (Ernie only) — a spy first (for intel),
-    // board-raisers when the opponent is high, harassment/fund-drains otherwise.
-    if state.persona.weapons {
+    // Launch a weapon on a cadence (when this match uses weapons) — a spy first (for
+    // intel), board-raisers when the opponent is high, harassment/fund-drains else.
+    if state.weapons_on {
         state.launch_cooldown -= 1;
         if state.launch_cooldown <= 0 {
             let arsenal = arsenal_of(&state.game);
@@ -434,8 +667,19 @@ fn drive_tick(state: &mut MatchState, out: &Out, seq: &mut u64) {
         state.cooldown -= 1;
         return;
     }
-    play_piece(&mut state.game, out, seq, state.persona.strong);
-    state.cooldown = state.persona.place_ticks;
+    // Pick the placement per this match's difficulty: roam uses the skill-noised eval,
+    // Bert the strong eval, Ernie the faithful one.
+    if let Some(p) = state.game.current_piece().cloned() {
+        let pl = if state.persona.roam {
+            best_placement_skill(state.game.board(), &p, state.skill, &mut state.rng)
+        } else if state.persona.strong {
+            best_placement_strong(state.game.board(), &p)
+        } else {
+            best_placement(state.game.board(), &p)
+        };
+        play_piece(&mut state.game, out, seq, pl);
+    }
+    state.cooldown = state.place_interval;
 }
 
 /// The local arsenal as the ten protocol token indices (-1 = empty slot).
@@ -452,7 +696,7 @@ fn arsenal_of(game: &Game) -> [i32; 10] {
 /// lifts. Only buys the engine accepts are forwarded, keeping the sim in sync and
 /// avoiding a stream of rejected inputs.
 fn shop_bazaar(state: &mut MatchState, out: &Out, seq: &mut u64) {
-    if state.game.is_in_bazaar() && state.persona.weapons {
+    if state.game.is_in_bazaar() && state.weapons_on {
         let funds = state.game.score().funds;
         let arsenal = arsenal_of(&state.game);
         let carter = state.game.weapon_active(WeaponToken::Carter);
@@ -502,18 +746,12 @@ fn opponent_is_high(grid: &[i32], w: i32, h: i32) -> bool {
 /// Mirrors `bt_ai::Computer::take_turn` but emits the moves over the wire
 /// instead of only mutating locally. All loops are bounded, so a blocked piece
 /// just drops where it is rather than spinning.
-fn play_piece(game: &mut Game, out: &Out, seq: &mut u64, strong: bool) {
-    let (target_x, target_or, rot_cap) = match game.current_piece() {
-        Some(p) => {
-            let pl = if strong {
-                best_placement_strong(game.board(), p)
-            } else {
-                best_placement(game.board(), p)
-            };
-            (pl.x, pl.orientation, p.orientations.max(1))
-        }
+fn play_piece(game: &mut Game, out: &Out, seq: &mut u64, pl: Placement) {
+    let rot_cap = match game.current_piece() {
+        Some(p) => p.orientations.max(1),
         None => return,
     };
+    let (target_x, target_or) = (pl.x, pl.orientation);
 
     // Rotate to the target orientation (first, like take_turn).
     for _ in 0..rot_cap {

@@ -294,16 +294,16 @@ fn maybe_broadcast_stats(app: &mut App) {
     }
 }
 
-/// One de-duped lobby row: (name, busiest status, optional ping RTT in ms). The
-/// ping is bucketed to 10ms so normal jitter doesn't spam roster re-broadcasts.
-type RosterEntry = (String, Status, Option<u32>);
+/// One de-duped lobby row: (name, busiest status, optional ping RTT in ms, is_bot).
+/// The ping is bucketed to 10ms so normal jitter doesn't spam roster re-broadcasts.
+type RosterEntry = (String, Status, Option<u32>, bool);
 
 /// The de-duped lobby roster: one entry per *named* client, keeping the
 /// most-engaged status when a name has several connections (e.g. two tabs).
 /// Sorted by name so the broadcast-on-change comparison is order-stable.
 fn roster(app: &App) -> Vec<RosterEntry> {
     let bucket = |p: Option<u32>| p.map(|ms| (ms + 5) / 10 * 10);
-    let mut by_name: HashMap<String, (Status, Option<u32>)> = HashMap::new();
+    let mut by_name: HashMap<String, (Status, Option<u32>, bool)> = HashMap::new();
     for c in app.clients.values() {
         let (name, status) = match (c.name.as_str(), c.status) {
             (n, Some(s)) if !n.is_empty() => (n.to_string(), s),
@@ -312,29 +312,35 @@ fn roster(app: &App) -> Vec<RosterEntry> {
         by_name
             .entry(name)
             .and_modify(|cur| {
-                // Keep the busiest connection's status; carry its ping with it.
+                // Keep the busiest connection's status; carry its ping + bot flag.
                 if status.rank() > cur.0.rank() {
-                    *cur = (status, bucket(c.ping_ms));
+                    *cur = (status, bucket(c.ping_ms), c.is_bot);
                 }
             })
-            .or_insert((status, bucket(c.ping_ms)));
+            .or_insert((status, bucket(c.ping_ms), c.is_bot));
     }
-    let mut out: Vec<RosterEntry> =
-        by_name.into_iter().map(|(name, (status, ping))| (name, status, ping)).collect();
+    let mut out: Vec<RosterEntry> = by_name
+        .into_iter()
+        .map(|(name, (status, ping, bot))| (name, status, ping, bot))
+        .collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
 }
 
 /// The `players` presence frame the lobby renders. Each entry carries an optional
-/// `ping` (round-trip latency in ms) — shown next to the name so a visitor can see
-/// how laggy a match against that player would be.
+/// `ping` (round-trip latency in ms — shown next to the name) and, for bots, a
+/// `bot:true` flag (the lobby ignores it; the roaming Count uses it to prefer
+/// challenging humans).
 fn players_msg(roster: &[RosterEntry]) -> Value {
     let players: Vec<Value> = roster
         .iter()
-        .map(|(name, status, ping)| {
+        .map(|(name, status, ping, bot)| {
             let mut o = json!({ "name": name, "status": status.as_str() });
             if let Some(p) = ping {
                 o["ping"] = json!(p);
+            }
+            if *bot {
+                o["bot"] = json!(true);
             }
             o
         })
@@ -555,8 +561,12 @@ fn start_bout(app: &mut App, a: u64, b: u64, quality: Option<f64>) -> Option<Pen
     }
     // quality is optional in the wire frame; a directed challenge omits it.
     let qv = quality.map(|q| json!(q)).unwrap_or(Value::Null);
-    send(app, a, &json!({"type":"matchStart","side":"A","seed":seed_a,"opponent":b_name,"quality":qv}));
-    send(app, b, &json!({"type":"matchStart","side":"B","seed":seed_b,"opponent":a_name,"quality":qv}));
+    // Each side's matchStart carries the OPPONENT's Elo, so a rating-matched bot
+    // (The Count) can dial its difficulty to the player it's facing.
+    let a_elo = elo_styled(a_state.rating.conservative(3.0));
+    let b_elo = elo_styled(b_state.rating.conservative(3.0));
+    send(app, a, &json!({"type":"matchStart","side":"A","seed":seed_a,"opponent":b_name,"opp_elo":b_elo,"quality":qv}));
+    send(app, b, &json!({"type":"matchStart","side":"B","seed":seed_b,"opponent":a_name,"opp_elo":a_elo,"quality":qv}));
     match quality {
         Some(q) => println!("authoritative match {a} <-> {b} (quality {q:.3})"),
         None => println!("authoritative challenge match {a} <-> {b}"),
@@ -935,6 +945,8 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
             }
             let target = v.get("target").and_then(|t| t.as_str()).unwrap_or("").to_string();
             match find_named_available(&app, &target) {
+                // NB bots CAN be challenged (The Count duels the regional bots when it
+                // gets bored of humans); only auto-pairing two bots is blocked.
                 Some(tid) if tid != id => {
                     let deadline = Instant::now() + CHALLENGE_TIMEOUT;
                     app.challenges.insert(id, (tid, deadline));
@@ -2226,7 +2238,7 @@ mod tests {
         set_present(&mut app, 2, Status::InGame);
         let r = roster(&app);
         assert_eq!(r.len(), 1, "de-duped by name");
-        assert_eq!(r[0], ("dup".to_string(), Status::InGame, None), "the busiest status wins");
+        assert_eq!(r[0], ("dup".to_string(), Status::InGame, None, false), "the busiest status wins");
     }
 
     #[test]

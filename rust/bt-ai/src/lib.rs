@@ -392,6 +392,46 @@ pub fn best_placement_strong(board: &Board, piece: &Piece) -> Placement {
     best
 }
 
+/// How much noise a skill of 0 adds to each candidate's strong-eval score. Tuned so
+/// skill≈0 plays roughly like (or a touch below) faithful Ernie and skill 1 is the
+/// full strong eval — a smooth difficulty dial for the rating-matched roaming bot.
+const SKILL_NOISE_SCALE: f64 = 8.0;
+
+/// A tiny xorshift step → a float in [0,1). Used ONLY for the skill-noise above, so
+/// it stays out of the engine's deterministic piece RNG (mixing them would desync
+/// the bot's predicted board from the server's). Seed must be non-zero.
+fn xorshift01(state: &mut u64) -> f64 {
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *state = x;
+    ((x >> 11) as f64) / ((1u64 << 53) as f64)
+}
+
+/// Skill-scaled placement for a rating-matched bot. `skill` ∈ [0,1]: 1.0 returns the
+/// strong best; lower skill adds proportional noise to each candidate's score so the
+/// bot increasingly settles for a plausible-but-worse landing (a weaker opponent).
+/// `rng` is a caller-owned xorshift seed, NOT the engine RNG.
+pub fn best_placement_skill(board: &Board, piece: &Piece, skill: f64, rng: &mut u64) -> Placement {
+    let skill = skill.clamp(0.0, 1.0);
+    if skill >= 0.999 {
+        return best_placement_strong(board, piece);
+    }
+    let noise_amp = (1.0 - skill) * SKILL_NOISE_SCALE;
+    let mut best_score = f64::MIN;
+    let mut best = Placement { x: piece.x, orientation: 0 };
+    for_each_landing(board, piece, |pl, b, lines| {
+        let n = (xorshift01(rng) - 0.5) * 2.0 * noise_amp;
+        let score = eval_board_strong(b, lines) + n;
+        if score > best_score {
+            best_score = score;
+            best = pl;
+        }
+    });
+    best
+}
+
 /// Enumerate every valid hard-drop landing of `piece` on `board` in the faithful
 /// centre-out order (`def_x_=5`, right-before-left), calling
 /// `visit(placement, &landed_board, lines_cleared)` for each. `landed_board` has the
@@ -679,6 +719,63 @@ mod tests {
             strong_total > ernie_total,
             "strong eval should clear more lines (strong {strong_total} vs ernie {ernie_total})"
         );
+    }
+
+    /// Drive a solo Game at a given skill (the rating-matched dial), returning lines.
+    fn play_solo_skill(skill: f64, seed: u64, max_pieces: usize) -> i64 {
+        use bt_core::game::GameEvent;
+        let mut g = Game::new(seed);
+        let mut rng: u64 = (seed ^ 0x9E37_79B9_7F4A_7C15) | 1; // non-zero xorshift seed
+        let mut placed = 0usize;
+        let mut committed = false;
+        let mut guard = 0usize;
+        let limit = max_pieces * 400;
+        while placed < max_pieces && !g.is_game_over() && guard < limit {
+            guard += 1;
+            if g.is_in_bazaar() {
+                g.leave_bazaar();
+            }
+            if !committed {
+                if let Some(p) = g.current_piece().cloned() {
+                    let pl = best_placement_skill(g.board(), &p, skill, &mut rng);
+                    for _ in 0..p.orientations.max(1) {
+                        match g.current_piece() {
+                            Some(cp) if cp.orientation != pl.orientation => g.rotate(),
+                            _ => break,
+                        }
+                    }
+                    for _ in 0..g.board().width * 2 {
+                        match g.current_piece().map(|cp| cp.x) {
+                            Some(x) if x < pl.x => g.move_right(),
+                            Some(x) if x > pl.x => g.move_left(),
+                            _ => break,
+                        }
+                    }
+                    g.ai_begin_drop();
+                    committed = true;
+                }
+            }
+            g.tick(16);
+            if g.take_events().iter().any(|e| matches!(e, GameEvent::Locked { .. })) {
+                committed = false;
+                placed += 1;
+            }
+        }
+        g.score().lines
+    }
+
+    #[test]
+    fn skill_dial_scales_line_clearing_monotonically() {
+        let seeds = [1u64, 7, 42, 100, 2024];
+        let mut totals = [0i64; 3]; // skill 1.0, 0.5, 0.1
+        for &seed in &seeds {
+            totals[0] += play_solo_skill(1.0, seed, 200);
+            totals[1] += play_solo_skill(0.5, seed, 200);
+            totals[2] += play_solo_skill(0.1, seed, 200);
+        }
+        println!("skill 1.0: {}  0.5: {}  0.1: {}", totals[0], totals[1], totals[2]);
+        assert!(totals[0] > totals[1], "skill 1.0 ({}) > 0.5 ({})", totals[0], totals[1]);
+        assert!(totals[1] > totals[2], "skill 0.5 ({}) > 0.1 ({})", totals[1], totals[2]);
     }
 
     // --- best_placement tests -----------------------------------------------

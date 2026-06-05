@@ -6,9 +6,10 @@
 # FLY_PROCESS_GROUP for its persona + FLY_REGION for its city, so one image yields
 # e.g. Tokyo-Bert and Tokyo-Ernie per region.
 #
-# Deploy + place one of each persona per region:
+# Deploy + place the bots (Bert + Ernie per region, one roaming Count in sjc):
 #   fly deploy -c fly.bots.toml --dockerfile Dockerfile.bot --remote-only
-#   fly scale count bert=1 ernie=1 --region nrt,lhr,gru,syd,sjc -a battletris-bots
+#   fly scale count bert=1 ernie=1 --region nrt,lhr,gru,syd,sjc --max-per-region 1 -a battletris-bots
+#   fly scale count count=1 --region sjc -a battletris-bots
 #
 # Requires the SAME BT_JWT_SECRET as the server so the bots' self-minted tokens
 # verify:  fly secrets set BT_JWT_SECRET=<value> -a battletris-bots
@@ -18,10 +19,12 @@ primary_region = "sjc"
 [build]
   dockerfile = "Dockerfile.bot"
 
-# Two personas, same image; the bot reads FLY_PROCESS_GROUP ("bert"/"ernie").
+# Three personas, same image; the bot reads FLY_PROCESS_GROUP ("bert"/"ernie"/"count").
+# `count` = The Count, the rating-matched roaming challenger (one, in sjc).
 [processes]
   bert = "/app/bt-bot"
   ernie = "/app/bt-bot"
+  count = "/app/bt-bot"
 
 [env]
   # The server over fly's private network (plaintext ws, real cross-geo latency).
