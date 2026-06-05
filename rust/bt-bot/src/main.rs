@@ -23,7 +23,7 @@
 
 use std::time::Duration;
 
-use bt_ai::best_placement_strong;
+use bt_ai::{best_placement, best_placement_strong};
 use bt_ai::weapons::{buy_plan, launch_choice};
 use bt_core::weapons::WeaponToken;
 use bt_core::Game;
@@ -66,10 +66,51 @@ const OPP_HIGH_FRAC: f64 = 0.6;
 
 type Out = mpsc::UnboundedSender<Message>;
 
+/// A bot's difficulty + name. **Ernie** (default) is the strong adversary — the
+/// line-clearing eval plus smart weapons. **Bert** (`BT_BOT_PERSONA=bert`) is the
+/// gentle one for new visitors: faithful Ernie's weaker placement, a slower pace,
+/// and no weapons. (Bert & Ernie. Naturally.)
+#[derive(Clone, Copy)]
+struct Persona {
+    /// Name suffix, e.g. "Ernie" → "Tokyo-Ernie".
+    suffix: &'static str,
+    /// Use the strong line-clearing eval (vs faithful Ernie's weaker placement).
+    strong: bool,
+    /// Ticks between placements (lower = faster).
+    place_ticks: i32,
+    /// Buy + launch weapons.
+    weapons: bool,
+}
+
+fn persona() -> Persona {
+    match std::env::var("BT_BOT_PERSONA")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "bert" | "easy" => Persona {
+            suffix: "Bert",
+            strong: false,
+            place_ticks: 44, // ~700ms — slower, more beatable
+            weapons: false,
+        },
+        _ => Persona {
+            suffix: "Ernie",
+            strong: true,
+            place_ticks: PLACE_INTERVAL_TICKS,
+            weapons: true,
+        },
+    }
+}
+
 /// Per-match local state: our predicted board plus the placement pacer and the
 /// bazaar gate.
 struct MatchState {
     game: Game,
+    /// This bot's difficulty/name persona.
+    persona: Persona,
+    /// Weapons launched this match (for the end-of-match summary log).
+    launched: u32,
     /// Ticks until the next placement (paces the bot to a human-ish speed).
     cooldown: i32,
     /// Authoritative "you are in the bazaar" from the latest snapshot — while
@@ -92,10 +133,12 @@ struct MatchState {
 }
 
 impl MatchState {
-    fn new(seed: u64) -> MatchState {
+    fn new(seed: u64, persona: Persona) -> MatchState {
         MatchState {
             game: Game::new(seed),
-            cooldown: PLACE_INTERVAL_TICKS,
+            persona,
+            launched: 0,
+            cooldown: persona.place_ticks,
             in_bazaar: false,
             bazaar_left: false,
             launch_cooldown: LAUNCH_INTERVAL_TICKS,
@@ -111,7 +154,7 @@ impl MatchState {
 /// `BT_BOT_GEO` win; otherwise derive a friendly city from fly's `FLY_REGION`
 /// (auto-set per machine), so one image deployed across regions yields one
 /// distinctly-named bot per region.
-fn identity() -> (String, String) {
+fn identity(p: &Persona) -> (String, String) {
     let region = std::env::var("FLY_REGION").unwrap_or_default();
     let city = match region.as_str() {
         "nrt" => "Tokyo",
@@ -132,7 +175,7 @@ fn identity() -> (String, String) {
         "" => "Local",
         other => other,
     };
-    let name = std::env::var("BT_BOT_NAME").unwrap_or_else(|_| format!("{city}-Ernie"));
+    let name = std::env::var("BT_BOT_NAME").unwrap_or_else(|_| format!("{city}-{}", p.suffix));
     let geo = std::env::var("BT_BOT_GEO").unwrap_or_else(|_| city.to_string());
     (name, geo)
 }
@@ -141,8 +184,12 @@ fn identity() -> (String, String) {
 async fn main() {
     let ws_url =
         std::env::var("BT_BOT_WS").unwrap_or_else(|_| "ws://127.0.0.1:8088/ws".to_string());
-    let (name, geo) = identity();
-    println!("bt-bot up: name={name:?} geo={geo:?} server={ws_url}");
+    let persona = persona();
+    let (name, geo) = identity(&persona);
+    println!(
+        "bt-bot up: name={name:?} geo={geo:?} server={ws_url} (strong={}, weapons={})",
+        persona.strong, persona.weapons
+    );
     if std::env::var("BT_JWT_SECRET").map(|s| s.is_empty()).unwrap_or(true) {
         eprintln!(
             "warning: BT_JWT_SECRET is unset — the minted token will only be \
@@ -151,7 +198,7 @@ async fn main() {
         );
     }
     loop {
-        match run_session(&ws_url, &name, &geo).await {
+        match run_session(&ws_url, &name, &geo, persona).await {
             Ok(()) => println!("session closed; reconnecting"),
             Err(e) => eprintln!("session error: {e}; reconnecting"),
         }
@@ -163,10 +210,16 @@ async fn main() {
 /// auto-pairable, tagged as a bot with our geo. We re-mint the token each
 /// connect so it stays valid across server restarts.
 fn available_msg(name: &str, geo: &str, token: &str) -> Message {
+    // Announce as a bot (so two bots never auto-pair) UNLESS BT_BOT_ANNOUNCE_BOT is
+    // set falsey — a testing escape hatch to run a bot as a sparring "human" that
+    // DOES auto-pair against another bot (e.g. a local Bert-vs-Ernie match).
+    let bot = std::env::var("BT_BOT_ANNOUNCE_BOT")
+        .map(|v| !matches!(v.as_str(), "false" | "0" | "no"))
+        .unwrap_or(true);
     Message::Text(
         json!({
             "type": "available", "value": true,
-            "name": name, "geo": geo, "bot": true, "token": token,
+            "name": name, "geo": geo, "bot": bot, "token": token,
         })
         .to_string(),
     )
@@ -176,6 +229,7 @@ async fn run_session(
     ws_url: &str,
     name: &str,
     geo: &str,
+    persona: Persona,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let token = bt_identity::issue_token(name);
     let (ws, _resp) = tokio_tungstenite::connect_async(ws_url).await?;
@@ -210,7 +264,7 @@ async fn run_session(
                     None => break, // server closed
                 };
                 match msg {
-                    Message::Text(t) => handle_text(&t, &out, &mut ms),
+                    Message::Text(t) => handle_text(&t, &out, &mut ms, persona),
                     Message::Ping(p) => { let _ = out.send(Message::Pong(p)); }
                     Message::Close(_) => break,
                     _ => {}
@@ -220,6 +274,10 @@ async fn run_session(
                 if let Some(state) = ms.as_mut() {
                     drive_tick(state, &out, &mut seq);
                     if state.done {
+                        println!(
+                            "match over — {name}: {} lines cleared, {} weapons launched",
+                            state.game.score().lines, state.launched
+                        );
                         ms = None;
                         // Back to Available for the next challenger. (The server
                         // already resets us to Available at bout end; this also
@@ -238,7 +296,7 @@ async fn run_session(
 }
 
 /// Dispatch one server→bot text frame.
-fn handle_text(text: &str, out: &Out, ms: &mut Option<MatchState>) {
+fn handle_text(text: &str, out: &Out, ms: &mut Option<MatchState>, persona: Persona) {
     let v: Value = match serde_json::from_str(text) {
         Ok(v) => v,
         Err(_) => return,
@@ -256,7 +314,7 @@ fn handle_text(text: &str, out: &Out, ms: &mut Option<MatchState>) {
             let seed = v.get("seed").and_then(|s| s.as_u64()).unwrap_or(0);
             let opp = v.get("opponent").and_then(|o| o.as_str()).unwrap_or("?");
             println!("matchStart vs {opp} (seed {seed})");
-            *ms = Some(MatchState::new(seed));
+            *ms = Some(MatchState::new(seed, persona));
         }
         // Authoritative frame: track result + bazaar, and reconcile on keyframes.
         Some("snapshot") => {
@@ -335,17 +393,20 @@ fn drive_tick(state: &mut MatchState, out: &Out, seq: &mut u64) {
         return; // wait for the authoritative result to end the match
     }
 
-    // Launch a weapon on a cadence — a spy first (for intel), board-raisers when the
-    // opponent is high, harassment/fund-drains otherwise (see `bt_ai::weapons`).
-    state.launch_cooldown -= 1;
-    if state.launch_cooldown <= 0 {
-        let arsenal = arsenal_of(&state.game);
-        let spy_active = state.spy_fresh > 0;
-        if let Some(slot) = launch_choice(&arsenal, spy_active, state.opp_high) {
-            send_input(&mut state.game, out, seq, Input::LaunchWeapon(slot as u32));
-            state.launch_cooldown = LAUNCH_INTERVAL_TICKS;
-        } else {
-            state.launch_cooldown = LAUNCH_RETRY_TICKS;
+    // Launch a weapon on a cadence (Ernie only) — a spy first (for intel),
+    // board-raisers when the opponent is high, harassment/fund-drains otherwise.
+    if state.persona.weapons {
+        state.launch_cooldown -= 1;
+        if state.launch_cooldown <= 0 {
+            let arsenal = arsenal_of(&state.game);
+            let spy_active = state.spy_fresh > 0;
+            if let Some(slot) = launch_choice(&arsenal, spy_active, state.opp_high) {
+                send_input(&mut state.game, out, seq, Input::LaunchWeapon(slot as u32));
+                state.launched += 1;
+                state.launch_cooldown = LAUNCH_INTERVAL_TICKS;
+            } else {
+                state.launch_cooldown = LAUNCH_RETRY_TICKS;
+            }
         }
     }
 
@@ -353,8 +414,8 @@ fn drive_tick(state: &mut MatchState, out: &Out, seq: &mut u64) {
         state.cooldown -= 1;
         return;
     }
-    play_piece(&mut state.game, out, seq);
-    state.cooldown = PLACE_INTERVAL_TICKS;
+    play_piece(&mut state.game, out, seq, state.persona.strong);
+    state.cooldown = state.persona.place_ticks;
 }
 
 /// The local arsenal as the ten protocol token indices (-1 = empty slot).
@@ -371,7 +432,7 @@ fn arsenal_of(game: &Game) -> [i32; 10] {
 /// lifts. Only buys the engine accepts are forwarded, keeping the sim in sync and
 /// avoiding a stream of rejected inputs.
 fn shop_bazaar(state: &mut MatchState, out: &Out, seq: &mut u64) {
-    if state.game.is_in_bazaar() {
+    if state.game.is_in_bazaar() && state.persona.weapons {
         let funds = state.game.score().funds;
         let arsenal = arsenal_of(&state.game);
         let carter = state.game.weapon_active(WeaponToken::Carter);
@@ -421,10 +482,14 @@ fn opponent_is_high(grid: &[i32], w: i32, h: i32) -> bool {
 /// Mirrors `bt_ai::Computer::take_turn` but emits the moves over the wire
 /// instead of only mutating locally. All loops are bounded, so a blocked piece
 /// just drops where it is rather than spinning.
-fn play_piece(game: &mut Game, out: &Out, seq: &mut u64) {
+fn play_piece(game: &mut Game, out: &Out, seq: &mut u64, strong: bool) {
     let (target_x, target_or, rot_cap) = match game.current_piece() {
         Some(p) => {
-            let pl = best_placement_strong(game.board(), p);
+            let pl = if strong {
+                best_placement_strong(game.board(), p)
+            } else {
+                best_placement(game.board(), p)
+            };
             (pl.x, pl.orientation, p.orientations.max(1))
         }
         None => return,
