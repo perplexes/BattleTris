@@ -111,6 +111,8 @@ struct MatchState {
     persona: Persona,
     /// Weapons launched this match (for the end-of-match summary log).
     launched: u32,
+    /// Ticks lived this match, for a periodic progress log.
+    live_ticks: u32,
     /// Ticks until the next placement (paces the bot to a human-ish speed).
     cooldown: i32,
     /// Authoritative "you are in the bazaar" from the latest snapshot — while
@@ -138,6 +140,7 @@ impl MatchState {
             game: Game::new(seed),
             persona,
             launched: 0,
+            live_ticks: 0,
             cooldown: persona.place_ticks,
             in_bazaar: false,
             bazaar_left: false,
@@ -370,6 +373,18 @@ fn drive_tick(state: &mut MatchState, out: &Out, seq: &mut u64) {
         state.done = true;
         return;
     }
+    // Periodic progress log (~every 12s) so a long match still shows lines cleared
+    // and weapons fired without waiting for a top-out.
+    state.live_ticks += 1;
+    if state.live_ticks % 750 == 0 {
+        println!(
+            "[{}] progress: {} lines, {} weapons launched",
+            state.persona.suffix,
+            state.game.score().lines,
+            state.launched
+        );
+    }
+
     // Spy intel ages out between keyframes — once it lapses we're blind again.
     if state.spy_fresh > 0 {
         state.spy_fresh -= 1;
