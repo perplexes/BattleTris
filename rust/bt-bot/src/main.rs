@@ -8,8 +8,10 @@
 //!
 //! Why: it populates the lobby so a fresh visitor always has someone to play,
 //! and — deployed one-per-fly-region over the private 6PN network — it exercises
-//! the netcode under real cross-geo latency (Tokyo→sjc etc.). It is NOT a smart
-//! adversary: it hard-drops each piece at a steady pace and skips weapons.
+//! the netcode under real cross-geo latency (Tokyo→sjc etc.). It places pieces with
+//! the strong line-clearing eval ([`best_placement_strong`], NOT faithful Ernie),
+//! shops the bazaar, and launches weapons — timing board-raisers to when its spy
+//! reveals the opponent stacked high (see [`bt_ai::weapons`]).
 //!
 //! The bot keeps a LOCAL `bt-core::Game` seeded from `matchStart.seed` (the same
 //! deterministic piece stream the server runs for this side) and reconciles it
@@ -21,7 +23,9 @@
 
 use std::time::Duration;
 
-use bt_ai::best_placement;
+use bt_ai::best_placement_strong;
+use bt_ai::weapons::{buy_plan, launch_choice};
+use bt_core::weapons::WeaponToken;
 use bt_core::Game;
 use bt_replay::Input;
 use futures_util::{SinkExt, StreamExt};
@@ -46,6 +50,19 @@ const ACTIVE_PING: Duration = Duration::from_secs(20);
 const STALE_TICKS: u32 = 150;
 /// How long to wait before reconnecting after the socket drops.
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
+/// Try to launch a weapon about this often (~1.9s) — frequent enough to spend the
+/// arsenal, spaced enough to be watchable and not waste duration weapons.
+const LAUNCH_INTERVAL_TICKS: i32 = 120;
+/// When `launch_choice` has nothing worth firing, re-check sooner than a full
+/// interval (we may have just bought weapons or activated a spy).
+const LAUNCH_RETRY_TICKS: i32 = 30;
+/// A spy_board ride only on keyframes, so treat the spy (and its opponent-board
+/// reveal) as "fresh" for this many ticks after each one; when it lapses without a
+/// refresh, the spy has expired and we fall back to spy-less launching.
+const SPY_FRESH_TICKS: u32 = 300;
+/// The opponent is "high" (worth a board-raiser) once their stack fills at least
+/// this fraction of the board height.
+const OPP_HIGH_FRAC: f64 = 0.6;
 
 type Out = mpsc::UnboundedSender<Message>;
 
@@ -58,8 +75,15 @@ struct MatchState {
     /// Authoritative "you are in the bazaar" from the latest snapshot — while
     /// set, play is frozen server-side, so we just leave the bazaar and wait.
     in_bazaar: bool,
-    /// Did we already send the one LeaveBazaar for this bazaar visit?
+    /// Did we already shop (buy + LeaveBazaar) for this bazaar visit?
     bazaar_left: bool,
+    /// Ticks until the next weapon-launch attempt.
+    launch_cooldown: i32,
+    /// Ticks of remaining "spy intel" — refreshed whenever a `spy_board` arrives;
+    /// while > 0 we have a live read on the opponent's board (`opp_high`).
+    spy_fresh: u32,
+    /// Latest read of "opponent stacked high" from a spy reveal (false when blind).
+    opp_high: bool,
     /// Set when a snapshot reports a result (win/loss) — the match is over.
     done: bool,
     /// Ticks since the last snapshot; if it crosses [`STALE_TICKS`] the opponent
@@ -74,6 +98,9 @@ impl MatchState {
             cooldown: PLACE_INTERVAL_TICKS,
             in_bazaar: false,
             bazaar_left: false,
+            launch_cooldown: LAUNCH_INTERVAL_TICKS,
+            spy_fresh: 0,
+            opp_high: false,
             done: false,
             idle_ticks: 0,
         }
@@ -255,6 +282,17 @@ fn handle_text(text: &str, out: &Out, ms: &mut Option<MatchState>) {
                         arr.iter().filter_map(|n| n.as_u64().map(|x| x as u8)).collect();
                     state.game.restore_bytes(&bytes);
                 }
+                // Spy intel: a `spy_board` (the opponent's board, empty cells = -2)
+                // rides keyframes only while one of our spies is active. Refresh the
+                // "is the opponent stacked high?" read used to time board-raisers.
+                if let Some(arr) = v.get("spy_board").and_then(|s| s.as_array()) {
+                    let grid: Vec<i32> =
+                        arr.iter().filter_map(|n| n.as_i64().map(|x| x as i32)).collect();
+                    let w = state.game.board().width;
+                    let h = state.game.board().height;
+                    state.opp_high = opponent_is_high(&grid, w, h);
+                    state.spy_fresh = SPY_FRESH_TICKS;
+                }
             }
         }
         _ => {}
@@ -274,17 +312,19 @@ fn drive_tick(state: &mut MatchState, out: &Out, seq: &mut u64) {
         state.done = true;
         return;
     }
+    // Spy intel ages out between keyframes — once it lapses we're blind again.
+    if state.spy_fresh > 0 {
+        state.spy_fresh -= 1;
+        if state.spy_fresh == 0 {
+            state.opp_high = false;
+        }
+    }
+
     // Bazaar barrier (authoritative, or our local sim caught up to it): play is
-    // frozen server-side, so just leave the bazaar once and wait for it to lift.
+    // frozen server-side, so shop a smart loadout once, then leave and wait.
     if state.in_bazaar || state.game.is_in_bazaar() {
         if !state.bazaar_left {
-            *seq += 1;
-            let _ = out.send(Message::Text(
-                json!({ "type": "input", "seq": *seq, "input": "LeaveBazaar" }).to_string(),
-            ));
-            if state.game.is_in_bazaar() {
-                Input::LeaveBazaar.apply_to_game(&mut state.game);
-            }
+            shop_bazaar(state, out, seq);
             state.bazaar_left = true;
         }
         return;
@@ -294,12 +334,86 @@ fn drive_tick(state: &mut MatchState, out: &Out, seq: &mut u64) {
     if state.game.is_game_over() {
         return; // wait for the authoritative result to end the match
     }
+
+    // Launch a weapon on a cadence — a spy first (for intel), board-raisers when the
+    // opponent is high, harassment/fund-drains otherwise (see `bt_ai::weapons`).
+    state.launch_cooldown -= 1;
+    if state.launch_cooldown <= 0 {
+        let arsenal = arsenal_of(&state.game);
+        let spy_active = state.spy_fresh > 0;
+        if let Some(slot) = launch_choice(&arsenal, spy_active, state.opp_high) {
+            send_input(&mut state.game, out, seq, Input::LaunchWeapon(slot as u32));
+            state.launch_cooldown = LAUNCH_INTERVAL_TICKS;
+        } else {
+            state.launch_cooldown = LAUNCH_RETRY_TICKS;
+        }
+    }
+
     if state.cooldown > 0 {
         state.cooldown -= 1;
         return;
     }
     play_piece(&mut state.game, out, seq);
     state.cooldown = PLACE_INTERVAL_TICKS;
+}
+
+/// The local arsenal as the ten protocol token indices (-1 = empty slot).
+fn arsenal_of(game: &Game) -> [i32; 10] {
+    let mut a = [-1i32; 10];
+    for (i, slot) in a.iter_mut().enumerate() {
+        *slot = game.arsenal_token(i);
+    }
+    a
+}
+
+/// In the bazaar, buy a smart loadout ([`buy_plan`]) within our funds — each buy
+/// applied locally (prediction) AND sent to the server — then leave so the barrier
+/// lifts. Only buys the engine accepts are forwarded, keeping the sim in sync and
+/// avoiding a stream of rejected inputs.
+fn shop_bazaar(state: &mut MatchState, out: &Out, seq: &mut u64) {
+    if state.game.is_in_bazaar() {
+        let funds = state.game.score().funds;
+        let arsenal = arsenal_of(&state.game);
+        let carter = state.game.weapon_active(WeaponToken::Carter);
+        for tok in buy_plan(funds, &arsenal, carter) {
+            if state.game.buy_weapon(tok) {
+                *seq += 1;
+                let iv = serde_json::to_value(Input::BuyWeapon(tok.index() as i32))
+                    .unwrap_or(Value::Null);
+                let _ = out.send(Message::Text(
+                    json!({ "type": "input", "seq": *seq, "input": iv }).to_string(),
+                ));
+            }
+        }
+    }
+    *seq += 1;
+    let _ = out.send(Message::Text(
+        json!({ "type": "input", "seq": *seq, "input": "LeaveBazaar" }).to_string(),
+    ));
+    if state.game.is_in_bazaar() {
+        Input::LeaveBazaar.apply_to_game(&mut state.game);
+    }
+}
+
+/// Whether the opponent's spied board (`render_ids`, empty cells = -2, row-major
+/// `w`×`h`) is stacked tall enough to be worth a board-raiser — its highest column
+/// fills at least [`OPP_HIGH_FRAC`] of the board.
+fn opponent_is_high(grid: &[i32], w: i32, h: i32) -> bool {
+    if w <= 0 || h <= 0 || grid.len() < (w * h) as usize {
+        return false;
+    }
+    let mut min_top = h; // smallest filled-row index; h = empty column everywhere
+    for x in 0..w {
+        for y in 0..h {
+            if grid[(y * w + x) as usize] >= 0 {
+                if y < min_top {
+                    min_top = y;
+                }
+                break;
+            }
+        }
+    }
+    (h - min_top) as f64 >= OPP_HIGH_FRAC * h as f64
 }
 
 /// Rotate + slide the current piece to `bt-ai`'s best placement, then hard-drop
@@ -310,7 +424,7 @@ fn drive_tick(state: &mut MatchState, out: &Out, seq: &mut u64) {
 fn play_piece(game: &mut Game, out: &Out, seq: &mut u64) {
     let (target_x, target_or, rot_cap) = match game.current_piece() {
         Some(p) => {
-            let pl = best_placement(game.board(), p);
+            let pl = best_placement_strong(game.board(), p);
             (pl.x, pl.orientation, p.orientations.max(1))
         }
         None => return,

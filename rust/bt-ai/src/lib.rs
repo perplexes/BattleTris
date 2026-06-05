@@ -39,6 +39,9 @@ use bt_core::{Board, Game, Piece};
 mod vs;
 pub use vs::{VsComputer, AI_LAUNCH_PERIOD_MS, AI_LEVELS};
 
+/// Smarter weapon buying/launching policy for the networked bots (`bt-bot`).
+pub mod weapons;
+
 // ---------------------------------------------------------------------------
 // Penalty constants — from BTComputer.C
 // ---------------------------------------------------------------------------
@@ -279,6 +282,50 @@ pub fn eval_board(board: &Board) -> f64 {
     variance + cov_hole_pen + hole_pen + height_pen - line_bonus
 }
 
+/// Strong, line-clearing board evaluation for the ONLINE BOTS — NOT the faithful
+/// single-player Ernie (which deliberately hoards Tetrises and so clears poorly).
+/// The classic Lee 4-feature heuristic with its well-known tuned weights:
+/// aggregate column height, rows cleared by this placement, covered holes, and
+/// surface bumpiness. **Higher is better** (opposite sign convention to
+/// `eval_board`). 1-ply, but it stacks flat and clears lines steadily.
+///
+/// `lines_cleared` is how many rows this placement completed — it MUST be counted
+/// before `check_lines()` removes them (the board passed here is already cleared).
+pub fn eval_board_strong(board: &Board, lines_cleared: i32) -> f64 {
+    let w = board.width;
+    let h = board.height;
+    let mut heights = vec![0i32; w as usize];
+    let mut holes = 0i32;
+    for x in 0..w {
+        // First filled row from the top; `h` means the column is empty.
+        let mut top = h;
+        for y in 0..h {
+            if board.occupied(x, y) {
+                top = y;
+                break;
+            }
+        }
+        heights[x as usize] = h - top;
+        if top < h {
+            for y in (top + 1)..h {
+                if !board.occupied(x, y) {
+                    holes += 1;
+                }
+            }
+        }
+    }
+    let agg: i32 = heights.iter().sum();
+    let mut bump = 0i32;
+    for x in 0..(w as usize - 1) {
+        bump += (heights[x] - heights[x + 1]).abs();
+    }
+    // Lee's genetic-algorithm weights (en.wikipedia.org/wiki/Tetris + the well-known
+    // "el-tetris"/Lee writeups). Survives indefinitely and clears lines greedily.
+    -0.510066 * agg as f64 + 0.760666 * lines_cleared as f64
+        - 0.356630 * holes as f64
+        - 0.184483 * bump as f64
+}
+
 // ---------------------------------------------------------------------------
 // Placement search
 // ---------------------------------------------------------------------------
@@ -318,18 +365,47 @@ pub struct Placement {
 pub fn best_placement(board: &Board, piece: &Piece) -> Placement {
     let mut best_score = f64::MAX;
     let mut best = Placement { x: piece.x, orientation: 0 };
+    // Strict less-than preserves first-found (centre) on ties — faithful to
+    // `checkMove`'s centre-out DFS. eval_board: LOWER is better.
+    for_each_landing(board, piece, |pl, b, _lines| {
+        let score = eval_board(b);
+        if score < best_score {
+            best_score = score;
+            best = pl;
+        }
+    });
+    best
+}
 
-    // Spawn y: pieces spawn at y=0 in the Rust port.
+/// Like [`best_placement`] but uses the strong, line-clearing [`eval_board_strong`]
+/// (HIGHER is better) — for the ONLINE BOTS, leaving faithful Ernie untouched.
+pub fn best_placement_strong(board: &Board, piece: &Piece) -> Placement {
+    let mut best_score = f64::MIN;
+    let mut best = Placement { x: piece.x, orientation: 0 };
+    for_each_landing(board, piece, |pl, b, lines| {
+        let score = eval_board_strong(b, lines);
+        if score > best_score {
+            best_score = score;
+            best = pl;
+        }
+    });
+    best
+}
+
+/// Enumerate every valid hard-drop landing of `piece` on `board` in the faithful
+/// centre-out order (`def_x_=5`, right-before-left), calling
+/// `visit(placement, &landed_board, lines_cleared)` for each. `landed_board` has the
+/// piece locked and full rows already cleared; `lines_cleared` is how many rows that
+/// placement completed, counted BEFORE the clear (the faithful eval re-counts
+/// post-clear → 0, so only the strong eval consumes it). Shared by both
+/// `best_placement` and `best_placement_strong`.
+fn for_each_landing(board: &Board, piece: &Piece, mut visit: impl FnMut(Placement, &Board, i32)) {
     let spawn_y = 0i32;
 
-    // Build the candidate x list in centre-out order matching def_x_=5.
-    // Range is from -(BT_PIECE_WIDTH-1) to board.width (exclusive), same as
-    // before but ordered so centre column is tried before edges.
-    let centre = board.width / 2; // = 5 for standard board
+    // Candidate columns, centre-out, matching `checkMove(def_x_=5, …)`.
+    let centre = board.width / 2; // = 5 for the standard board
     let search_min = -(bt_core::constants::BT_PIECE_WIDTH as i32 - 1);
     let search_max = board.width; // exclusive
-
-    // Interleave left/right from centre.
     let mut candidates: Vec<i32> = Vec::with_capacity((search_max - search_min) as usize);
     candidates.push(centre);
     let mut d = 1i32;
@@ -355,12 +431,10 @@ pub fn best_placement(board: &Board, piece: &Piece) -> Placement {
     }
 
     for o in 0..piece.orientations {
-        // Rotate a clone `o` times to get the rotated shape.
+        // Rotate a clone `o` times to get the rotated shape (safe scratch board).
         let rotated_piece = {
-            // Use a large scratch board (no wall collisions during rotation).
             let scratch = Board::new(board.width + 20, board.height + 20, true);
             let mut p = piece.clone();
-            // Move to a safe centre position before rotating.
             p.move_to(&scratch, 10, 10);
             for _ in 0..o {
                 if !p.rotate(&scratch, false) {
@@ -371,44 +445,34 @@ pub fn best_placement(board: &Board, piece: &Piece) -> Placement {
         };
 
         for &candidate_x in &candidates {
-            // Clone board and piece for this candidate.
             let mut b = board.clone();
             let mut p = rotated_piece.clone();
 
-            // Place the piece at (candidate_x, spawn_y).
             if !p.move_to(&b, candidate_x, spawn_y) {
                 continue;
             }
-
-            // Drop: move down until blocked.
+            // Hard drop: descend until blocked.
             let mut landed_y = spawn_y;
-            loop {
-                if p.can_move_to(&b, candidate_x, landed_y + 1) {
-                    landed_y += 1;
-                } else {
-                    break;
-                }
+            while p.can_move_to(&b, candidate_x, landed_y + 1) {
+                landed_y += 1;
             }
             if !p.move_to(&b, candidate_x, landed_y) {
                 continue;
             }
-
-            // Land the piece into the cloned board.
             p.land(&mut b);
 
-            // Clear any full lines on the clone (mirrors check_lines in BTGame).
+            // Count completed rows BEFORE clearing them.
+            let mut lines = 0i32;
+            for y in 0..b.height {
+                if (0..b.width).all(|x| b.occupied(x, y)) {
+                    lines += 1;
+                }
+            }
             b.check_lines();
 
-            // Evaluate — strict less-than preserves first-found (centre) on ties.
-            let score = eval_board(&b);
-            if score < best_score {
-                best_score = score;
-                best = Placement { x: candidate_x, orientation: o };
-            }
+            visit(Placement { x: candidate_x, orientation: o }, &b, lines);
         }
     }
-
-    best
 }
 
 // ---------------------------------------------------------------------------
@@ -540,6 +604,80 @@ mod tests {
         assert!(
             s_holey > s_clean,
             "holey board ({s_holey}) should score worse than clean ({s_clean})"
+        );
+    }
+
+    // --- strong eval: line-clearing for the online bots --------------------
+
+    /// Drive a solo Game with the given placement strategy for up to `max_pieces`
+    /// (or until top-out), returning (total lines cleared, pieces placed).
+    fn play_solo(strong: bool, seed: u64, max_pieces: usize) -> (i64, usize) {
+        use bt_core::game::GameEvent;
+        let mut g = Game::new(seed);
+        let mut placed = 0usize;
+        let mut committed = false;
+        let mut guard = 0usize;
+        let limit = max_pieces * 400;
+        while placed < max_pieces && !g.is_game_over() && guard < limit {
+            guard += 1;
+            if g.is_in_bazaar() {
+                g.leave_bazaar();
+            }
+            if !committed {
+                if let Some(p) = g.current_piece().cloned() {
+                    let pl = if strong {
+                        best_placement_strong(g.board(), &p)
+                    } else {
+                        best_placement(g.board(), &p)
+                    };
+                    let orientations = p.orientations.max(1);
+                    for _ in 0..orientations {
+                        match g.current_piece() {
+                            Some(cp) if cp.orientation != pl.orientation => g.rotate(),
+                            _ => break,
+                        }
+                    }
+                    let maxm = g.board().width * 2;
+                    for _ in 0..maxm {
+                        match g.current_piece().map(|cp| cp.x) {
+                            Some(x) if x < pl.x => g.move_right(),
+                            Some(x) if x > pl.x => g.move_left(),
+                            _ => break,
+                        }
+                    }
+                    g.ai_begin_drop();
+                    committed = true;
+                }
+            }
+            g.tick(16);
+            if g.take_events().iter().any(|e| matches!(e, GameEvent::Locked { .. })) {
+                committed = false;
+                placed += 1;
+            }
+        }
+        (g.score().lines, placed)
+    }
+
+    #[test]
+    fn strong_eval_outclears_faithful_ernie() {
+        let mut strong_total = 0i64;
+        let mut ernie_total = 0i64;
+        for seed in [1u64, 7, 42, 100, 2024] {
+            let (s, sp) = play_solo(true, seed, 250);
+            let (e, ep) = play_solo(false, seed, 250);
+            println!("seed {seed}: strong {s} lines / {sp} placed    ernie {e} lines / {ep} placed");
+            // The strong (Lee) eval must never top itself out in solo and must clear
+            // lines steadily — this is the robustness faithful Ernie lacks (it tops
+            // out on several seeds, which reads as "doesn't clear lines well").
+            assert_eq!(sp, 250, "strong eval topped out on seed {seed} ({sp} placed)");
+            assert!(s >= 50, "strong eval cleared too few lines on seed {seed}: {s}");
+            strong_total += s;
+            ernie_total += e;
+        }
+        println!("TOTAL: strong {strong_total} lines    ernie {ernie_total} lines");
+        assert!(
+            strong_total > ernie_total,
+            "strong eval should clear more lines (strong {strong_total} vs ernie {ernie_total})"
         );
     }
 
