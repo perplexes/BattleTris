@@ -882,6 +882,50 @@ fn speedy_expiry_restores_the_baseline_gravity_period() {
         "after Speedy expires, the gravity period must return to baseline ({after} vs {baseline})");
 }
 
+/// STACKED Speedy/Meadow must NOT leak gravity speed on expiry (first-principles
+/// lifecycle conservation, NOT faithfulness). Speedy/Meadow shift `base_drop_time`
+/// by a RELATIVE factor, but the boolean `BTActive` flag means the weapon expires
+/// with exactly ONE `apply_weapon_off`. If the ON shift re-fired on every launch
+/// (the 1994 behavior) while OFF reverted once, stacking two launches would leave
+/// gravity PERMANENTLY off-baseline after the (accumulated) duration elapsed — a
+/// state-corruption leak. Independent oracle on the gravity period: after stacking
+/// two of the same speed weapon and clearing its full accumulated duration, the
+/// period must return EXACTLY to baseline. (Pins the idempotent-on-active-flag fix
+/// in `apply_weapon_on`; a regression to per-launch shifting fails here.)
+#[test]
+fn stacked_speedy_meadow_restore_baseline_on_expiry() {
+    for tok in [WeaponToken::Speedy, WeaponToken::Meadow] {
+        let seed = 4242;
+        let baseline = gravity_period_ms(&mut Game::new(seed));
+        assert!(baseline != i32::MAX && baseline > 0, "{tok:?}: measurable baseline");
+
+        let mut g = Game::new(seed);
+        // Stack TWO launches of the same speed weapon (each flush on an empty board
+        // -> no clear, so neither flush-lock ticks the duration down).
+        assert!(receive_and_flush(&mut g, tok), "{tok:?} first launch active");
+        g.board_mut().clear();
+        assert!(receive_and_flush(&mut g, tok), "{tok:?} second launch still active");
+        g.board_mut().clear();
+
+        let dur = weapon_table()[tok.index()].duration as i32;
+        // Two launches accumulate remaining -> need 2*dur (plus a slack line) to expire.
+        assert_eq!(g.weapon_remaining(tok), dur * 2,
+            "{tok:?}: stacking accumulates remaining (2*{dur})");
+        let cleared = clear_n_lines(&mut g, dur * 2 + 2);
+        if g.is_game_over() {
+            continue; // expiry of the flag is pinned by the countdown property
+        }
+        assert!(cleared >= dur * 2, "{tok:?}: cleared {cleared} of {} for full expiry", dur * 2);
+        assert!(!g.weapon_active(tok), "{tok:?} expired after its accumulated duration");
+
+        let after = gravity_period_ms(&mut g);
+        assert!(after != i32::MAX, "{tok:?}: post-expiry period measurable");
+        assert_eq!(after, baseline,
+            "after a STACKED {tok:?} expires, gravity must return to baseline \
+             ({after} vs {baseline}) — no per-launch speed leak");
+    }
+}
+
 // ===========================================================================
 // GROUP E — TRIGGER TIMING (received weapons apply at the NEXT lock, not on
 // receipt). A blanket property over ALL persistent-effect weapons.
@@ -904,13 +948,30 @@ proptest! {
         // be observed via weapon_active, so skip them for the "active" half but
         // still assert the inert half via the pending queue not mutating funds.
         let mut g = Game::new(13);
+        // Plant some debris so an EAGER board-mutation weapon (PieceIt/Blind/Missing/
+        // Bug/Gimp/Twilight/RiseUp/...) has something visible to disturb on receipt.
+        {
+            let (w, h) = (g.board().width, g.board().height);
+            for x in 0..w { g.board_mut().set(x, h - 1, Some(Cell::die(2))); }
+            g.board_mut().set(w / 2, h - 4, Some(Cell::die(5)));
+        }
         let funds0 = g.score().funds;
+        let board0 = g.export_board(); // FULL grid snapshot (catches eager board edits)
+        let arsenal0: Vec<_> = (0..10).map(|i| (g.arsenal_token(i), g.arsenal_quantity(i))).collect();
         g.receive_weapon(tok);
-        // Receipt must never synchronously activate or change funds.
+        // Receipt must never synchronously activate or change funds...
         prop_assert!(!g.weapon_active(tok),
             "{:?} must NOT be active merely from receive_weapon", tok);
         prop_assert_eq!(g.score().funds, funds0,
             "receive_weapon must not change funds synchronously ({:?})", tok);
+        // ...nor mutate the BOARD or the ARSENAL. An eager instant board weapon
+        // (e.g. PieceIt applied on receipt) would diverge the export here even though
+        // it leaves the active flag and funds untouched — the prior version missed it.
+        prop_assert_eq!(g.export_board(), board0,
+            "receive_weapon must not mutate the board synchronously ({:?})", tok);
+        let arsenal1: Vec<_> = (0..10).map(|i| (g.arsenal_token(i), g.arsenal_quantity(i))).collect();
+        prop_assert_eq!(arsenal1, arsenal0,
+            "receive_weapon must not mutate the arsenal synchronously ({:?})", tok);
 
         // Flush at a lock. For a persistent weapon (duration > 0), it becomes active.
         let dur = weapon_table()[tok.index()].duration;
@@ -1108,22 +1169,33 @@ proptest! {
         prop_assert_eq!(cell_count(&b), before + 1, "{:?} must add exactly one box", tok);
     }
 
-    /// THE BLIND CLERIC only REMOVES boxes — it never adds a cell and never touches
-    /// a non-removable (structure) cell.
+    /// THE BLIND CLERIC bombs each removable box with probability 1/2 — it only
+    /// REMOVES boxes (never adds, never touches a structure cell), and it MUST
+    /// actually remove some. The board is FULLY packed with removable dice (220
+    /// cells), so P(Blind removes nothing) = (1/2)^220 ~= 0 — a no-op Blind
+    /// implementation fails the strict "count went DOWN" assertion. (The previous
+    /// version asserted only "never adds / structure survives", which a no-op Blind
+    /// passed — a weak test caught by mutation.) The structure cell at (0,0) and the
+    /// fill-then-remove framing also pin the "only removable cells are bombed" half.
     #[test]
-    fn blind_only_removes_removable_boxes(
-        fills in prop::collection::vec((0i32..BT_BOARD_WTH, 0i32..BT_BOARD_HGT, 1u8..=6u8), 0..60),
-        seed in any::<u64>(),
-    ) {
+    fn blind_removes_removable_boxes_and_spares_structure(seed in any::<u64>()) {
         let mut rng = Rng::new(seed);
         let mut b = Board::standard(false);
         b.clear();
-        for (x, y, v) in &fills { b.set(*x, *y, Some(Cell::die(*v))); }
+        // Pack the WHOLE board with removable dice so Blind has a guaranteed-large
+        // population to bomb (and removing zero is astronomically unlikely).
+        for y in 0..b.height { for x in 0..b.width { b.set(x, y, Some(Cell::die(3))); } }
         b.set(0, 0, Some(Cell::structure())); // a structure cell that must survive
         let before = value_grid(&b);
         let cnt = cell_count(&b);
+        prop_assume!(cnt >= 100); // sanity: a big removable population
+
         b.apply_weapon(WeaponToken::Blind, &mut rng);
-        prop_assert!(cell_count(&b) <= cnt, "Blind must only remove, never add");
+
+        // Only removes: every surviving cell was present before, and the count
+        // dropped (Blind actually did something — kills a no-op mutant).
+        prop_assert!(cell_count(&b) < cnt,
+            "Blind must REMOVE some removable boxes (count {} -> {})", cnt, cell_count(&b));
         let after = value_grid(&b);
         for (i, a) in after.iter().enumerate() {
             if a.is_some() {
@@ -1424,6 +1496,34 @@ proptest! {
         prop_assert_eq!(before - g.score().funds, base * 2,
             "Carter must charge exactly 2*price");
     }
+}
+
+/// CARTER EXPIRY restores BASE bazaar prices (the inflation lifts after Carter's
+/// 20-line duration). Independent oracle on `bazaar_price`: doubled while active,
+/// back to the table base once expired. The price-doubling test pins the ACTIVE
+/// side; nothing pinned that the curse LIFTS — a mutant that leaves Carter's price
+/// multiplier on forever (or never expires the flag) would keep the bazaar inflated
+/// permanently. We use a cheap base-price weapon as the probe.
+#[test]
+fn carter_expiry_restores_base_bazaar_prices() {
+    let probe = WeaponToken::RiseUp;
+    let base = weapon_table()[probe.index()].price as i32;
+    assert!(base > 0);
+
+    let mut g = Game::new(77);
+    assert!(receive_and_flush(&mut g, WeaponToken::Carter), "Carter active");
+    assert_eq!(g.bazaar_price(probe), base * 2, "while Carter-cursed, prices are doubled");
+
+    // Expire Carter: clear its full duration of lines.
+    let dur = weapon_table()[WeaponToken::Carter.index()].duration as i32;
+    let cleared = clear_n_lines(&mut g, dur);
+    if g.is_game_over() {
+        return; // flag-expiry pinned by the countdown property
+    }
+    assert!(cleared >= dur, "cleared {cleared} of {dur} to expire Carter");
+    assert!(!g.weapon_active(WeaponToken::Carter), "Carter expired");
+    assert_eq!(g.bazaar_price(probe), base,
+        "after Carter expires, bazaar prices must return to base ({} not {})", base, g.bazaar_price(probe));
 }
 
 /// BOTTLE EXPIRY removes the structure walls (revert_weapon clears the neck cells).

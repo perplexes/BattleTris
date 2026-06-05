@@ -1051,6 +1051,10 @@ impl Game {
     /// weapon on THIS (victim) player.
     fn apply_weapon_on(&mut self, token: WeaponToken) {
         // BTActive[token] = 1 (boolean), remaining_ += duration (accumulates).
+        // Capture the prior active state so the RELATIVE drop-time shifts
+        // (Speedy/Meadow) fire only on the inactive->active transition — see the
+        // Speedy/Meadow arms below.
+        let was_active = self.weapons.is_active(token);
         self.weapons.set(token, true);
         self.remaining[token.index()] += weapon_table()[token.index()].duration as i32;
 
@@ -1065,17 +1069,34 @@ impl Game {
                 self.left_x = 1;
                 self.right_x = -1;
             }
+            // CORRECTNESS over faithfulness: Speedy/Meadow shift `base_drop_time`
+            // by a RELATIVE factor (>>=/<<=), but `apply_weapon_off` reverts it
+            // exactly once (the boolean `BTActive` flag means a single WPN_OFF per
+            // weapon, regardless of how many times it was launched). The 1994
+            // original (BTGame.C:563-569 ON vs 654-660 OFF) re-applies the shift on
+            // EVERY WPN_ON but reverts only once, so stacking two Speedys leaves
+            // `base_drop_time` PERMANENTLY halved after expiry — a lifecycle leak
+            // that corrupts gravity for the rest of the game (see the stacking
+            // regression `stacked_speedy_meadow_restore_baseline_on_expiry`). We
+            // make the shift idempotent on the active flag: it fires only on the
+            // inactive->active transition, matching the single revert. A lone
+            // launch is bit-identical to before; relaunch still accumulates
+            // `remaining_` (the duration), it just doesn't re-shift the clock.
             WeaponToken::Speedy => {
-                self.base_drop_time >>= 1;
-                if self.drop_time != self.fast_drop_time {
-                    self.drop_time = self.base_drop_time.max(1);
+                if !was_active {
+                    self.base_drop_time >>= 1;
+                    if self.drop_time != self.fast_drop_time {
+                        self.drop_time = self.base_drop_time.max(1);
+                    }
                 }
             }
             WeaponToken::Meadow => {
-                self.fast_drop_time <<= 1;
-                self.base_drop_time <<= 1;
-                if self.drop_time != self.fast_drop_time {
-                    self.drop_time = self.base_drop_time;
+                if !was_active {
+                    self.fast_drop_time <<= 1;
+                    self.base_drop_time <<= 1;
+                    if self.drop_time != self.fast_drop_time {
+                        self.drop_time = self.base_drop_time;
+                    }
                 }
             }
             WeaponToken::Keating => {

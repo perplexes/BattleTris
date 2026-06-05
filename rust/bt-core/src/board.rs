@@ -487,21 +487,40 @@ impl Board {
                 self.upside = true;
             }
             WeaponToken::PieceIt | WeaponToken::Bug => {
-                // A box at a random empty spot in the middle two quarters.
-                let (mut i, mut j);
-                loop {
-                    i = rng.rand_below(self.width);
-                    j = rng.rand_below(self.height / 2) + self.height / 4;
+                // A box at a random empty spot in the middle two quarters
+                // (`BTBoardManager.C:307-310`: `do { i=rand%w; j=...; } while
+                // (occupied)`). The original's rejection loop is unbounded; in real
+                // play the middle-half band (w * h/2 cells) holds far more than the
+                // ~4 a piece deposits, so an empty slot always exists and the loop
+                // terminates in O(1). We keep the RNG-faithful rejection sampling but
+                // CAP the retries so a pathological FULLY-PACKED band (only reachable
+                // via a crafted board import / keyframe, never via gameplay) can't
+                // hang the server: on cap we deterministically take the first empty
+                // band slot, and if the band is genuinely full we no-op (nowhere to
+                // place). This changes behavior ONLY in the unreachable full-band
+                // case; every reachable case is byte-identical to the original.
+                let mut placed = None;
+                for _ in 0..1024 {
+                    let i = rng.rand_below(self.width);
+                    let j = rng.rand_below(self.height / 2) + self.height / 4;
                     if !self.occupied(i, j) {
+                        placed = Some((i, j));
                         break;
                     }
                 }
-                let cell = if token == WeaponToken::Bug {
-                    Cell::color(BT_INVISIBLE)
-                } else {
-                    Cell::color(rng.rand_below(BT_NEUTRAL - 1) + 1)
-                };
-                self.set(i, j, Some(cell));
+                let spot = placed.or_else(|| {
+                    (self.height / 4..self.height / 4 + self.height / 2)
+                        .flat_map(|j| (0..self.width).map(move |i| (i, j)))
+                        .find(|&(i, j)| !self.occupied(i, j))
+                });
+                if let Some((i, j)) = spot {
+                    let cell = if token == WeaponToken::Bug {
+                        Cell::color(BT_INVISIBLE)
+                    } else {
+                        Cell::color(rng.rand_below(BT_NEUTRAL - 1) + 1)
+                    };
+                    self.set(i, j, Some(cell));
+                }
             }
             WeaponToken::Missing => {
                 // Remove the first removable box scanning from a random origin.
