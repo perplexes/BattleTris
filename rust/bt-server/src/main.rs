@@ -37,7 +37,6 @@
 //! WebRTC P2P relay — `signal`/`matched` — was removed with that migration.)
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -145,7 +144,7 @@ struct Client {
     tx: mpsc::UnboundedSender<Message>,
     /// The opponent connection while in a match — used to send `opponentLeft` if
     /// this client disconnects mid-bout. Set in [`start_bout`], cleared at end.
-    peer: Option<u64>,
+    peer: Option<String>,
     state: PlayerState,
     /// While in a match: the channel to the match's tick loop and which side this
     /// client plays. `input` messages are forwarded here.
@@ -153,7 +152,7 @@ struct Client {
     /// The `match_id` of the bout this client is in (keys [`App::bouts`]), so an
     /// intentional `leaveMatch` can forfeit exactly this client's own bout. `None`
     /// outside a match. Set with `bout`, cleared when the bout ends.
-    match_id: Option<u64>,
+    match_id: Option<String>,
     /// Lobby presence. `None` until the client establishes a name (anonymous
     /// connections don't appear in the roster). See [`Status`].
     status: Option<Status>,
@@ -188,19 +187,19 @@ fn post_bout_status(prev: Option<Status>) -> Option<Status> {
 
 /// Shared server state.
 struct App {
-    clients: HashMap<u64, Client>,
-    waiting: Vec<u64>,
+    clients: HashMap<String, Client>,
+    waiting: Vec<String>,
     /// Last time each connection pressed a gameplay button. "Players online" is
     /// the count of these within `ACTIVE_WINDOW` (set on `active`, pruned on
     /// disconnect). Only pages send `active`, so matchmaking sockets never appear.
-    last_active: HashMap<u64, Instant>,
+    last_active: HashMap<String, Instant>,
     /// Last player count we broadcast, so the decay tick only re-broadcasts on a
     /// real change.
     last_broadcast_players: usize,
     /// Persisted ratings by player name: (mu, sigma, experience).
     ratings: HashMap<String, (f64, f64, u32)>,
-    /// Pairings already rated (keyed by min(id_a, id_b)).
-    settled: HashSet<u64>,
+    /// Pairings already rated (keyed by `match_id`).
+    settled: HashSet<String>,
     params: Ts2Params,
     /// Replay/counters DB (shared with the HTTP handlers) — backs the hit counter
     /// and the per-player stats (`players`) table.
@@ -208,14 +207,14 @@ struct App {
     /// Outstanding directed challenges: challenger id -> (target id, expires_at).
     /// One in-flight challenge per challenger; superseded/cleared on
     /// accept/decline/timeout/disconnect.
-    challenges: HashMap<u64, (u64, Instant)>,
+    challenges: HashMap<String, (String, Instant)>,
     /// Last `players` roster we broadcast (the de-duped name/status/geo list), so
     /// the presence push only re-sends on a real change.
     last_players: Vec<RosterEntry>,
     /// Live authoritative bouts, keyed by `match_id`, so a reconnecting player's
     /// `rejoin` can reattach to the running tick loop. Inserted in [`start_bout`],
     /// removed when [`run_bout`] ends. See [`BoutHandle`].
-    bouts: HashMap<u64, BoutHandle>,
+    bouts: HashMap<String, BoutHandle>,
 }
 
 impl App {
@@ -260,8 +259,8 @@ fn ratings_file() -> String {
     std::env::var("RATINGS_FILE").unwrap_or_else(|_| "ratings.json".to_string())
 }
 
-fn send(app: &App, id: u64, msg: &Value) {
-    if let Some(c) = app.clients.get(&id) {
+fn send(app: &App, id: &str, msg: &Value) {
+    if let Some(c) = app.clients.get(id) {
         let _ = c.tx.send(Message::Text(msg.to_string()));
     }
 }
@@ -421,7 +420,7 @@ enum BoutControl {
     /// Reattach `side` to a freshly-connected client: swap in its writer `tx` and
     /// adopt its new connection `id` (the disconnected one was already removed from
     /// `app.clients`, so the loop must retarget settle/status by the live id).
-    Reattach { side: Side, new_id: u64, tx: mpsc::UnboundedSender<Message> },
+    Reattach { side: Side, new_id: String, tx: mpsc::UnboundedSender<Message> },
     /// `side` intentionally left the match (the in-app "Leave game" button) — end
     /// the bout NOW, no reconnect grace, with the other side winning by forfeit.
     Forfeit { side: Side },
@@ -446,12 +445,11 @@ struct BoutHandle {
 /// if a client has disconnected (and been removed from `app.clients`) by the
 /// time the match ends.
 struct PendingBout {
-    /// Globally-unique match id (from `NEXT_ID`, the same counter as connection
-    /// ids, so it's disjoint from every connection id and every legacy min-id
-    /// settle key). Keys this match's settlement.
-    match_id: u64,
-    id_a: u64,
-    id_b: u64,
+    /// Tagged-UUID match id (`match-<uuid>`) — unguessable + unique across restarts.
+    /// Keys this match's settlement and [`App::bouts`].
+    match_id: String,
+    id_a: String,
+    id_b: String,
     seed_a: u64,
     seed_b: u64,
     name_a: String,
@@ -468,12 +466,15 @@ struct PendingBout {
     human: [bool; 2],
 }
 
-/// A per-match seed from a connection id — distinct across matches (ids are
-/// monotonic) without an rng dependency, and masked to 32 bits so it round-trips
-/// through the JS client's `WasmGame::new(seed: u32)` exactly (same RNG stream
-/// on both sides → client prediction agrees with the authoritative sim).
-fn derive_seed(id: u64) -> u64 {
-    (id.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 16) & 0xFFFF_FFFF
+/// A per-match seed from a connection id — distinct per connection (ids are random
+/// uuids) without an rng dependency, and masked to 32 bits so it round-trips through
+/// the JS client's `WasmGame::new(seed: u32)` exactly (same RNG stream on both sides
+/// → client prediction agrees with the authoritative sim).
+fn derive_seed(id: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    id.hash(&mut h);
+    h.finish() & 0xFFFF_FFFF
 }
 
 /// How long a directed challenge stays open before the challenger is told the
@@ -482,29 +483,29 @@ const CHALLENGE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Find the connected client whose name == `name`, preferring one currently
 /// Available (the challengeable connection) over any other tab. Returns its id.
-fn find_named_available(app: &App, name: &str) -> Option<u64> {
+fn find_named_available(app: &App, name: &str) -> Option<String> {
     // First pass: an Available named connection (the one a challenge can land on).
-    if let Some((&id, _)) = app
+    if let Some((id, _)) = app
         .clients
         .iter()
         .find(|(_, c)| c.name == name && c.status == Some(Status::Available))
     {
-        return Some(id);
+        return Some(id.clone());
     }
     None
 }
 
 /// Drop a challenger's pending challenge (if any). Returns the target id it was
 /// pointed at, so the caller can decide whether to notify.
-fn clear_challenge(app: &mut App, challenger: u64) -> Option<u64> {
-    app.challenges.remove(&challenger).map(|(target, _)| target)
+fn clear_challenge(app: &mut App, challenger: &str) -> Option<String> {
+    app.challenges.remove(challenger).map(|(target, _)| target)
 }
 
 /// Is `cid` a candidate the matcher may pair `id` with right now? Not `id`
 /// itself, not already in a bout, and "open to matches" — either explicitly
 /// queued (in `waiting`, the Find-Match path) OR lobby-Available / -Searching
 /// (the unified presence switch: Available = challengeable AND auto-pairable).
-fn is_match_candidate(app: &App, id: u64, cid: u64) -> bool {
+fn is_match_candidate(app: &App, id: &str, cid: &str) -> bool {
     if cid == id {
         return false;
     }
@@ -513,15 +514,15 @@ fn is_match_candidate(app: &App, id: u64, cid: u64) -> bool {
     // reaches humans via its own roaming challenges — neither side auto-pairs INTO a
     // bot. (So an open human stays available for The Count to challenge instead of
     // being instantly thrown into a regional bot.)
-    if app.clients.get(&id).is_some_and(|c| c.is_bot)
-        || app.clients.get(&cid).is_some_and(|c| c.is_bot)
+    if app.clients.get(id).is_some_and(|c| c.is_bot)
+        || app.clients.get(cid).is_some_and(|c| c.is_bot)
     {
         return false;
     }
-    match app.clients.get(&cid) {
+    match app.clients.get(cid) {
         Some(c) => {
             c.bout.is_none()
-                && (app.waiting.contains(&cid)
+                && (app.waiting.iter().any(|w| w == cid)
                     || matches!(c.status, Some(Status::Available) | Some(Status::Searching)))
         }
         None => false,
@@ -534,25 +535,25 @@ fn is_match_candidate(app: &App, id: u64, cid: u64) -> bool {
 /// (`waiting`) AND lobby-Available clients — so going Available auto-pairs you
 /// just like pressing Find Match. Returns `Some(PendingBout)` (which the async
 /// caller spawns) when it finds an opponent.
-fn try_match(app: &mut App, id: u64) -> Option<PendingBout> {
-    let my_rating = app.clients.get(&id).map(|c| c.state.rating)?;
+fn try_match(app: &mut App, id: &str) -> Option<PendingBout> {
+    let my_rating = app.clients.get(id).map(|c| c.state.rating)?;
     // Already in a bout? Don't re-match (would clobber the live binding).
-    if app.clients.get(&id).is_some_and(|c| c.bout.is_some()) {
+    if app.clients.get(id).is_some_and(|c| c.bout.is_some()) {
         return None;
     }
 
     // Scan all open candidates (queued or Available/Searching), de-duped.
-    let candidates: Vec<u64> = app
+    let candidates: Vec<String> = app
         .clients
         .keys()
-        .copied()
-        .filter(|&cid| is_match_candidate(app, id, cid))
+        .cloned()
+        .filter(|cid| is_match_candidate(app, id, cid))
         .collect();
-    let mut best: Option<(u64, f64)> = None;
+    let mut best: Option<(String, f64)> = None;
     for cid in candidates {
         if let Some(other) = app.clients.get(&cid) {
             let q = quality_1v1(my_rating, other.state.rating, &app.params.base);
-            if best.map(|(_, bq)| q > bq).unwrap_or(true) {
+            if best.as_ref().map(|(_, bq)| q > *bq).unwrap_or(true) {
                 best = Some((cid, q));
             }
         }
@@ -561,15 +562,15 @@ fn try_match(app: &mut App, id: u64) -> Option<PendingBout> {
     let (opp, quality) = match best {
         Some(x) => x,
         None => {
-            if !app.waiting.contains(&id) {
-                app.waiting.push(id);
+            if !app.waiting.iter().any(|w| w == id) {
+                app.waiting.push(id.to_string());
             }
             return None;
         }
     };
 
     // opp = side A (first queued/available), id = side B.
-    start_bout(app, opp, id, Some(quality))
+    start_bout(app, &opp, id, Some(quality))
 }
 
 /// Build a server-authoritative bout between two connected clients: drop them
@@ -578,57 +579,57 @@ fn try_match(app: &mut App, id: u64) -> Option<PendingBout> {
 /// auto-matcher ([`try_match`]) and the directed-challenge path. `quality` is the
 /// matchmaking quality if known (auto-match) else `None` (a hand-picked challenge
 /// has no quality figure). Returns `None` only if a client vanished.
-fn start_bout(app: &mut App, a: u64, b: u64, quality: Option<f64>) -> Option<PendingBout> {
-    app.waiting.retain(|&w| w != a && w != b);
+fn start_bout(app: &mut App, a: &str, b: &str, quality: Option<f64>) -> Option<PendingBout> {
+    app.waiting.retain(|w| w != a && w != b);
     // Drop any pending challenges involving either player — they're now in a
     // match, so a stale accept must not later kick off a second, unwanted bout.
     app.challenges
-        .retain(|&cid, &mut (tid, _)| cid != a && cid != b && tid != a && tid != b);
-    if let Some(c) = app.clients.get_mut(&a) {
-        c.peer = Some(b);
+        .retain(|cid, (tid, _)| cid != a && cid != b && tid != a && tid != b);
+    if let Some(c) = app.clients.get_mut(a) {
+        c.peer = Some(b.to_string());
     }
-    if let Some(c) = app.clients.get_mut(&b) {
-        c.peer = Some(a);
+    if let Some(c) = app.clients.get_mut(b) {
+        c.peer = Some(a.to_string());
     }
 
-    let (a_name, a_state) = match app.clients.get(&a) {
+    let (a_name, a_state) = match app.clients.get(a) {
         Some(c) => (c.name.clone(), c.state),
         None => return None,
     };
-    let (b_name, b_state) = match app.clients.get(&b) {
+    let (b_name, b_state) = match app.clients.get(b) {
         Some(c) => (c.name.clone(), c.state),
         None => return None,
     };
 
     // Mint the match id BEFORE the matchStart sends so each side learns it up front
     // (the client parks it in its URL as `?match=<id>` for rejoin-on-refresh).
-    let match_id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let match_id = new_id("match");
     // Which sides are human? A bot drop forfeits instantly (no reconnect grace).
-    let human_a = !app.clients.get(&a).is_some_and(|c| c.is_bot);
-    let human_b = !app.clients.get(&b).is_some_and(|c| c.is_bot);
+    let human_a = !app.clients.get(a).is_some_and(|c| c.is_bot);
+    let human_b = !app.clients.get(b).is_some_and(|c| c.is_bot);
 
     let (seed_a, seed_b) = (derive_seed(a), derive_seed(b));
     let (input_tx, input_rx) = mpsc::channel::<BoutInput>(BOUT_INPUT_CAP);
     // The reattach control channel: the `rejoin` handler delivers a fresh socket to
     // the running tick loop through here (see [`BoutControl`]).
     let (control_tx, control_rx) = mpsc::channel::<BoutControl>(4);
-    let tx_a = app.clients[&a].tx.clone();
-    let tx_b = app.clients[&b].tx.clone();
-    if let Some(c) = app.clients.get_mut(&a) {
+    let tx_a = app.clients[a].tx.clone();
+    let tx_b = app.clients[b].tx.clone();
+    if let Some(c) = app.clients.get_mut(a) {
         c.bout = Some((input_tx.clone(), Side::A));
-        c.match_id = Some(match_id);
+        c.match_id = Some(match_id.clone());
         c.prev_status = c.status; // remember presence to restore at bout end
         c.status = Some(Status::InGame);
     }
-    if let Some(c) = app.clients.get_mut(&b) {
+    if let Some(c) = app.clients.get_mut(b) {
         c.bout = Some((input_tx.clone(), Side::B));
-        c.match_id = Some(match_id);
+        c.match_id = Some(match_id.clone());
         c.prev_status = c.status;
         c.status = Some(Status::InGame);
     }
     // Register the live bout so a reconnecting player can find it by `match_id`.
     app.bouts.insert(
-        match_id,
+        match_id.clone(),
         BoutHandle { control: control_tx, input_tx, name_a: a_name.clone(), name_b: b_name.clone() },
     );
     // quality is optional in the wire frame; a directed challenge omits it.
@@ -637,8 +638,8 @@ fn start_bout(app: &mut App, a: u64, b: u64, quality: Option<f64>) -> Option<Pen
     // (The Count) can dial its difficulty to the player it's facing.
     let a_elo = elo_styled(a_state.rating.conservative(3.0));
     let b_elo = elo_styled(b_state.rating.conservative(3.0));
-    send(app, a, &json!({"type":"matchStart","side":"A","seed":seed_a,"opponent":b_name,"opp_elo":b_elo,"quality":qv,"match_id":match_id}));
-    send(app, b, &json!({"type":"matchStart","side":"B","seed":seed_b,"opponent":a_name,"opp_elo":a_elo,"quality":qv,"match_id":match_id}));
+    send(app, a, &json!({"type":"matchStart","side":"A","seed":seed_a,"opponent":b_name,"opp_elo":b_elo,"quality":qv,"match_id":match_id.clone()}));
+    send(app, b, &json!({"type":"matchStart","side":"B","seed":seed_b,"opponent":a_name,"opp_elo":a_elo,"quality":qv,"match_id":match_id.clone()}));
     metrics::METRICS.matches.inc();
     match quality {
         Some(q) => println!("authoritative match {a} <-> {b} (quality {q:.3})"),
@@ -648,8 +649,8 @@ fn start_bout(app: &mut App, a: u64, b: u64, quality: Option<f64>) -> Option<Pen
     maybe_broadcast_players(app);
     Some(PendingBout {
         match_id,
-        id_a: a,
-        id_b: b,
+        id_a: a.to_string(),
+        id_b: b.to_string(),
         seed_a,
         seed_b,
         name_a: a_name,
@@ -671,11 +672,11 @@ fn start_bout(app: &mut App, a: u64, b: u64, quality: Option<f64>) -> Option<Pen
 #[allow(clippy::too_many_arguments)]
 fn settle_bout(
     app: &mut App,
-    match_id: u64,
-    id_a: u64,
+    match_id: &str,
+    id_a: &str,
     name_a: &str,
     state_a: PlayerState,
-    id_b: u64,
+    id_b: &str,
     name_b: &str,
     state_b: PlayerState,
     a_won: bool,
@@ -685,7 +686,7 @@ fn settle_bout(
     // Key on the unique match id, not min(id), so a connection's later match
     // (same min-id) isn't wrongly skipped. run_bout calls this once per match,
     // so the guard is purely defensive.
-    if !app.settled.insert(match_id) {
+    if !app.settled.insert(match_id.to_string()) {
         return;
     }
     let outcome = MatchOutcome {
@@ -698,10 +699,10 @@ fn settle_bout(
     let (na, nb) = rate_match(state_a, state_b, &outcome, &app.params);
     app.store_rating(name_a, na);
     app.store_rating(name_b, nb);
-    if let Some(c) = app.clients.get_mut(&id_a) {
+    if let Some(c) = app.clients.get_mut(id_a) {
         c.state = na;
     }
-    if let Some(c) = app.clients.get_mut(&id_b) {
+    if let Some(c) = app.clients.get_mut(id_b) {
         c.state = nb;
     }
     save_ratings(&app.ratings);
@@ -917,8 +918,8 @@ async fn run_bout(state: Shared, pb: PendingBout) {
     // presence (see [`post_bout_status`]) — a player who was "open to matches"
     // goes back to Available; a one-off directed challenger leaves the roster
     // rather than being force-Available and instantly auto-rematched.
-    for cid in [id_a, id_b] {
-        if let Some(c) = app.clients.get_mut(&cid) {
+    for cid in [&id_a, &id_b] {
+        if let Some(c) = app.clients.get_mut(cid) {
             c.bout = None;
             c.match_id = None;
             c.peer = None;
@@ -941,7 +942,7 @@ async fn run_bout(state: Shared, pb: PendingBout) {
             let _ = tx_b.send(Message::Text(left));
         }
         settle_bout(
-            &mut app, match_id, id_a, &name_a, state_a, id_b, &name_b, state_b,
+            &mut app, &match_id, &id_a, &name_a, state_a, &id_b, &name_b, state_b,
             a_won, bout.lines(Side::A), bout.lines(Side::B),
         );
         // Real per-player stats (the `players` table) — record/streak/bests/time.
@@ -1019,7 +1020,7 @@ fn resolve_name(app: &App, v: &Value, prior: &str) -> String {
     prior.to_string()
 }
 
-async fn handle_message(state: &Shared, id: u64, text: &str) {
+async fn handle_message(state: &Shared, id: &str, text: &str) {
     let v: Value = match serde_json::from_str(text) {
         Ok(v) => v,
         Err(_) => return,
@@ -1048,7 +1049,7 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
         // the next `ACTIVE_WINDOW`. Re-broadcast if the live count went up.
         Some("active") => {
             let mut app = state.lock().await;
-            app.last_active.insert(id, Instant::now());
+            app.last_active.insert(id.to_string(), Instant::now());
             maybe_broadcast_stats(&mut app);
         }
         Some("queue") => {
@@ -1059,14 +1060,14 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
                 // Ignore a re-queue from a client already in a match (it would
                 // otherwise be matched into a second bout that could clobber this
                 // one's binding / settle the wrong pairing).
-                if app.clients.get(&id).is_some_and(|c| c.bout.is_some()) {
+                if app.clients.get(id).is_some_and(|c| c.bout.is_some()) {
                     None
                 } else {
-                    let prior = app.clients.get(&id).map(|c| c.name.clone()).unwrap_or_default();
+                    let prior = app.clients.get(id).map(|c| c.name.clone()).unwrap_or_default();
                     let name = resolve_name(&app, &v, &prior);
                     let name = if name.is_empty() { "anon".to_string() } else { name };
                     let st = app.rating_for(&name);
-                    if let Some(c) = app.clients.get_mut(&id) {
+                    if let Some(c) = app.clients.get_mut(id) {
                         c.name = name;
                         c.state = st;
                         c.status = Some(Status::Searching); // Find Match -> Searching
@@ -1092,10 +1093,10 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
             let value = v.get("value").and_then(|b| b.as_bool()).unwrap_or(true);
             let pending = {
                 let mut app = state.lock().await;
-                if app.clients.get(&id).is_some_and(|c| c.bout.is_some()) {
+                if app.clients.get(id).is_some_and(|c| c.bout.is_some()) {
                     None // already in a match — ignore
                 } else {
-                    let prior = app.clients.get(&id).map(|c| c.name.clone()).unwrap_or_default();
+                    let prior = app.clients.get(id).map(|c| c.name.clone()).unwrap_or_default();
                     let name = resolve_name(&app, &v, &prior);
                     let go_available = value && !name.is_empty();
                     let st = app.rating_for(&name);
@@ -1107,9 +1108,9 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
                     let is_bot = v.get("bot").and_then(|b| b.as_bool()).unwrap_or(false);
                     if !go_available {
                         // Going unavailable / un-named -> leave the roster + queue.
-                        app.waiting.retain(|&w| w != id);
+                        app.waiting.retain(|w| w != id);
                     }
-                    if let Some(c) = app.clients.get_mut(&id) {
+                    if let Some(c) = app.clients.get_mut(id) {
                         c.name = name;
                         c.state = st;
                         c.status = go_available.then_some(Status::Available);
@@ -1134,9 +1135,9 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
         Some("challenge") => {
             let mut app = state.lock().await;
             // Resolve/refresh the challenger's identity from any token/name.
-            let prior = app.clients.get(&id).map(|c| c.name.clone()).unwrap_or_default();
+            let prior = app.clients.get(id).map(|c| c.name.clone()).unwrap_or_default();
             let from = resolve_name(&app, &v, &prior);
-            if let Some(c) = app.clients.get_mut(&id) {
+            if let Some(c) = app.clients.get_mut(id) {
                 c.name = from.clone();
             }
             let target = v.get("target").and_then(|t| t.as_str()).unwrap_or("").to_string();
@@ -1145,21 +1146,23 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
                 // gets bored of humans); only auto-pairing two bots is blocked.
                 Some(tid) if tid != id => {
                     let deadline = Instant::now() + CHALLENGE_TIMEOUT;
-                    app.challenges.insert(id, (tid, deadline));
-                    send(&app, tid, &json!({"type":"challenged","from":from}));
+                    app.challenges.insert(id.to_string(), (tid.clone(), deadline));
+                    send(&app, &tid, &json!({"type":"challenged","from":from}));
                     // Schedule the timeout: if still pending after the window, tell
                     // the challenger the target "declined" (no answer). Compare the
                     // exact deadline so an earlier timer can't clear a *re-issued*
-                    // challenge to the same target.
+                    // challenge to the same target. The spawned task is 'static, so
+                    // capture OWNED ids (the handler's `id` is a borrow).
                     let state2 = state.clone();
+                    let id_owned = id.to_string();
                     tokio::spawn(async move {
                         tokio::time::sleep(CHALLENGE_TIMEOUT).await;
                         let mut app = state2.lock().await;
-                        if let Some((t, d)) = app.challenges.get(&id).copied() {
+                        if let Some((t, d)) = app.challenges.get(&id_owned).cloned() {
                             if t == tid && d == deadline {
-                                clear_challenge(&mut app, id);
+                                clear_challenge(&mut app, &id_owned);
                                 let by = app.clients.get(&tid).map(|c| c.name.clone()).unwrap_or(target);
-                                send(&app, id, &json!({"type":"challengeDeclined","by":by}));
+                                send(&app, &id_owned, &json!({"type":"challengeDeclined","by":by}));
                             }
                         }
                     });
@@ -1177,21 +1180,18 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
             let pending = {
                 let mut app = state.lock().await;
                 // Find the challenger by name whose pending challenge targets THIS id.
-                let challenger = app
-                    .challenges
-                    .iter()
-                    .find(|(&cid, &(tid, _))| {
-                        tid == id && app.clients.get(&cid).is_some_and(|c| c.name == from)
-                    })
-                    .map(|(&cid, _)| cid);
+                let challenger = app.challenges.iter().find_map(|(cid, (tid, _))| {
+                    (tid.as_str() == id && app.clients.get(cid).is_some_and(|c| c.name == from))
+                        .then(|| cid.clone())
+                });
                 match challenger {
                     Some(cid)
                         if app.clients.get(&cid).is_some_and(|c| c.bout.is_none())
-                            && app.clients.get(&id).is_some_and(|c| c.bout.is_none()) =>
+                            && app.clients.get(id).is_some_and(|c| c.bout.is_none()) =>
                     {
-                        clear_challenge(&mut app, cid);
+                        clear_challenge(&mut app, &cid);
                         // Challenger = side A, accepter = side B (no quality figure).
-                        start_bout(&mut app, cid, id, None)
+                        start_bout(&mut app, &cid, id, None)
                     }
                     _ => None,
                 }
@@ -1204,17 +1204,14 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
         Some("challengeDecline") => {
             let from = v.get("from").and_then(|t| t.as_str()).unwrap_or("").to_string();
             let mut app = state.lock().await;
-            let challenger = app
-                .challenges
-                .iter()
-                .find(|(&cid, &(tid, _))| {
-                    tid == id && app.clients.get(&cid).is_some_and(|c| c.name == from)
-                })
-                .map(|(&cid, _)| cid);
+            let challenger = app.challenges.iter().find_map(|(cid, (tid, _))| {
+                (tid.as_str() == id && app.clients.get(cid).is_some_and(|c| c.name == from))
+                    .then(|| cid.clone())
+            });
             if let Some(cid) = challenger {
-                clear_challenge(&mut app, cid);
-                let by = app.clients.get(&id).map(|c| c.name.clone()).unwrap_or_default();
-                send(&app, cid, &json!({"type":"challengeDeclined","by":by}));
+                clear_challenge(&mut app, &cid);
+                let by = app.clients.get(id).map(|c| c.name.clone()).unwrap_or_default();
+                send(&app, &cid, &json!({"type":"challengeDeclined","by":by}));
             }
         }
         // A gameplay action in a server-authoritative match — forward it to that
@@ -1226,7 +1223,7 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
                 .and_then(|iv| serde_json::from_value::<Input>(iv.clone()).ok());
             if let Some(input) = input {
                 let app = state.lock().await;
-                if let Some((tx, side)) = app.clients.get(&id).and_then(|c| c.bout.as_ref()) {
+                if let Some((tx, side)) = app.clients.get(id).and_then(|c| c.bout.as_ref()) {
                     // try_send: drop under flood rather than grow memory (bounded channel).
                     let _ = tx.try_send((*side, input, seq));
                 }
@@ -1237,16 +1234,14 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
         // Requires a signed token whose name is one of the two participants — so a
         // shared/stale link can't hijack someone else's match (it just fails).
         Some("rejoin") => {
-            // Accept the id as a JSON number OR a numeric string — it round-trips
-            // through the client's `?match=<id>` URL, which is always a string.
-            let mid = v
-                .get("match_id")
-                .and_then(|m| m.as_u64().or_else(|| m.as_str().and_then(|s| s.parse().ok())));
+            // The match id is a tagged-UUID string (`match-<uuid>`), carried in the
+            // client's `?match=<id>` URL.
+            let mid = v.get("match_id").and_then(|m| m.as_str()).map(|s| s.to_string());
             let mut app = state.lock().await;
-            let prior = app.clients.get(&id).map(|c| c.name.clone()).unwrap_or_default();
+            let prior = app.clients.get(id).map(|c| c.name.clone()).unwrap_or_default();
             let name = resolve_name(&app, &v, &prior);
             // Find the live bout and which side this identity plays.
-            let found = mid.and_then(|mid| {
+            let found = mid.clone().and_then(|mid| {
                 app.bouts.get(&mid).and_then(|h| {
                     let side = if !name.is_empty() && h.name_a == name {
                         Some(Side::A)
@@ -1264,21 +1259,21 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
                     // matchStart handoff + a keyframe). try_send (not await) so we
                     // never hold the lock across a send; capacity 4 vs a one-shot
                     // reattach means it only fails if the loop already ended.
-                    let sent = match app.clients.get(&id).map(|c| c.tx.clone()) {
+                    let sent = match app.clients.get(id).map(|c| c.tx.clone()) {
                         Some(tx) => {
-                            control.try_send(BoutControl::Reattach { side, new_id: id, tx }).is_ok()
+                            control.try_send(BoutControl::Reattach { side, new_id: id.to_string(), tx }).is_ok()
                         }
                         None => false,
                     };
                     if sent {
                         let st = app.rating_for(&name);
-                        if let Some(c) = app.clients.get_mut(&id) {
+                        if let Some(c) = app.clients.get_mut(id) {
                             c.name = name;
                             c.state = st;
                             c.prev_status = c.status; // restore presence at bout end
                             c.status = Some(Status::InGame);
                             c.bout = Some((input_tx, side));
-                            c.match_id = mid; // mid is Some here (found matched)
+                            c.match_id = mid.clone(); // mid is Some here (found matched)
                         }
                         maybe_broadcast_players(&mut app); // back to InGame in the roster
                     }
@@ -1299,8 +1294,8 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
         // so a client can only forfeit the match it's actually in.
         Some("leaveMatch") => {
             let app = state.lock().await;
-            let target = app.clients.get(&id).and_then(|c| match (c.match_id, c.bout.as_ref()) {
-                (Some(mid), Some((_, side))) => Some((mid, *side)),
+            let target = app.clients.get(id).and_then(|c| match (c.match_id.as_ref(), c.bout.as_ref()) {
+                (Some(mid), Some((_, side))) => Some((mid.clone(), *side)),
                 _ => None,
             });
             if let Some((mid, side)) = target {
@@ -1313,14 +1308,19 @@ async fn handle_message(state: &Shared, id: u64, text: &str) {
     }
 }
 
-static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+/// A fresh tagged-UUID id: `<kind>-<uuid v4>` (e.g. `client-7f3a…`, `match-1b9c…`).
+/// The kind prefix makes ids self-describing in logs/URLs; the v4 uuid makes them
+/// unguessable and unique across server restarts.
+fn new_id(kind: &str) -> String {
+    format!("{kind}-{}", uuid::Uuid::new_v4())
+}
 
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Shared>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
 async fn handle_socket(socket: WebSocket, state: Shared) {
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let id = new_id("client");
     let (mut sender, mut receiver) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
     let tx_ping = tx.clone();
@@ -1329,7 +1329,7 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
         let mut a = state.lock().await;
         let st = a.rating_for("");
         a.clients.insert(
-            id,
+            id.clone(),
             Client {
                 name: String::new(), tx, peer: None, state: st, bout: None,
                 match_id: None, status: None, geo: None, is_bot: false,
@@ -1354,6 +1354,7 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
     // the bot auto-Pong, and the read loop turns the Pong into a round-trip time —
     // the lobby's per-player latency. Stops when the client is gone.
     let ping_state = state.clone();
+    let ping_id = id.clone();
     let ping_task = tokio::spawn(async move {
         let mut iv = tokio::time::interval(Duration::from_secs(5));
         iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1362,7 +1363,7 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
             iv.tick().await;
             {
                 let mut a = ping_state.lock().await;
-                match a.clients.get_mut(&id) {
+                match a.clients.get_mut(&ping_id) {
                     Some(c) => c.ping_sent_at = Some(Instant::now()),
                     None => break,
                 }
@@ -1376,7 +1377,7 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
     while let Some(Ok(msg)) = receiver.next().await {
         metrics::ws_in();
         match msg {
-            Message::Text(t) => handle_message(&state, id, &t).await,
+            Message::Text(t) => handle_message(&state, &id, &t).await,
             Message::Pong(_) => {
                 let mut a = state.lock().await;
                 if let Some(c) = a.clients.get_mut(&id) {
@@ -1397,21 +1398,20 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
     // Cleanup on disconnect: notify the peer, drop from queue/clients.
     {
         let mut a = state.lock().await;
-        a.waiting.retain(|&w| w != id);
+        a.waiting.retain(|w| w != &id);
         // This connection's own pending challenge (as challenger) is cancelled.
-        clear_challenge(&mut a, id);
+        clear_challenge(&mut a, &id);
         // Any pending challenge TARGETING this connection: the target left, so the
         // challenger should be told it was declined and the challenge cleared.
-        let aimed_here: Vec<u64> = a
+        let aimed_here: Vec<String> = a
             .challenges
             .iter()
-            .filter(|(_, &(tid, _))| tid == id)
-            .map(|(&cid, _)| cid)
+            .filter_map(|(cid, (tid, _))| (tid == &id).then(|| cid.clone()))
             .collect();
         let by = a.clients.get(&id).map(|c| c.name.clone()).unwrap_or_default();
         for cid in aimed_here {
-            clear_challenge(&mut a, cid);
-            send(&a, cid, &json!({"type":"challengeDeclined","by":by}));
+            clear_challenge(&mut a, &cid);
+            send(&a, &cid, &json!({"type":"challengeDeclined","by":by}));
         }
         // A mid-bout disconnect is NOT a forfeit anymore: the bout's tick loop sees
         // the dropped socket and enters the reconnect-grace freeze (the player may be
@@ -1419,11 +1419,11 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
         // `opponentLeft` for a (non-bout) peer link; the loop owns the in-bout case.
         // We still remove this dead connection below — the loop holds its own `tx`
         // clone and detects the drop via send failure.
-        let peer = a.clients.get(&id).and_then(|c| c.peer);
+        let peer = a.clients.get(&id).and_then(|c| c.peer.clone());
         let in_bout = a.clients.get(&id).is_some_and(|c| c.bout.is_some());
         if let Some(p) = peer {
             if !in_bout {
-                send(&a, p, &json!({"type": "opponentLeft"}));
+                send(&a, &p, &json!({"type": "opponentLeft"}));
                 if let Some(c) = a.clients.get_mut(&p) {
                     c.peer = None;
                 }
@@ -2223,11 +2223,11 @@ mod tests {
     /// via the explicit `waiting` queue, so the `queue`-based matchmaking tests
     /// stay isolated from the presence path. Presence tests set `status`
     /// explicitly via [`set_present`].
-    fn add_client(app: &mut App, id: u64, name: &str) -> mpsc::UnboundedReceiver<Message> {
+    fn add_client(app: &mut App, id: &str, name: &str) -> mpsc::UnboundedReceiver<Message> {
         let (tx, rx) = mpsc::unbounded_channel();
         let state = app.rating_for(name);
         app.clients.insert(
-            id,
+            id.to_string(),
             Client {
                 name: name.to_string(), tx, peer: None, state, bout: None,
                 match_id: None, status: None, geo: None, is_bot: false,
@@ -2239,9 +2239,9 @@ mod tests {
 
     /// Like [`add_client`] but flags the client as a bot (for the bot-vs-bot
     /// auto-pair-exclusion test).
-    fn add_bot(app: &mut App, id: u64, name: &str) -> mpsc::UnboundedReceiver<Message> {
+    fn add_bot(app: &mut App, id: &str, name: &str) -> mpsc::UnboundedReceiver<Message> {
         let rx = add_client(app, id, name);
-        if let Some(c) = app.clients.get_mut(&id) {
+        if let Some(c) = app.clients.get_mut(id) {
             c.is_bot = true;
             c.status = Some(Status::Available);
         }
@@ -2263,31 +2263,31 @@ mod tests {
     #[test]
     fn a_lone_player_is_queued_not_matched() {
         let mut app = test_app();
-        let _rx = add_client(&mut app, 1, "solo");
-        try_match(&mut app, 1);
-        assert_eq!(app.waiting, vec![1], "queued while waiting for an opponent");
-        assert_eq!(app.clients[&1].peer, None);
+        let _rx = add_client(&mut app, "1","solo");
+        try_match(&mut app, "1");
+        assert_eq!(app.waiting, vec!["1".to_string()], "queued while waiting for an opponent");
+        assert_eq!(app.clients["1"].peer, None);
     }
 
     #[test]
     fn a_matched_pair_starts_a_hosted_bout() {
         let mut app = test_app();
-        let mut rx_a = add_client(&mut app, 1, "alice");
-        let mut rx_b = add_client(&mut app, 2, "bob");
+        let mut rx_a = add_client(&mut app, "1","alice");
+        let mut rx_b = add_client(&mut app, "2","bob");
 
-        assert!(try_match(&mut app, 1).is_none(), "alice queues, no opponent yet");
-        let pending = try_match(&mut app, 2).expect("bob matches alice -> a hosted bout");
+        assert!(try_match(&mut app, "1").is_none(), "alice queues, no opponent yet");
+        let pending = try_match(&mut app, "2").expect("bob matches alice -> a hosted bout");
 
-        assert_eq!((pending.id_a, pending.id_b), (1, 2), "first-queued is side A");
+        assert_eq!((pending.id_a.as_str(), pending.id_b.as_str()), ("1", "2"), "first-queued is side A");
         assert!(
-            app.clients[&1].bout.is_some() && app.clients[&2].bout.is_some(),
+            app.clients["1"].bout.is_some() && app.clients["2"].bout.is_some(),
             "both clients are bound to the bout's input channel"
         );
         // Both get `matchStart` (with a seed); both go InGame.
         assert!(drained_types(&mut rx_a).contains(&"matchStart".to_string()));
         assert!(drained_types(&mut rx_b).contains(&"matchStart".to_string()));
-        assert_eq!(app.clients[&1].status, Some(Status::InGame));
-        assert_eq!(app.clients[&2].status, Some(Status::InGame));
+        assert_eq!(app.clients["1"].status, Some(Status::InGame));
+        assert_eq!(app.clients["2"].status, Some(Status::InGame));
     }
 
 
@@ -2301,7 +2301,7 @@ mod tests {
         let app0 = test_app();
         let (state_a, state_b) = (app0.rating_for("alice"), app0.rating_for("bob"));
         let pb = PendingBout {
-            match_id: 99, id_a: 1, id_b: 2, seed_a: 11, seed_b: 22,
+            match_id: "match-test".into(), id_a: "1".into(), id_b: "2".into(), seed_a: 11, seed_b: 22,
             name_a: "alice".into(), name_b: "bob".into(), state_a, state_b,
             tx_a, tx_b, input_rx, control_rx, human: [true, true],
         };
@@ -2325,11 +2325,11 @@ mod tests {
     fn settle_bout_rates_from_captured_identities_even_if_the_loser_left() {
         let mut app = test_app();
         // Only the winner is still connected; the loser already disconnected.
-        let mut rx_win = add_client(&mut app, 1, "alice");
-        let state_a = app.clients[&1].state;
+        let mut rx_win = add_client(&mut app, "1","alice");
+        let state_a = app.clients["1"].state;
         let state_b = app.rating_for("bob"); // bob is gone from app.clients
 
-        settle_bout(&mut app, 100, 1, "alice", state_a, 2, "bob", state_b, true, 30, 12);
+        settle_bout(&mut app, "m100", "1", "alice", state_a, "2", "bob", state_b, true, 30, 12);
 
         assert!(drained_types(&mut rx_win).contains(&"rating".to_string()), "winner got a rating");
         assert!(
@@ -2338,7 +2338,7 @@ mod tests {
         );
         // Idempotent per pair: a duplicate settle is a no-op.
         let before = app.ratings.get("alice").copied();
-        settle_bout(&mut app, 100, 1, "alice", state_a, 2, "bob", state_b, true, 30, 12);
+        settle_bout(&mut app, "m100", "1", "alice", state_a, "2", "bob", state_b, true, 30, 12);
         assert_eq!(app.ratings.get("alice").copied(), before, "settle is idempotent");
     }
 
@@ -2346,22 +2346,22 @@ mod tests {
     fn settle_bout_rates_once_notifies_both_and_is_idempotent() {
         std::env::set_var("RATINGS_FILE", std::env::temp_dir().join("bt_glue_ratings.json"));
         let mut app = test_app();
-        let mut rx_a = add_client(&mut app, 1, "alice");
-        let mut rx_b = add_client(&mut app, 2, "bob");
-        let (sa, sb) = (app.clients[&1].state, app.clients[&2].state);
+        let mut rx_a = add_client(&mut app, "1","alice");
+        let mut rx_b = add_client(&mut app, "2","bob");
+        let (sa, sb) = (app.clients["1"].state, app.clients["2"].state);
 
-        let exp_before = app.clients[&1].state.experience;
-        settle_bout(&mut app, 100, 1, "alice", sa, 2, "bob", sb, true, 30, 12); // alice beats bob
+        let exp_before = app.clients["1"].state.experience;
+        settle_bout(&mut app, "m100", "1", "alice", sa, "2", "bob", sb, true, 30, 12); // alice beats bob
 
-        assert_eq!(app.clients[&1].state.experience, exp_before + 1, "rated exactly once");
-        assert!(app.clients[&1].state.rating.conservative(3.0) > 0.0);
+        assert_eq!(app.clients["1"].state.experience, exp_before + 1, "rated exactly once");
+        assert!(app.clients["1"].state.rating.conservative(3.0) > 0.0);
         assert!(drained_types(&mut rx_a).contains(&"rating".to_string()), "winner notified");
         assert!(drained_types(&mut rx_b).contains(&"rating".to_string()), "loser notified");
 
         // Settling the same match id again must be a no-op (the double-settle guard).
-        let exp = app.clients[&1].state.experience;
-        settle_bout(&mut app, 100, 1, "alice", sa, 2, "bob", sb, true, 30, 12);
-        assert_eq!(app.clients[&1].state.experience, exp, "second settle changes nothing");
+        let exp = app.clients["1"].state.experience;
+        settle_bout(&mut app, "m100", "1", "alice", sa, "2", "bob", sb, true, 30, 12);
+        assert_eq!(app.clients["1"].state.experience, exp, "second settle changes nothing");
     }
 
     #[test]
@@ -2478,10 +2478,10 @@ mod tests {
         // Build instants relative to a base so adding durations never underflows.
         let base = Instant::now();
         let now = base + Duration::from_secs(100);
-        app.last_active.insert(1, base + Duration::from_secs(99)); // 1s ago  -> active
-        app.last_active.insert(2, base + Duration::from_secs(75)); // 25s ago -> active
-        app.last_active.insert(3, base + Duration::from_secs(69)); // 31s ago -> idle
-        app.last_active.insert(4, base); //                           100s ago -> idle
+        app.last_active.insert("1".to_string(), base + Duration::from_secs(99)); // 1s ago  -> active
+        app.last_active.insert("2".to_string(), base + Duration::from_secs(75)); // 25s ago -> active
+        app.last_active.insert("3".to_string(), base + Duration::from_secs(69)); // 31s ago -> idle
+        app.last_active.insert("4".to_string(), base); //                           100s ago -> idle
         assert_eq!(active_count(&app, now), 2, "only the two within 30s count");
     }
 
@@ -2528,18 +2528,18 @@ mod tests {
     // --- presence / roster ---------------------------------------------------
 
     /// Give a client a lobby status (the presence path).
-    fn set_present(app: &mut App, id: u64, status: Status) {
-        app.clients.get_mut(&id).unwrap().status = Some(status);
+    fn set_present(app: &mut App, id: &str, status: Status) {
+        app.clients.get_mut(id).unwrap().status = Some(status);
     }
 
     #[test]
     fn roster_lists_only_named_clients_lowercase_and_sorted() {
         let mut app = test_app();
-        let _r1 = add_client(&mut app, 1, "bob");
-        let _r2 = add_client(&mut app, 2, "alice");
-        let _r3 = add_client(&mut app, 3, ""); // anonymous -> never listed
-        set_present(&mut app, 1, Status::Searching);
-        set_present(&mut app, 2, Status::Available);
+        let _r1 = add_client(&mut app, "1","bob");
+        let _r2 = add_client(&mut app, "2","alice");
+        let _r3 = add_client(&mut app, "3",""); // anonymous -> never listed
+        set_present(&mut app, "1",Status::Searching);
+        set_present(&mut app, "2",Status::Available);
 
         let frame = players_msg(&roster(&app));
         let players = frame["players"].as_array().unwrap();
@@ -2555,10 +2555,10 @@ mod tests {
     fn roster_dedupes_a_name_keeping_the_most_engaged_status() {
         let mut app = test_app();
         // Same name on two connections: one Available, one InGame -> show InGame.
-        let _r1 = add_client(&mut app, 1, "dup");
-        let _r2 = add_client(&mut app, 2, "dup");
-        set_present(&mut app, 1, Status::Available);
-        set_present(&mut app, 2, Status::InGame);
+        let _r1 = add_client(&mut app, "1","dup");
+        let _r2 = add_client(&mut app, "2","dup");
+        set_present(&mut app, "1",Status::Available);
+        set_present(&mut app, "2",Status::InGame);
         let r = roster(&app);
         assert_eq!(r.len(), 1, "de-duped by name");
         assert_eq!(r[0], ("dup".to_string(), Status::InGame, None, false), "the busiest status wins");
@@ -2567,24 +2567,24 @@ mod tests {
     #[test]
     fn auto_match_pairs_only_two_humans_never_a_bot() {
         let mut app = test_app();
-        let _b1 = add_bot(&mut app, 1, "Tokyo-Ernie");
-        let _b2 = add_bot(&mut app, 2, "London-Ernie");
+        let _b1 = add_bot(&mut app, "1","Tokyo-Ernie");
+        let _b2 = add_bot(&mut app, "2","London-Ernie");
         // Bots are passive — they never auto-pair (with each other or a human).
-        assert!(!is_match_candidate(&app, 1, 2), "two bots don't auto-pair");
+        assert!(!is_match_candidate(&app, "1", "2"), "two bots don't auto-pair");
         // A human going Available is NOT thrown into a waiting bot.
-        let _h = add_client(&mut app, 3, "human");
-        if let Some(c) = app.clients.get_mut(&3) {
+        let _h = add_client(&mut app, "3","human");
+        if let Some(c) = app.clients.get_mut("3") {
             c.status = Some(Status::Available);
         }
-        assert!(!is_match_candidate(&app, 3, 1), "a bot is NOT an auto-pair target for a human");
-        assert!(try_match(&mut app, 3).is_none(), "a lone human among only bots finds no auto-pair");
+        assert!(!is_match_candidate(&app, "3", "1"), "a bot is NOT an auto-pair target for a human");
+        assert!(try_match(&mut app, "3").is_none(), "a lone human among only bots finds no auto-pair");
         // Two open humans DO auto-pair with each other.
-        let _h2 = add_client(&mut app, 4, "human2");
-        if let Some(c) = app.clients.get_mut(&4) {
+        let _h2 = add_client(&mut app, "4","human2");
+        if let Some(c) = app.clients.get_mut("4") {
             c.status = Some(Status::Available);
         }
-        assert!(is_match_candidate(&app, 3, 4), "two humans auto-pair");
-        assert!(try_match(&mut app, 3).is_some(), "two open humans auto-pair");
+        assert!(is_match_candidate(&app, "3", "4"), "two humans auto-pair");
+        assert!(try_match(&mut app, "3").is_some(), "two open humans auto-pair");
     }
 
     #[test]
@@ -2602,21 +2602,21 @@ mod tests {
     fn start_bout_remembers_pre_match_presence_for_restore() {
         let mut app = test_app();
         // A bot (Available) challenged by a human (no presence — a pure challenger).
-        let _bot = add_bot(&mut app, 1, "Tokyo-Ernie");
-        let _human = add_client(&mut app, 2, "human"); // status stays None
-        start_bout(&mut app, 2, 1, None).expect("bout starts");
-        assert_eq!(app.clients[&1].prev_status, Some(Status::Available), "bot was Available");
-        assert_eq!(app.clients[&2].prev_status, None, "challenger had no presence");
+        let _bot = add_bot(&mut app, "1","Tokyo-Ernie");
+        let _human = add_client(&mut app, "2","human"); // status stays None
+        start_bout(&mut app, "2", "1", None).expect("bout starts");
+        assert_eq!(app.clients["1"].prev_status, Some(Status::Available), "bot was Available");
+        assert_eq!(app.clients["2"].prev_status, None, "challenger had no presence");
         // Hence at bout end the bot returns to Available, the human to nothing.
-        assert_eq!(post_bout_status(app.clients[&1].prev_status), Some(Status::Available));
-        assert_eq!(post_bout_status(app.clients[&2].prev_status), None);
+        assert_eq!(post_bout_status(app.clients["1"].prev_status), Some(Status::Available));
+        assert_eq!(post_bout_status(app.clients["2"].prev_status), None);
     }
 
     #[test]
     fn roster_carries_the_ping_bucketed_to_ten_ms() {
         let mut app = test_app();
-        let _r = add_client(&mut app, 1, "Sydney-Bert");
-        if let Some(c) = app.clients.get_mut(&1) {
+        let _r = add_client(&mut app, "1","Sydney-Bert");
+        if let Some(c) = app.clients.get_mut("1") {
             c.status = Some(Status::Available);
             c.ping_ms = Some(43); // measured RTT
         }
@@ -2630,15 +2630,15 @@ mod tests {
     #[test]
     fn maybe_broadcast_players_only_pushes_on_a_real_change() {
         let mut app = test_app();
-        let mut rx = add_client(&mut app, 1, "alice");
-        set_present(&mut app, 1, Status::Available);
+        let mut rx = add_client(&mut app, "1","alice");
+        set_present(&mut app, "1",Status::Available);
         maybe_broadcast_players(&mut app);
         assert!(drained_types(&mut rx).contains(&"players".to_string()), "first roster pushed");
         // No change -> no re-broadcast.
         maybe_broadcast_players(&mut app);
         assert!(!drained_types(&mut rx).contains(&"players".to_string()), "no spurious re-push");
         // A status change -> pushed again.
-        set_present(&mut app, 1, Status::Searching);
+        set_present(&mut app, "1",Status::Searching);
         maybe_broadcast_players(&mut app);
         assert!(drained_types(&mut rx).contains(&"players".to_string()), "change re-pushed");
     }
@@ -2648,17 +2648,17 @@ mod tests {
     #[test]
     fn two_available_clients_auto_pair_without_an_explicit_queue() {
         let mut app = test_app();
-        let mut rx_a = add_client(&mut app, 1, "alice");
-        let mut rx_b = add_client(&mut app, 2, "bob");
-        set_present(&mut app, 1, Status::Available);
-        set_present(&mut app, 2, Status::Available);
+        let mut rx_a = add_client(&mut app, "1","alice");
+        let mut rx_b = add_client(&mut app, "2","bob");
+        set_present(&mut app, "1",Status::Available);
+        set_present(&mut app, "2",Status::Available);
 
         // alice goes through the matcher with NO one queued — bob is Available, so
         // they pair purely on presence.
-        let pending = try_match(&mut app, 1).expect("two Available clients pair");
-        assert_eq!((pending.id_a, pending.id_b), (2, 1), "bob (the candidate) is side A");
-        assert_eq!(app.clients[&1].status, Some(Status::InGame));
-        assert_eq!(app.clients[&2].status, Some(Status::InGame));
+        let pending = try_match(&mut app, "1").expect("two Available clients pair");
+        assert_eq!((pending.id_a.as_str(), pending.id_b.as_str()), ("2", "1"), "bob (the candidate) is side A");
+        assert_eq!(app.clients["1"].status, Some(Status::InGame));
+        assert_eq!(app.clients["2"].status, Some(Status::InGame));
         assert!(drained_types(&mut rx_a).contains(&"matchStart".to_string()));
         assert!(drained_types(&mut rx_b).contains(&"matchStart".to_string()));
     }
@@ -2668,23 +2668,23 @@ mod tests {
     #[test]
     fn challenge_accept_builds_a_directed_bout_and_sets_both_ingame() {
         let mut app = test_app();
-        let mut rx_a = add_client(&mut app, 1, "alice");
-        let mut rx_b = add_client(&mut app, 2, "bob");
-        set_present(&mut app, 1, Status::Available);
-        set_present(&mut app, 2, Status::Available);
+        let mut rx_a = add_client(&mut app, "1","alice");
+        let mut rx_b = add_client(&mut app, "2","bob");
+        set_present(&mut app, "1",Status::Available);
+        set_present(&mut app, "2",Status::Available);
 
         // alice challenges bob (record the pending challenge as the handler would).
         let tid = find_named_available(&app, "bob").expect("bob is challengeable");
-        assert_eq!(tid, 2);
-        app.challenges.insert(1, (2, Instant::now() + CHALLENGE_TIMEOUT));
+        assert_eq!(tid, "2");
+        app.challenges.insert("1".to_string(), ("2".to_string(), Instant::now() + CHALLENGE_TIMEOUT));
 
         // bob accepts -> a directed bout for (alice=A, bob=B); challenge cleared.
-        let pending = start_bout(&mut app, 1, 2, None).expect("directed bout built");
-        clear_challenge(&mut app, 1);
-        assert_eq!((pending.id_a, pending.id_b), (1, 2), "challenger is side A");
+        let pending = start_bout(&mut app, "1", "2", None).expect("directed bout built");
+        clear_challenge(&mut app, "1");
+        assert_eq!((pending.id_a.as_str(), pending.id_b.as_str()), ("1", "2"), "challenger is side A");
         assert!(app.challenges.is_empty(), "pending challenge cleared on accept");
-        assert_eq!(app.clients[&1].status, Some(Status::InGame));
-        assert_eq!(app.clients[&2].status, Some(Status::InGame));
+        assert_eq!(app.clients["1"].status, Some(Status::InGame));
+        assert_eq!(app.clients["2"].status, Some(Status::InGame));
         // No quality figure for a hand-picked challenge.
         let ma: Vec<Value> = std::iter::from_fn(|| rx_a.try_recv().ok())
             .filter_map(|m| match m {
@@ -2702,12 +2702,12 @@ mod tests {
     #[test]
     fn start_bout_registers_a_rejoinable_handle_with_match_id() {
         let mut app = test_app();
-        let mut rx_a = add_client(&mut app, 1, "alice");
-        let _rx_b = add_client(&mut app, 2, "bob");
-        set_present(&mut app, 1, Status::Available);
-        set_present(&mut app, 2, Status::Available);
+        let mut rx_a = add_client(&mut app, "1","alice");
+        let _rx_b = add_client(&mut app, "2","bob");
+        set_present(&mut app, "1",Status::Available);
+        set_present(&mut app, "2",Status::Available);
 
-        let mut pending = start_bout(&mut app, 1, 2, None).expect("bout built");
+        let mut pending = start_bout(&mut app, "1", "2", None).expect("bout built");
         let mid = pending.match_id;
 
         // The bout is registered for rejoin, with both participants recorded, and
@@ -2715,8 +2715,8 @@ mod tests {
         let handle = app.bouts.get(&mid).expect("bout registered in app.bouts");
         assert_eq!(handle.name_a, "alice");
         assert_eq!(handle.name_b, "bob");
-        assert_eq!(app.clients[&1].match_id, Some(mid));
-        assert_eq!(app.clients[&2].match_id, Some(mid));
+        assert_eq!(app.clients["1"].match_id.as_deref(), Some(mid.as_str()));
+        assert_eq!(app.clients["2"].match_id.as_deref(), Some(mid.as_str()));
 
         // matchStart carries the id the client parks in its URL for rejoin.
         let start: Value = std::iter::from_fn(|| rx_a.try_recv().ok())
@@ -2726,19 +2726,19 @@ mod tests {
             })
             .find(|v| v["type"] == "matchStart")
             .expect("alice matchStart");
-        assert_eq!(start["match_id"].as_u64(), Some(mid));
+        assert_eq!(start["match_id"].as_str(), Some(mid.as_str()));
 
         // A reattach (from the rejoin handler) reaches the bout's control receiver —
         // the loop would consume this to swap the socket back in and resume.
         let (txn, _rxn) = mpsc::unbounded_channel::<Message>();
         app.bouts[&mid]
             .control
-            .try_send(BoutControl::Reattach { side: Side::A, new_id: 7, tx: txn })
+            .try_send(BoutControl::Reattach { side: Side::A, new_id: "7".into(), tx: txn })
             .expect("control send");
         match pending.control_rx.try_recv() {
             Ok(BoutControl::Reattach { side, new_id, .. }) => {
                 assert_eq!(side, Side::A);
-                assert_eq!(new_id, 7);
+                assert_eq!(new_id, "7");
             }
             _ => panic!("expected a Reattach on the bout control channel"),
         }
@@ -2750,18 +2750,18 @@ mod tests {
         // server-side binding — never anything client-supplied — so a client can
         // only forfeit the bout it is actually in. Mirror that resolution here.
         let mut app = test_app();
-        let _a = add_client(&mut app, 1, "alice");
-        let _b = add_client(&mut app, 2, "bob");
-        set_present(&mut app, 1, Status::Available);
-        set_present(&mut app, 2, Status::Available);
-        let mut pending = start_bout(&mut app, 1, 2, None).expect("bout");
+        let _a = add_client(&mut app, "1","alice");
+        let _b = add_client(&mut app, "2","bob");
+        set_present(&mut app, "1",Status::Available);
+        set_present(&mut app, "2",Status::Available);
+        let mut pending = start_bout(&mut app, "1", "2", None).expect("bout");
         let mid = pending.match_id;
 
-        let target = app.clients.get(&2).and_then(|c| match (c.match_id, c.bout.as_ref()) {
+        let target = app.clients.get("2").and_then(|c| match (c.match_id.clone(), c.bout.as_ref()) {
             (Some(m), Some((_, side))) => Some((m, *side)),
             _ => None,
         });
-        assert_eq!(target, Some((mid, Side::B)), "bob resolves to his own bout, side B");
+        assert_eq!(target, Some((mid.clone(), Side::B)), "bob resolves to his own bout, side B");
 
         app.bouts[&mid]
             .control
@@ -2776,12 +2776,12 @@ mod tests {
     #[test]
     fn find_named_available_ignores_busy_or_offline_targets() {
         let mut app = test_app();
-        let _r = add_client(&mut app, 1, "busy");
-        set_present(&mut app, 1, Status::InGame); // in a match -> not challengeable
+        let _r = add_client(&mut app, "1","busy");
+        set_present(&mut app, "1",Status::InGame); // in a match -> not challengeable
         assert!(find_named_available(&app, "busy").is_none(), "InGame isn't available");
         assert!(find_named_available(&app, "ghost").is_none(), "offline isn't available");
-        set_present(&mut app, 1, Status::Available);
-        assert_eq!(find_named_available(&app, "busy"), Some(1), "Available is challengeable");
+        set_present(&mut app, "1",Status::Available);
+        assert_eq!(find_named_available(&app, "busy"), Some("1".to_string()), "Available is challengeable");
     }
 
     // --- per-player stats (the players table) --------------------------------

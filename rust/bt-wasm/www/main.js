@@ -424,7 +424,7 @@ function connectLobby() {
         // socket drop) before doing any lobby presence. The server reattaches us and
         // replays matchStart + a keyframe; on failure it sends rejoinFailed.
         if (pendingRejoin !== null) {
-            const mid = Number(pendingRejoin); // came from the URL (a string) — send a number
+            const mid = pendingRejoin; // a tagged-UUID string (match-<uuid>) from the URL
             pendingRejoin = null;
             sock.send(JSON.stringify({ type: 'rejoin', match_id: mid, token: identityToken, name: playerName }));
             return;

@@ -34,6 +34,10 @@ sentry = { version = "0.34", default-features = false, features = ["backtrace", 
 # Metrics. Pure-Rust Prometheus client; we expose /metrics in text format for fly's
 # managed Grafana to scrape (see [[metrics]] in fly.toml). No C deps.
 prometheus = { version = "0.13", default-features = false }
+# Tagged-UUID ids: every generated id is `<kind>-<uuid v4>` (e.g. `match-…`,
+# `client-…`) — unguessable + unique across restarts. v4 = random (getrandom; works
+# on the static-musl/distroless runtime).
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 proptest = "1"
