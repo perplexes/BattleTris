@@ -7,11 +7,11 @@
 //! driven by the same `bt-ai` placement search the vs-Computer Ernie uses.
 //!
 //! Why: it populates the lobby so a fresh visitor always has someone to play,
-//! and — deployed one-per-fly-region over the private 6PN network — it exercises
-//! the netcode under real cross-geo latency (Tokyo→sjc etc.). It places pieces with
-//! the strong line-clearing eval ([`best_placement_strong`], NOT faithful Ernie),
-//! shops the bazaar, and launches weapons — timing board-raisers to when its spy
-//! reveals the opponent stacked high (see [`bt_ai::weapons`]).
+//! and — deployed per-fly-region over the private 6PN network — it exercises the
+//! netcode under real cross-geo latency (Tokyo→sjc etc.). Two personas (see
+//! [`Persona`]): aggressive **Bert** (the strong line-clearing eval + smart
+//! weapons, timing board-raisers to when its spy reveals the opponent stacked high)
+//! and easy-going **Ernie** (faithful placement, slower, no weapons).
 //!
 //! The bot keeps a LOCAL `bt-core::Game` seeded from `matchStart.seed` (the same
 //! deterministic piece stream the server runs for this side) and reconciles it
@@ -66,13 +66,16 @@ const OPP_HIGH_FRAC: f64 = 0.6;
 
 type Out = mpsc::UnboundedSender<Message>;
 
-/// A bot's difficulty + name. **Ernie** (default) is the strong adversary — the
-/// line-clearing eval plus smart weapons. **Bert** (`BT_BOT_PERSONA=bert`) is the
-/// gentle one for new visitors: faithful Ernie's weaker placement, a slower pace,
-/// and no weapons. (Bert & Ernie. Naturally.)
+/// A bot's difficulty + name. **Bert** is the aggressive adversary — the strong
+/// line-clearing eval plus smart weapons, at a brisk pace. **Ernie** (the default)
+/// is the easy-going one for new visitors: faithful Ernie's weaker placement, a
+/// slower pace, and no weapons. (Bert & Ernie. Bert's the intense one.)
+///
+/// Selected by `BT_BOT_PERSONA`, else the fly process-group name
+/// (`FLY_PROCESS_GROUP`), else easy-going Ernie.
 #[derive(Clone, Copy)]
 struct Persona {
-    /// Name suffix, e.g. "Ernie" → "Tokyo-Ernie".
+    /// Name suffix, e.g. "Bert" → "Tokyo-Bert".
     suffix: &'static str,
     /// Use the strong line-clearing eval (vs faithful Ernie's weaker placement).
     strong: bool,
@@ -83,22 +86,24 @@ struct Persona {
 }
 
 fn persona() -> Persona {
-    match std::env::var("BT_BOT_PERSONA")
+    let which = std::env::var("BT_BOT_PERSONA")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("FLY_PROCESS_GROUP").ok())
         .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "bert" | "easy" => Persona {
+        .to_ascii_lowercase();
+    match which.as_str() {
+        "bert" | "strong" | "hard" => Persona {
             suffix: "Bert",
-            strong: false,
-            place_ticks: 44, // ~700ms — slower, more beatable
-            weapons: false,
-        },
-        _ => Persona {
-            suffix: "Ernie",
             strong: true,
             place_ticks: PLACE_INTERVAL_TICKS,
             weapons: true,
+        },
+        _ => Persona {
+            suffix: "Ernie",
+            strong: false,
+            place_ticks: 44, // ~700ms — slower, more beatable
+            weapons: false,
         },
     }
 }

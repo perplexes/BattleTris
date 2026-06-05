@@ -156,9 +156,11 @@ function renderOnlineList(players) {
     for (const p of lobbyPlayers) {
         const row = document.createElement('div');
         row.className = 'lobby-list-row' + (p.name === selectedPlayer ? ' selected' : '');
-        // Optional geo label (bots announce a city/region); humans usually omit it.
-        const geo = p.geo ? `<span class="ll-geo">\u{1F310} ${escapeHtml(p.geo)}</span>` : '';
-        row.innerHTML = `<span class="ll-name">${escapeHtml(p.name)}</span>${geo}<span class="ll-status">${escapeHtml(p.status || '')}</span>`;
+        // Round-trip latency (ms) to the server, measured via ws Ping/Pong — shown so
+        // a visitor can gauge how laggy a match against this player would be. Absent
+        // until the first Pong returns.
+        const ping = (typeof p.ping === 'number') ? `<span class="ll-ping">${p.ping} ms</span>` : '';
+        row.innerHTML = `<span class="ll-name">${escapeHtml(p.name)}</span>${ping}<span class="ll-status">${escapeHtml(p.status || '')}</span>`;
         row.addEventListener('click', () => selectPlayer(p.name));
         onlineListEl.appendChild(row);
     }

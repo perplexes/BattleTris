@@ -158,6 +158,12 @@ struct Client {
     /// Lobby presence captured at the start of the current bout, restored when it
     /// ends (see [`post_bout_status`]). `None` outside a bout.
     prev_status: Option<Status>,
+    /// When the last ws Ping was sent to this client (to measure round-trip time on
+    /// the matching Pong). `None` between a Pong and the next Ping.
+    ping_sent_at: Option<Instant>,
+    /// Last measured round-trip time, in ms — shown in the lobby roster (replacing
+    /// the old geo label). `None` until the first Pong comes back.
+    ping_ms: Option<u32>,
 }
 
 /// Presence to restore when a bout ends. A player who had ANY lobby presence
@@ -288,14 +294,16 @@ fn maybe_broadcast_stats(app: &mut App) {
     }
 }
 
-/// One de-duped lobby row: (name, busiest status, optional geo label).
-type RosterEntry = (String, Status, Option<String>);
+/// One de-duped lobby row: (name, busiest status, optional ping RTT in ms). The
+/// ping is bucketed to 10ms so normal jitter doesn't spam roster re-broadcasts.
+type RosterEntry = (String, Status, Option<u32>);
 
 /// The de-duped lobby roster: one entry per *named* client, keeping the
 /// most-engaged status when a name has several connections (e.g. two tabs).
 /// Sorted by name so the broadcast-on-change comparison is order-stable.
 fn roster(app: &App) -> Vec<RosterEntry> {
-    let mut by_name: HashMap<String, (Status, Option<String>)> = HashMap::new();
+    let bucket = |p: Option<u32>| p.map(|ms| (ms + 5) / 10 * 10);
+    let mut by_name: HashMap<String, (Status, Option<u32>)> = HashMap::new();
     for c in app.clients.values() {
         let (name, status) = match (c.name.as_str(), c.status) {
             (n, Some(s)) if !n.is_empty() => (n.to_string(), s),
@@ -304,28 +312,29 @@ fn roster(app: &App) -> Vec<RosterEntry> {
         by_name
             .entry(name)
             .and_modify(|cur| {
-                // Keep the busiest connection's status; carry its geo with it.
+                // Keep the busiest connection's status; carry its ping with it.
                 if status.rank() > cur.0.rank() {
-                    *cur = (status, c.geo.clone());
+                    *cur = (status, bucket(c.ping_ms));
                 }
             })
-            .or_insert((status, c.geo.clone()));
+            .or_insert((status, bucket(c.ping_ms)));
     }
     let mut out: Vec<RosterEntry> =
-        by_name.into_iter().map(|(name, (status, geo))| (name, status, geo)).collect();
+        by_name.into_iter().map(|(name, (status, ping))| (name, status, ping)).collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
 }
 
 /// The `players` presence frame the lobby renders. Each entry carries an optional
-/// `geo` (a city/region label) — bots announce theirs; humans usually omit it.
+/// `ping` (round-trip latency in ms) — shown next to the name so a visitor can see
+/// how laggy a match against that player would be.
 fn players_msg(roster: &[RosterEntry]) -> Value {
     let players: Vec<Value> = roster
         .iter()
-        .map(|(name, status, geo)| {
+        .map(|(name, status, ping)| {
             let mut o = json!({ "name": name, "status": status.as_str() });
-            if let Some(g) = geo {
-                o["geo"] = json!(g);
+            if let Some(p) = ping {
+                o["ping"] = json!(p);
             }
             o
         })
@@ -1029,6 +1038,7 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let (mut sender, mut receiver) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
+    let tx_ping = tx.clone();
 
     {
         let mut a = state.lock().await;
@@ -1038,6 +1048,7 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
             Client {
                 name: String::new(), tx, peer: None, state: st, bout: None,
                 status: None, geo: None, is_bot: false, prev_status: None,
+                ping_sent_at: None, ping_ms: None,
             },
         );
     }
@@ -1051,9 +1062,42 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
         }
     });
 
+    // Ping task: every 5s, stamp the send time and ws-Ping the client. Browsers and
+    // the bot auto-Pong, and the read loop turns the Pong into a round-trip time —
+    // the lobby's per-player latency. Stops when the client is gone.
+    let ping_state = state.clone();
+    let ping_task = tokio::spawn(async move {
+        let mut iv = tokio::time::interval(Duration::from_secs(5));
+        iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        iv.tick().await; // consume the immediate first tick
+        loop {
+            iv.tick().await;
+            {
+                let mut a = ping_state.lock().await;
+                match a.clients.get_mut(&id) {
+                    Some(c) => c.ping_sent_at = Some(Instant::now()),
+                    None => break,
+                }
+            }
+            if tx_ping.send(Message::Ping(Vec::new())).is_err() {
+                break;
+            }
+        }
+    });
+
     while let Some(Ok(msg)) = receiver.next().await {
         match msg {
             Message::Text(t) => handle_message(&state, id, &t).await,
+            Message::Pong(_) => {
+                let mut a = state.lock().await;
+                if let Some(c) = a.clients.get_mut(&id) {
+                    if let Some(sent) = c.ping_sent_at.take() {
+                        c.ping_ms = Some(sent.elapsed().as_millis() as u32);
+                    }
+                }
+                // Roster carries the (bucketed) ping, so refresh if it changed.
+                maybe_broadcast_players(&mut a);
+            }
             Message::Close(_) => break,
             _ => {}
         }
@@ -1098,6 +1142,7 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
         }
     }
     writer.abort();
+    ping_task.abort();
     println!("client {id} disconnected");
 }
 
@@ -1852,6 +1897,7 @@ mod tests {
             Client {
                 name: name.to_string(), tx, peer: None, state, bout: None,
                 status: None, geo: None, is_bot: false, prev_status: None,
+                ping_sent_at: None, ping_ms: None,
             },
         );
         rx
@@ -2226,16 +2272,18 @@ mod tests {
     }
 
     #[test]
-    fn roster_carries_a_geo_label() {
+    fn roster_carries_the_ping_bucketed_to_ten_ms() {
         let mut app = test_app();
-        let _r = add_client(&mut app, 1, "Sydney-Ernie");
+        let _r = add_client(&mut app, 1, "Sydney-Bert");
         if let Some(c) = app.clients.get_mut(&1) {
             c.status = Some(Status::Available);
-            c.geo = Some("Sydney".to_string());
+            c.ping_ms = Some(43); // measured RTT
         }
         let frame = players_msg(&roster(&app));
         let players = frame["players"].as_array().unwrap();
-        assert_eq!(players[0]["geo"], "Sydney", "geo rides the players frame");
+        // The ping rides the frame, bucketed to the nearest 10ms (43 → 40).
+        assert_eq!(players[0]["ping"], 40, "ping rides the players frame");
+        assert_eq!(players[0]["geo"], serde_json::Value::Null, "geo no longer sent");
     }
 
     #[test]
