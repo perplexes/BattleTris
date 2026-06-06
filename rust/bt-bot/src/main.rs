@@ -27,6 +27,9 @@
 
 use std::time::Duration;
 
+mod sync;
+use sync::{decide, BotAction, SyncState};
+
 use bt_ai::weapons::{buy_plan, launch_choice};
 use bt_ai::{best_placement, best_placement_skill, best_placement_strong, Placement};
 use bt_core::weapons::WeaponToken;
@@ -311,6 +314,17 @@ struct MatchState {
     /// Ticks since the last snapshot; if it crosses [`STALE_TICKS`] the opponent
     /// has gone silent (forfeit/disconnect) and we end the match our side.
     idle_ticks: u32,
+    /// The last input seq the SERVER has confirmed applying for us — the snapshot
+    /// `ack`. While this trails [`last_sent`] we have inputs still in flight.
+    acked: u64,
+    /// The seq of our most recently SENT input this bout (resets to 0 with each new
+    /// [`MatchState`], so it lines up with the server's per-bout ack baseline). We
+    /// never begin a new action while `acked < last_sent` — the bot always waits for
+    /// the server to catch up, so its local prediction can't run ahead of the
+    /// authoritative sim. That is the general fix for "the bot did something before
+    /// the server acked it" — most visibly a predicted bazaar-leave racing the
+    /// server's bazaar-entry and freezing the whole match.
+    last_sent: u64,
 }
 
 impl MatchState {
@@ -342,6 +356,8 @@ impl MatchState {
             opp_high: false,
             done: false,
             idle_ticks: 0,
+            acked: 0,
+            last_sent: 0,
         }
     }
 }
@@ -567,6 +583,12 @@ fn handle_text(
         Some("snapshot") => {
             if let Some(state) = ms.as_mut() {
                 state.idle_ticks = 0; // the bout is alive
+                // The server's confirmation of our inputs: `ack` is the last seq it
+                // applied for us. The driver gates every action on this catching up
+                // to what we've sent, so we never run ahead of the authoritative sim.
+                if let Some(a) = v.get("ack").and_then(|a| a.as_u64()) {
+                    state.acked = a;
+                }
                 if v.get("result").and_then(|r| r.as_i64()).unwrap_or(0) != 0 {
                     state.done = true;
                 }
@@ -610,23 +632,24 @@ fn handle_text(
     }
 }
 
-/// One 16ms step of an in-progress match: handle the bazaar gate, advance the
-/// local sim, and place a piece when the pacer says it's time.
+/// One 16ms step of an in-progress match. Per-tick bookkeeping (idle/progress/spy
+/// aging) runs first; then the sync state machine ([`sync::decide`]) picks exactly
+/// one thing to do, which we interpret here. Keeping the policy in `decide` (pure +
+/// proptested) and only the side effects here is what keeps the netcode invariants
+/// — never act ahead of the server, never leave a bazaar we only predicted entering
+/// — from drifting back into a tangle of ad-hoc booleans.
 fn drive_tick(state: &mut MatchState, out: &Out, seq: &mut u64) {
     if state.done {
         return;
     }
-    // No authoritative frame for a while ⇒ the opponent vanished; end the match.
+    // ── Per-tick bookkeeping, independent of phase ──
+    // No authoritative frame for a while ⇒ the opponent vanished.
     state.idle_ticks += 1;
-    if state.idle_ticks > STALE_TICKS {
-        println!("match ended (opponent went silent)");
-        state.done = true;
-        return;
-    }
+    let idle_timed_out = state.idle_ticks > STALE_TICKS;
     // Periodic progress log (~every 12s) so a long match still shows lines cleared
     // and weapons fired without waiting for a top-out.
     state.live_ticks += 1;
-    if state.live_ticks % 750 == 0 {
+    if state.live_ticks.is_multiple_of(750) {
         println!(
             "[{}] progress: {} lines, {} weapons launched",
             state.persona.suffix,
@@ -634,7 +657,6 @@ fn drive_tick(state: &mut MatchState, out: &Out, seq: &mut u64) {
             state.launched
         );
     }
-
     // Spy intel ages out between keyframes — once it lapses we're blind again.
     if state.spy_fresh > 0 {
         state.spy_fresh -= 1;
@@ -643,27 +665,45 @@ fn drive_tick(state: &mut MatchState, out: &Out, seq: &mut u64) {
         }
     }
 
-    // Bazaar barrier: while EITHER side is shopping the match is frozen server-side.
-    if state.in_bazaar || state.opp_in_bazaar || state.game.is_in_bazaar() {
-        // Shop + leave ONLY when the SERVER confirms WE'RE in the bazaar (the
-        // authoritative `in_bazaar`), NOT our local prediction. Our prediction can
-        // reach the bazaar a few ticks before the server; a LeaveBazaar sent then is
-        // a no-op the server eats BEFORE it enters the bazaar, and we'd never re-send
-        // — freezing the match in the bazaar forever. And keep asking to leave every
-        // tick until the server confirms (a single request can still race the entry).
-        if state.in_bazaar {
-            if !state.bazaar_bought {
-                shop_bazaar(state, out, seq);
-                state.bazaar_bought = true;
+    // ── Decide, then interpret. `decide` owns the "never run ahead of the server"
+    // policy (see its invariants); the side effects live here. ──
+    let action = decide(&SyncState {
+        done: state.done,
+        idle_timed_out,
+        acked: state.acked,
+        last_sent: state.last_sent,
+        auth_baz: state.in_bazaar,
+        opp_baz: state.opp_in_bazaar,
+        local_baz: state.game.is_in_bazaar(),
+        bought: state.bazaar_bought,
+    });
+    match action {
+        BotAction::End => {
+            if idle_timed_out {
+                println!("match ended (opponent went silent)");
+                state.done = true; // the driver loop ends the match next tick
             }
-            *seq += 1;
-            let _ = out.send(Message::Text(
-                json!({ "type": "input", "seq": *seq, "input": "LeaveBazaar" }).to_string(),
-            ));
         }
-        return;
+        // Inputs in flight, or a bazaar barrier that isn't ours to clear — hold. The
+        // local sim simply doesn't tick; every piece is hard-dropped and keyframes
+        // reconcile us, so a brief pause costs nothing.
+        BotAction::WaitAck | BotAction::WaitBazaar => {}
+        // Authoritatively + locally in our bazaar: buy a loadout and leave, once. The
+        // server stays in the bazaar until our LeaveBazaar, and we only got here after
+        // it acked our prior inputs, so the leave can't race the entry.
+        BotAction::Shop => {
+            shop_bazaar(state, out, seq);
+            state.bazaar_bought = true;
+            state.last_sent = *seq; // hold until the server confirms the buys + leave
+        }
+        BotAction::Play => play(state, out, seq),
     }
+}
 
+/// Advance the local sim one tick and, subject to the launch/place cooldowns, fire a
+/// weapon and/or place a piece. Reached only when [`sync::decide`] returns `Play`, so
+/// there are no inputs in flight and no bazaar barrier is up.
+fn play(state: &mut MatchState, out: &Out, seq: &mut u64) {
     state.game.tick(TICK_MS);
     if state.game.is_game_over() {
         return; // wait for the authoritative result to end the match
@@ -688,6 +728,7 @@ fn drive_tick(state: &mut MatchState, out: &Out, seq: &mut u64) {
 
     if state.cooldown > 0 {
         state.cooldown -= 1;
+        state.last_sent = *seq; // a weapon may have launched above — wait for its ack
         return;
     }
     // Pick the placement per this match's difficulty: roam uses the skill-noised eval,
@@ -703,6 +744,7 @@ fn drive_tick(state: &mut MatchState, out: &Out, seq: &mut u64) {
         play_piece(&mut state.game, out, seq, pl);
     }
     state.cooldown = state.place_interval;
+    state.last_sent = *seq; // hold the next placement until the server acks this one
 }
 
 /// The local arsenal as the ten protocol token indices (-1 = empty slot).
@@ -714,11 +756,12 @@ fn arsenal_of(game: &Game) -> [i32; 10] {
     a
 }
 
-/// In the bazaar, buy a smart loadout ([`buy_plan`]) within our funds — each buy
-/// applied locally (prediction) AND sent to the server. Only buys the engine accepts
-/// are forwarded, keeping the sim in sync and avoiding a stream of rejected inputs.
-/// Leaving the bazaar (server-side) is the caller's job, driven off the authoritative
-/// `in_bazaar` flag and retried, so it can't race the server's bazaar entry.
+/// In the bazaar, buy a smart loadout ([`buy_plan`]) within our funds, then leave —
+/// each input applied locally (prediction) AND sent to the server. Only buys the
+/// engine accepts are forwarded, keeping the sim in sync and avoiding a stream of
+/// rejected inputs. The caller guarantees we're authoritatively AND locally in the
+/// bazaar before calling, so the buys + the LeaveBazaar all land while the server is
+/// genuinely shopping — no entry race, sent exactly once per visit.
 fn shop_bazaar(state: &mut MatchState, out: &Out, seq: &mut u64) {
     if state.game.is_in_bazaar() && state.weapons_on {
         let funds = state.game.score().funds;
@@ -735,12 +778,9 @@ fn shop_bazaar(state: &mut MatchState, out: &Out, seq: &mut u64) {
             }
         }
     }
-    // Leave the LOCAL prediction's bazaar so our board resumes in sync; the
-    // server-side LeaveBazaar is sent (and retried) by the caller off the
-    // authoritative `in_bazaar` flag, so it can't race the server's bazaar entry.
-    if state.game.is_in_bazaar() {
-        Input::LeaveBazaar.apply_to_game(&mut state.game);
-    }
+    // Leave: tell the SERVER to leave (this is what un-freezes the match) and mirror
+    // it on our local sim so our board resumes in sync. `send_input` does both.
+    send_input(&mut state.game, out, seq, Input::LeaveBazaar);
 }
 
 /// Whether the opponent's spied board (`render_ids`, empty cells = -2, row-major

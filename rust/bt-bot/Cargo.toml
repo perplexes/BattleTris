@@ -21,3 +21,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"
 tokio-tungstenite = "0.21"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 serde_json = "1"
+
+[dev-dependencies]
+# Property-based tests for the sync state machine (`src/sync.rs`): the netcode
+# invariants — never act ahead of the server, never leave a predicted bazaar — plus
+# a model-based no-freeze liveness property.
+proptest = "1"
