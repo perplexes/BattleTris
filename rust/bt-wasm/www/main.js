@@ -85,6 +85,7 @@ const lobbyScreen = document.getElementById('lobbyScreen');
 const gameScreen = document.getElementById('gameScreen');
 const onlineListEl = document.getElementById('onlineList');
 const challengeBtn = document.getElementById('challengeBtn');
+const updateBtn = document.getElementById('updateBtn');
 const availableToggle = document.getElementById('availableToggle');
 const availableToggleGame = document.getElementById('availableToggleGame');
 const statsPanelEl = document.getElementById('statsPanel');
@@ -222,10 +223,27 @@ function selectPlayer(name) {
     loadPlayerStats(name);
 }
 
-// (No manual "Update" button: the server pushes the `players` roster over the
-// websocket on every change — see the `players` handler in onSignalMessage — so a
-// manual refresh is redundant. The 1994 client had one because it pulled the
-// roster; we don't.)
+// The `players` roster is PUSHED live over the websocket on every change (see the
+// `players` handler in onSignalMessage), so the Update button has no work to do —
+// the 1994 client needed it because it PULLED the roster; we don't. Rather than
+// remove it, we gave it a personality: each press advances an escalating bit on the
+// futility of manual refresh in a push world. (It loops.)
+const UPDATE_GAGS = [
+    'You press UPDATE. Nothing happens.',
+    'You press UPDATE again. Still nothing happens.',
+    'You press UPDATE yet again and meditate on the nature of nothing.',
+    'You press UPDATE and sneeze. Bless you.',
+    'UPDATE presses YOU.',
+    'If only there was a technology that sent updates to the client automatically.',
+    'Some sort of socket.',
+    'Some sort of socket for the web.',
+    'XMLHttpRequest rolls off the tongue.',
+];
+let updateGagIdx = 0;
+function pressUpdate() {
+    showToast(UPDATE_GAGS[updateGagIdx % UPDATE_GAGS.length], 4500);
+    updateGagIdx++;
+}
 
 // Challenge the selected player (directed). Needs a signed identity first.
 async function challengeSelected() {
@@ -1789,6 +1807,7 @@ if (nameInput) {
     nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') nameInput.blur(); });
 }
 if (challengeBtn) challengeBtn.addEventListener('click', () => challengeSelected());
+if (updateBtn) updateBtn.addEventListener('click', pressUpdate);
 if (availableToggle) availableToggle.addEventListener('change', () => setAvailable(availableToggle.checked));
 if (availableToggleGame) availableToggleGame.addEventListener('change', () => setAvailable(availableToggleGame.checked));
 const challengeAcceptBtn = document.getElementById('challengeAccept');
