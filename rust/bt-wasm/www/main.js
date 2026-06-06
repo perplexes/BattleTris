@@ -1771,7 +1771,8 @@ function leaveToLobby() {
     game = null;
     gameOverOverlay.style.display = 'none';
     bazaarOverlay.style.display = 'none';
-    lastMatchReplayId = null;
+    // Keep lastMatchReplayId so the lobby Share button can still share the match you
+    // just finished (it's reset when the next match starts / a new matchReplay lands).
     if (watchReplayBtn) watchReplayBtn.style.display = 'none';
     showLobby();
 }
@@ -1907,21 +1908,30 @@ function showToast(msg, ms = 4500) {
     toastTimer = setTimeout(() => toast.classList.remove('show'), ms);
 }
 
+// Copy a /replay/<id> link to the clipboard (with a visible fallback).
+async function shareReplayLink(id) {
+    const url = `${location.origin}/replay/${id}`;
+    try { await navigator.clipboard.writeText(url); showToast('Replay link copied: ' + url); }
+    catch (e) { showToast('Replay link: ' + url); }
+}
+
 async function shareReplay() {
-    if (!game || typeof game.export_replay !== 'function') {
-        showToast('No active game to share.');
+    // An ONLINE match's real recording is the server-stored VersusReplay
+    // (`lastMatchReplayId`, set at match end) — the local `game` is only this
+    // client's prediction. So for online (or when there's no local game, e.g. in
+    // the lobby after a match) share the stored id; only a local practice /
+    // vs-computer game uploads its own recording.
+    if (mode === 'online' || !game || typeof game.export_replay !== 'function') {
+        if (lastMatchReplayId) {
+            await shareReplayLink(lastMatchReplayId);
+        } else {
+            showToast('No finished match to share yet.');
+        }
         return;
     }
     showToast('Saving replay...', 10000);
     try {
-        const id = await uploadReplay(game.export_replay());
-        const url = `${location.origin}/replay/${id}`;
-        try {
-            await navigator.clipboard.writeText(url);
-            showToast('Replay link copied: ' + url);
-        } catch (e) {
-            showToast('Replay link: ' + url);
-        }
+        await shareReplayLink(await uploadReplay(game.export_replay()));
     } catch (e) {
         showToast('Share failed: ' + e.message);
     }

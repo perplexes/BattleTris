@@ -1310,6 +1310,29 @@ body.bazaar-open #touchControls { display: none !important; }
     word-break: break-word;
 }
 
+/* Weapon event log: a recessed Motif scroll box of "<player> launched <weapon>". */
+.replay-eventlog {
+    width: min(90vw, 520px);
+    border: 2px solid #808080;
+    border-top-color: #000; border-left-color: #000;
+    border-bottom-color: #fff; border-right-color: #fff;
+    background: #c8c8c8;
+}
+.replay-eventlog .rel-head {
+    font-weight: bold; color: #0000ff; font-size: 12px;
+    padding: 4px 8px; background: #b8b8b8; border-bottom: 1px solid #808080;
+}
+.replay-eventlog .rel-body {
+    max-height: 140px; overflow-y: auto;
+    font-family: 'lucidatypewriter', monospace; font-size: 12px;
+    padding: 4px 8px;
+}
+.replay-eventlog .rel-row { padding: 1px 0; color: #222; }
+.replay-eventlog .rel-t { color: #777; display: inline-block; min-width: 3.5em; }
+.replay-eventlog .rel-side-0 .rel-who { color: #0000c0; font-weight: bold; }
+.replay-eventlog .rel-side-1 .rel-who { color: #b00000; font-weight: bold; }
+.replay-eventlog .rel-row b { color: #006000; }
+
 .replay-foot a {
     font-size: 13px;
     color: #006;

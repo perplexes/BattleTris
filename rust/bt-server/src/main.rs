@@ -1670,6 +1670,21 @@ fn db_get(conn: &Connection, id: &str) -> rusqlite::Result<Option<String>> {
         .optional()
 }
 
+/// Fetch a recording's JSON plus its stored player names (an online VersusReplay row
+/// has `name_a`/`name_b`; practice/vs-computer rows leave them NULL). Used to label
+/// the single-replay viewer with the real names instead of "Player A/B".
+fn db_get_with_names(
+    conn: &Connection,
+    id: &str,
+) -> rusqlite::Result<Option<(String, Option<String>, Option<String>)>> {
+    conn.query_row(
+        "SELECT json, name_a, name_b FROM replays WHERE id = ?1",
+        [id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?)),
+    )
+    .optional()
+}
+
 /// Increment the persistent hit counter (the 90s "you are visitor #N" total) and
 /// return the new value. Survives restarts because it lives in the same DB.
 fn db_bump_hits(conn: &Connection) -> rusqlite::Result<i64> {
@@ -1991,10 +2006,29 @@ async fn get_replay(State(db): State<Db>, Path(id): Path<String>) -> impl IntoRe
     }
     let found = {
         let conn = db.lock().unwrap();
-        db_get(&conn, &id).ok().flatten()
+        match db_get_with_names(&conn, &id) {
+            Ok(v) => v,
+            Err(e) => { eprintln!("get_replay db error for {id}: {e}"); None }
+        }
     };
     match found {
-        Some(txt) => ([(header::CONTENT_TYPE, "application/json")], txt).into_response(),
+        Some((txt, name_a, name_b)) => {
+            // Inject the real player names into the replay JSON so the viewer can label
+            // the boards (the stored blob doesn't carry them; they live in DB columns).
+            // Unknown fields are ignored by the replay deserializer, so this is safe.
+            let body = match (name_a, name_b) {
+                (None, None) => txt,
+                (na, nb) => match serde_json::from_str::<Value>(&txt) {
+                    Ok(Value::Object(mut o)) => {
+                        if let Some(n) = na { o.insert("name_a".into(), json!(n)); }
+                        if let Some(n) = nb { o.insert("name_b".into(), json!(n)); }
+                        serde_json::to_string(&Value::Object(o)).unwrap_or(txt)
+                    }
+                    _ => txt,
+                },
+            };
+            ([(header::CONTENT_TYPE, "application/json")], body).into_response()
+        }
         None => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
 }

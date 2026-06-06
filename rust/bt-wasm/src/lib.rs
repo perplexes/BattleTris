@@ -649,6 +649,11 @@ impl WasmReplayPlayer {
 #[wasm_bindgen]
 pub struct WasmVersusReplayPlayer {
     inner: VersusReplayPlayer,
+    /// Weapon launches that fired in the most recent `step()`, as `(side, token)`
+    /// pairs (side 0 = A, 1 = B). Captured BEFORE the launch is applied (so the
+    /// slot still holds the weapon), then cleared on the next step. Drives the
+    /// playback event log.
+    launches: Vec<(u8, i32)>,
 }
 
 #[wasm_bindgen]
@@ -656,11 +661,45 @@ impl WasmVersusReplayPlayer {
     pub fn from_json(json: &str) -> Result<WasmVersusReplayPlayer, JsValue> {
         let replay = VersusReplay::from_json(json)
             .map_err(|e| JsValue::from_str(&format!("invalid versus replay: {e}")))?;
-        Ok(WasmVersusReplayPlayer { inner: VersusReplayPlayer::new(replay) })
+        Ok(WasmVersusReplayPlayer { inner: VersusReplayPlayer::new(replay), launches: Vec::new() })
     }
 
     pub fn step(&mut self) -> bool {
+        // Capture this tick's weapon launches before they apply: resolve each
+        // launched slot to its weapon token from the side's CURRENT arsenal (the
+        // launch consumes the slot, so we must read it first).
+        self.launches.clear();
+        let tick = self.inner.tick_index();
+        let slots: Vec<(u8, usize)> = self
+            .inner
+            .replay()
+            .frames
+            .iter()
+            .filter(|f| f.tick == tick)
+            .filter_map(|f| match f.input {
+                bt_replay::Input::LaunchWeapon(slot) => Some((f.side, slot as usize)),
+                _ => None,
+            })
+            .collect();
+        for (side, slot) in slots {
+            let token = self.inner.game(side == 0).arsenal_token(slot);
+            if token >= 0 {
+                self.launches.push((side, token));
+            }
+        }
         self.inner.step()
+    }
+
+    /// Weapon launches from the most recent `step()`, flat `[side, tokenIndex, …]`
+    /// (side 0 = A, 1 = B). Empty on a step with no launches. The viewer appends
+    /// these to a scrolling event log ("A launched <weapon>").
+    pub fn recent_launches(&self) -> Vec<i32> {
+        let mut out = Vec::with_capacity(self.launches.len() * 2);
+        for (side, token) in &self.launches {
+            out.push(*side as i32);
+            out.push(*token);
+        }
+        out
     }
     pub fn seek(&mut self, tick: u32) {
         self.inner.seek(tick);

@@ -11,7 +11,7 @@ import { CELL_SIZE, drawBoard } from './render.js';
 
 // Adapt a two-board online (Versus) replay: side A on the main canvas, side B on
 // the second canvas. Each side gets a full HUD (both players are real games).
-function versusAdapter(vp) {
+function versusAdapter(vp, names) {
     const hud = (a) => ({
         score: a ? vp.score_a() : vp.score_b(),
         lines: a ? vp.lines_a() : vp.lines_b(),
@@ -35,8 +35,13 @@ function versusAdapter(vp) {
         mode: () => 'Online',
         seed: () => 'online',
         engine_sha: () => vp.engine_sha(),
-        labelA: () => 'Player A',
-        labelB: () => 'Player B',
+        // Real player names from the DB (threaded into the replay JSON by the
+        // server); fall back to the generic labels for older rows with no names.
+        labelA: () => (names && names.a) || 'Player A',
+        labelB: () => (names && names.b) || 'Player B',
+        // Weapon launches from the most recent step(), flat [side, token, …].
+        recentLaunches: () => Array.from(vp.recent_launches()),
+        hasEvents: () => true,
         hud,
     };
 }
@@ -66,6 +71,8 @@ function singleAdapter(sp) {
         engine_sha: () => sp.engine_sha(),
         labelA: () => 'Player',
         labelB: () => 'Ernie',
+        recentLaunches: () => [],
+        hasEvents: () => false,
         hud: (a) => a ? {
             score: sp.score(), lines: sp.lines(), funds: sp.funds(),
             linesTil: sp.lines_til_bazaar(), inBazaar: sp.is_in_bazaar(),
@@ -93,6 +100,8 @@ const tickLabel = document.getElementById('replayTick');
 const speedSel = document.getElementById('replaySpeed');
 const metaEl = document.getElementById('replayMeta');
 const errBox = document.getElementById('replayError');
+const eventLogEl = document.getElementById('replayEventLog');
+const eventLogBodyEl = document.getElementById('replayEventLogBody');
 
 let player = null;
 let playing = false;
@@ -178,6 +187,36 @@ function renderHud(el, h) {
         `<div class="rh-list rh-arsenal"><div class="rh-h">Arsenal</div>${slots.join('')}</div>`;
 }
 
+function escapeHtml(s) {
+    return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+// Append the weapon launches from the latest step() to the scrolling log. Called
+// once per simulated step (not per rendered frame) so nothing is missed when
+// playback advances several ticks between frames at high speed.
+function captureLaunches() {
+    if (!player.hasEvents || !player.hasEvents()) return;
+    const l = player.recentLaunches();
+    if (!l || l.length === 0) return;
+    const tick = player.tick_index();
+    for (let i = 0; i + 1 < l.length; i += 2) {
+        const side = l[i], token = l[i + 1];
+        const who = side === 0 ? player.labelA() : player.labelB();
+        const row = document.createElement('div');
+        row.className = 'rel-row rel-side-' + side;
+        row.innerHTML = `<span class="rel-t">${tick}</span> <span class="rel-who">${escapeHtml(who)}</span> launched <b>${escapeHtml(weapon_name(token))}</b>`;
+        eventLogBodyEl.appendChild(row);
+    }
+    while (eventLogBodyEl.childElementCount > 200) eventLogBodyEl.removeChild(eventLogBodyEl.firstChild);
+    eventLogBodyEl.scrollTop = eventLogBodyEl.scrollHeight;
+}
+
+// The log builds during real-time forward play; a seek/restart jumps the sim
+// (no per-step launches captured), so reset it to avoid a misleading partial log.
+function clearEventLog() {
+    if (eventLogBodyEl) eventLogBodyEl.innerHTML = '';
+}
+
 function renderFrame() {
     drawBoard(ctx, player.render_grid(), player.width(), player.height());
     const ha = player.hud(true);
@@ -215,6 +254,7 @@ function loop(now) {
             steps++;
             advanced = true;
             if (!player.step()) { setPlaying(false); accum = 0; break; }
+            captureLaunches();
         }
         if (advanced) renderFrame();
     }
@@ -253,10 +293,12 @@ function resultText(r, mode) {
     try {
         // An online match recording carries two seeds (seed_a/seed_b); play it
         // with the two-board Versus player. Everything else is a single-board game.
-        let isVersus = false;
-        try { isVersus = JSON.parse(text).seed_a !== undefined; } catch (_) {}
+        // The server threads the real player names (name_a/name_b) into the JSON.
+        let parsed = {};
+        try { parsed = JSON.parse(text) || {}; } catch (_) {}
+        const isVersus = parsed.seed_a !== undefined;
         player = isVersus
-            ? versusAdapter(WasmVersusReplayPlayer.from_json(text))
+            ? versusAdapter(WasmVersusReplayPlayer.from_json(text), { a: parsed.name_a, b: parsed.name_b })
             : singleAdapter(WasmReplayPlayer.from_json(text));
     } catch (e) {
         showError('This replay is invalid or from an incompatible engine build.');
@@ -266,6 +308,7 @@ function resultText(r, mode) {
     labelAEl.textContent = player.labelA();
     labelBEl.textContent = player.labelB();
     if (player.has_ai()) aiBoard.style.display = '';
+    if (player.hasEvents && player.hasEvents() && eventLogEl) eventLogEl.style.display = '';
     layoutBoards();
     window.addEventListener('resize', layoutBoards);
     seek.max = player.tick_count();
@@ -286,11 +329,13 @@ function resultText(r, mode) {
     restartBtn.addEventListener('click', () => {
         player.seek(0);
         setPlaying(false);
+        clearEventLog();
         renderFrame();
     });
     seek.addEventListener('input', () => {
         player.seek(parseInt(seek.value, 10) || 0);
         setPlaying(false);
+        clearEventLog();
         renderFrame();
     });
 
