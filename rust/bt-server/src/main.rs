@@ -424,6 +424,10 @@ enum BoutControl {
     /// `side` intentionally left the match (the in-app "Leave game" button) — end
     /// the bout NOW, no reconnect grace, with the other side winning by forfeit.
     Forfeit { side: Side },
+    /// A read-only spectator wants the live two-board stream (the debug live-match
+    /// view). The loop adds `tx` to its spectator list; the spectator sends no
+    /// inputs, so there's no anti-cheat surface.
+    AddSpectator { tx: mpsc::UnboundedSender<Message> },
 }
 
 /// A handle to a live bout, kept in [`App::bouts`] keyed by `match_id` so the
@@ -783,6 +787,7 @@ async fn run_bout(state: Shared, pb: PendingBout) {
     let mut frame: u64 = 0;
     let mut want_keyframe = true; // send one on the very first frame
     let mut connected = [true, true]; // is each side's socket currently attached?
+    let mut spectators: Vec<mpsc::UnboundedSender<Message>> = Vec::new(); // live-view watchers
     let mut grace_until: Option<Instant> = None; // freeze deadline while a human reconnects
     let outcome: Option<bool> = loop {
         ticker.tick().await;
@@ -819,6 +824,13 @@ async fn run_bout(state: Shared, pb: PendingBout) {
                     }
                 }
                 BoutControl::Forfeit { side } => forfeit_by = Some(side),
+                BoutControl::AddSpectator { tx } => {
+                    // Send the current state immediately so the watcher isn't blank
+                    // until the next broadcast, then keep them in the stream.
+                    if tx.send(Message::Text(bout.spectator_message(&name_a, &name_b))).is_ok() {
+                        spectators.push(tx);
+                    }
+                }
             }
         }
         if let Some(side) = forfeit_by {
@@ -906,6 +918,12 @@ async fn run_bout(state: Shared, pb: PendingBout) {
                 if b_ok { let _ = tx_b.send(Message::Text(msg)); }
                 // Next iteration sees `connected` partial and enters the freeze.
             }
+        }
+        // Stream the read-only two-board view to spectators (~15Hz). A failed send
+        // means the watcher closed the tab — drop them. No effect on the players.
+        if frame % 4 == 0 && !spectators.is_empty() {
+            let msg = bout.spectator_message(&name_a, &name_b);
+            spectators.retain(|tx| tx.send(Message::Text(msg.clone())).is_ok());
         }
         frame += 1;
     };
@@ -1304,6 +1322,25 @@ async fn handle_message(state: &Shared, id: &str, text: &str) {
                 }
             }
         }
+        // Read-only spectate (the live-match debug view): attach this socket to a
+        // bout's spectator stream. No identity/token needed — spectators send no
+        // inputs, so there's nothing to forge.
+        Some("spectate") => {
+            let mid = v.get("match_id").and_then(|m| m.as_str()).map(|s| s.to_string());
+            let app = state.lock().await;
+            let tx = app.clients.get(id).map(|c| c.tx.clone());
+            let sent = match (mid.as_deref(), tx) {
+                (Some(m), Some(tx)) => app
+                    .bouts
+                    .get(m)
+                    .map(|h| h.control.try_send(BoutControl::AddSpectator { tx }).is_ok())
+                    .unwrap_or(false),
+                _ => false,
+            };
+            if !sent {
+                send(&app, id, &json!({"type":"spectateFailed"}));
+            }
+        }
         _ => {}
     }
 }
@@ -1664,7 +1701,9 @@ fn db_insert_versus(
     )
 }
 
-/// Fetch a recording's JSON by id.
+/// Fetch a recording's JSON by id. (Kept as a focused helper; the served endpoint
+/// uses [`db_get_with_names`], but tests + future callers want the plain JSON.)
+#[allow(dead_code)]
 fn db_get(conn: &Connection, id: &str) -> rusqlite::Result<Option<String>> {
     conn.query_row("SELECT json FROM replays WHERE id = ?1", [id], |row| row.get::<_, String>(0))
         .optional()
@@ -2098,6 +2137,20 @@ async fn leaderboard(State(state): State<Shared>) -> impl IntoResponse {
     Json(json!({ "players": players })).into_response()
 }
 
+/// `GET /api/debug/matches` — the live-match debug list: every in-progress bout
+/// (`match_id` + the two player names), so a spectator can pick one to watch
+/// (`?spectate=<match_id>`). Read-only; reflects [`App::bouts`].
+async fn debug_matches(State(state): State<Shared>) -> impl IntoResponse {
+    let matches: Vec<Value> = {
+        let app = state.lock().await;
+        app.bouts
+            .iter()
+            .map(|(mid, h)| json!({ "match_id": mid, "name_a": h.name_a, "name_b": h.name_b }))
+            .collect()
+    };
+    Json(json!({ "matches": matches })).into_response()
+}
+
 /// `POST /api/identity` with `{"name":"<str>"}` — mints an HS256 identity token
 /// `{"token":"<jwt>"}` carrying the sanitized name. Empty/whitespace names are
 /// rejected; over-long names are capped to [`identity::MAX_NAME_LEN`].
@@ -2198,6 +2251,7 @@ async fn main() {
         .route("/api/replays", post(post_replay).get(list_replays))
         .route("/api/replays/:id", get(get_replay))
         .route("/api/leaderboard", get(leaderboard))
+        .route("/api/debug/matches", get(debug_matches))
         .route("/api/identity", post(post_identity))
         .route("/api/player/:name", get(player_profile))
         .route("/replay/:id", get(replay_page))

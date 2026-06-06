@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BattleTris - Live Match (debug)</title>
+    <script>
+      window.sentryOnLoad = function () {
+        Sentry.init({ sendDefaultPii: true });
+      };
+    </script>
+    <script src="https://js.sentry-cdn.com/9045832ee730ae053d8a3fc0ea812e0c.min.js" crossorigin="anonymous"></script>
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="motif.css">
+</head>
+<body>
+    <div class="container">
+        <div class="title-wrap">
+            <img src="assets/bttitle.png" alt="BattleTris" class="title-img">
+        </div>
+
+        <div class="replay-wrap">
+            <div id="spectateError" class="replay-error" style="display:none;"></div>
+
+            <!-- Live-matches picker (shown when no ?match=<id>): a debug list of
+                 in-progress bouts from /api/debug/matches. -->
+            <div id="matchList" class="spectate-list" style="display:none;">
+                <h2 class="spectate-title">Live matches (debug)</h2>
+                <div id="matchListBody" class="spectate-list-body"></div>
+                <div class="spectate-hint">Watching is read-only. The list refreshes every few seconds.</div>
+            </div>
+
+            <!-- Two live boards (shown while spectating a match). Reuses the replay
+                 viewer's two-board layout + HUD styling. -->
+            <div id="spectateBoards" class="replay-boards" style="display:none;">
+                <div class="replay-col">
+                    <div class="replay-board-label" id="specLabelA">A</div>
+                    <div class="replay-col-body">
+                        <div class="replay-board-wrap">
+                            <canvas id="specCanvasA"></canvas>
+                            <div class="replay-bazaar-badge" id="specBazaarA" style="display:none;">&#127978; BAZAAR</div>
+                        </div>
+                        <div class="replay-hud" id="specHudA"></div>
+                    </div>
+                </div>
+                <div class="replay-col">
+                    <div class="replay-board-label" id="specLabelB">B</div>
+                    <div class="replay-col-body">
+                        <div class="replay-board-wrap">
+                            <canvas id="specCanvasB"></canvas>
+                            <div class="replay-bazaar-badge" id="specBazaarB" style="display:none;">&#127978; BAZAAR</div>
+                        </div>
+                        <div class="replay-hud" id="specHudB"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="spectateMeta" class="replay-meta"></div>
+            <div class="replay-foot">
+                <a href="/www/spectate.html">&#128250; Live matches</a> &middot;
+                <a href="/www/">&larr; Back to BattleTris</a>
+            </div>
+        </div>
+    </div>
+
+    <script type="module" src="spectate.js"></script>
+</body>
+</html>

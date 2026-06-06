@@ -1333,6 +1333,25 @@ body.bazaar-open #touchControls { display: none !important; }
 .replay-eventlog .rel-side-1 .rel-who { color: #b00000; font-weight: bold; }
 .replay-eventlog .rel-row b { color: #006000; }
 
+/* Live-match spectator: the debug picker list. */
+.spectate-list { width: min(92vw, 560px); }
+.spectate-title { color: #0000ff; font-size: 18px; margin: 8px 0; text-align: center; }
+.spectate-list-body { display: flex; flex-direction: column; gap: 8px; }
+.spectate-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 14px; text-decoration: none; color: #111;
+    background: #c8c8c8;
+    border: 2px solid #808080;
+    border-top-color: #fff; border-left-color: #fff;
+    border-bottom-color: #000; border-right-color: #000;
+    font-family: 'lucidatypewriter', monospace; font-size: 14px;
+}
+.spectate-row:hover { background: #d4d4d4; }
+.spectate-vs b { color: #b00000; }
+.spectate-watch { color: #006000; font-weight: bold; }
+.spectate-empty { padding: 16px; color: #555; font-style: italic; text-align: center; }
+.spectate-hint { font-size: 11px; color: #666; text-align: center; margin-top: 10px; }
+
 .replay-foot a {
     font-size: 13px;
     color: #006;

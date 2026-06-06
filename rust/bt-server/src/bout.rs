@@ -376,6 +376,52 @@ impl Bout {
             keyframe: include_keyframe.then(|| me.client_keyframe_bytes()),
         }
     }
+
+    /// A read-only two-board frame for SPECTATORS (the live-match debug view):
+    /// both boards' full render grids + HUDs, no per-side POV and no
+    /// keyframe/prediction machinery — a spectator just renders what the server
+    /// has. `run_bout` ships this to anyone watching at a modest cadence.
+    pub fn spectator_message(&self, name_a: &str, name_b: &str) -> String {
+        let side = |g: &bt_core::Game| {
+            let mut arsenal = Vec::with_capacity(20);
+            for i in 0..10usize {
+                arsenal.push(g.arsenal_token(i));
+                arsenal.push(g.arsenal_quantity(i) as i32);
+            }
+            let mut effects = Vec::new();
+            for tok in WeaponToken::ALL {
+                if g.weapon_active(tok) {
+                    effects.push(tok.index() as i32);
+                    effects.push(g.weapon_remaining(tok));
+                }
+            }
+            serde_json::json!({
+                "board": g.render_ids(),
+                "score": g.score().score,
+                "lines": g.score().lines,
+                "funds": g.score().funds,
+                "lines_til": g.lines_til_bazaar(),
+                "in_bazaar": g.is_in_bazaar(),
+                "game_over": g.is_game_over(),
+                "arsenal": arsenal,
+                "effects": effects,
+            })
+        };
+        let a = self.versus.game(Side::A);
+        let b = self.versus.game(Side::B);
+        serde_json::json!({
+            "type": "spectate",
+            "tick": self.tick,
+            "result": self.versus.result(),
+            "name_a": name_a,
+            "name_b": name_b,
+            "w": a.board().width,
+            "h": a.board().height,
+            "a": side(a),
+            "b": side(b),
+        })
+        .to_string()
+    }
 }
 
 #[cfg(test)]
