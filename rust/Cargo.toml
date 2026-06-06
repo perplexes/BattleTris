@@ -6,6 +6,7 @@ members = [
     "bt-ai",
     "bt-replay",
     "bt-identity",
+    "bt-netcode",
     "bt-wasm",
     "bt-server",
     "bt-bot",
@@ -18,6 +19,7 @@ default-members = [
     "bt-ai",
     "bt-replay",
     "bt-identity",
+    "bt-netcode",
 ]
 
 [workspace.package]

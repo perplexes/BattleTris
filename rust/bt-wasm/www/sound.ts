@@ -6,21 +6,32 @@
 // AudioContext can't start until a user gesture, so call Sound.resume() from
 // the first keydown / touch / click.
 
-let ctx = null;
+let ctx: AudioContext | null = null;
 let muted = false;
 
-function ensureCtx() {
+/** Safari historically exposed AudioContext only as `webkitAudioContext`. */
+type WebkitWindow = typeof window & { webkitAudioContext?: typeof AudioContext };
+
+function ensureCtx(): AudioContext | null {
     if (!ctx) {
-        const AC = window.AudioContext || window.webkitAudioContext;
+        const AC = window.AudioContext || (window as WebkitWindow).webkitAudioContext;
         if (AC) ctx = new AC();
     }
     if (ctx && ctx.state === 'suspended') ctx.resume();
     return ctx;
 }
 
+interface NoteOpts {
+    type?: OscillatorType;
+    vol?: number;
+    slideTo?: number | null;
+    delay?: number;
+}
+
 // One enveloped oscillator note. `slideTo` bends the pitch over the note;
 // `delay` schedules it ahead of now (for arpeggios).
-function note(freq, dur, { type = 'square', vol = 0.14, slideTo = null, delay = 0 } = {}) {
+function note(freq: number, dur: number, opts: NoteOpts = {}): void {
+    const { type = 'square', vol = 0.14, slideTo = null, delay = 0 } = opts;
     const c = ensureCtx();
     if (!c || muted) return;
     const t0 = c.currentTime + delay;
@@ -39,8 +50,8 @@ function note(freq, dur, { type = 'square', vol = 0.14, slideTo = null, delay = 
 }
 
 export const Sound = {
-    setMuted(m) { muted = !!m; },
-    isMuted() { return muted; },
+    setMuted(m: boolean) { muted = !!m; },
+    isMuted(): boolean { return muted; },
     resume() { ensureCtx(); },
 
     // A piece locks into place - a short low click.
@@ -48,7 +59,7 @@ export const Sound = {
 
     // Lines cleared - an ascending arpeggio; bigger clears climb higher, and a
     // tetris (4) gets a bright capstone.
-    clear(lines) {
+    clear(lines: number) {
         const n = Math.max(1, Math.min(4, lines | 0));
         const base = 392; // G4
         for (let i = 0; i < n; i++) {

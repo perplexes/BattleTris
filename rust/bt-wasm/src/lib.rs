@@ -9,6 +9,7 @@ use bt_core::constants::{BT_PIECE_HEIGHT, BT_PIECE_WIDTH};
 use bt_core::game::GameEvent;
 use bt_core::weapons::{weapon_table, WeaponToken, BT_MAX_WEAPONS};
 use bt_core::Game;
+use bt_netcode::{input_frame, Predictor};
 use bt_replay::{Input, Mode, Recorder, Replay, ReplayPlayer, VersusReplay, VersusReplayPlayer};
 use wasm_bindgen::prelude::*;
 
@@ -289,6 +290,165 @@ impl WasmGame {
     /// game exactly.
     pub fn export_replay(&self) -> String {
         self.rec.to_json()
+    }
+}
+
+// --- online (server-authoritative) client -------------------------------
+
+/// The browser's client for a server-authoritative online match: a thin wasm-facing
+/// wrapper over [`bt_netcode::Predictor`], the SAME prediction/reconciliation core the
+/// bot ([`bt-bot`]) runs. The front-end drives this exactly like a [`WasmGame`] for
+/// rendering/HUD (the read methods mirror it, as [`WasmVsComputer`] does), but inputs
+/// go through `predict_*` (which queue + return the ready-to-send wire frame) and
+/// server frames through [`on_snapshot`](WasmClient::on_snapshot) — so the seq/ack/
+/// keyframe-replay invariants are the proptested ones in `bt-netcode`, not hand-rolled
+/// JS. There's no `Recorder`: online matches are recorded authoritatively server-side.
+#[wasm_bindgen]
+pub struct WasmClient {
+    inner: Predictor,
+}
+
+#[wasm_bindgen]
+impl WasmClient {
+    #[wasm_bindgen(constructor)]
+    pub fn new(seed: u32) -> WasmClient {
+        WasmClient { inner: Predictor::new(seed as u64) }
+    }
+
+    /// Advance the local prediction one fixed step. The host must NOT call this while a
+    /// bazaar barrier is up ([`barrier`](Self::barrier)) — the server freezes then.
+    pub fn tick(&mut self, dt_ms: i32) {
+        self.inner.tick(dt_ms);
+    }
+
+    // ── inputs: predict locally + return the wire frame to send (or "" if gated) ──
+    pub fn predict_move_left(&mut self) -> String {
+        self.send(Input::MoveLeft)
+    }
+    pub fn predict_move_right(&mut self) -> String {
+        self.send(Input::MoveRight)
+    }
+    pub fn predict_rotate(&mut self) -> String {
+        self.send(Input::Rotate)
+    }
+    pub fn predict_begin_drop(&mut self) -> String {
+        self.send(Input::BeginDrop)
+    }
+    pub fn predict_soft_drop(&mut self) -> String {
+        self.send(Input::SoftDrop)
+    }
+    pub fn predict_launch(&mut self, slot: u32) -> String {
+        self.send(Input::LaunchWeapon(slot))
+    }
+    /// Predict a buy; returns the wire frame, or "" if the engine rejected it (so the
+    /// caller refreshes the bazaar UI iff non-empty — empty ⇒ nothing changed/sent).
+    pub fn predict_buy(&mut self, token: i32) -> String {
+        self.send(Input::BuyWeapon(token))
+    }
+    /// Predict a sell; "" if the engine rejected it (see [`predict_buy`](Self::predict_buy)).
+    pub fn predict_sell(&mut self, token: i32) -> String {
+        self.send(Input::SellWeapon(token))
+    }
+    /// Tell the server we're done shopping. Forwarded but NOT applied locally — the
+    /// barrier clears via the next keyframe once BOTH sides leave.
+    pub fn predict_leave_bazaar(&mut self) -> String {
+        self.send(Input::LeaveBazaar)
+    }
+
+    /// Reconcile against an authoritative snapshot. `ack` is the last input seq the
+    /// server applied for us; `you_bazaar`/`opp_bazaar` are the authoritative bazaar
+    /// flags; `keyframe` is the full authoritative state (an EMPTY array means the
+    /// snapshot carried no keyframe — reconcile acks only, don't restore).
+    pub fn on_snapshot(&mut self, ack: u32, you_bazaar: bool, opp_bazaar: bool, keyframe: Vec<u8>) {
+        let kf = if keyframe.is_empty() { None } else { Some(keyframe.as_slice()) };
+        self.inner.on_snapshot(ack as u64, you_bazaar, opp_bazaar, kf);
+    }
+
+    /// Is a bazaar barrier up (either side shopping)? Gameplay is frozen while true.
+    pub fn barrier(&self) -> bool {
+        self.inner.barrier()
+    }
+    /// Most recently sent input seq this bout (debug overlay). Per-bout, small ⇒ u32.
+    pub fn input_seq(&self) -> u32 {
+        self.inner.input_seq() as u32
+    }
+    /// Inputs still in flight (sent, not yet acked) — debug overlay.
+    pub fn unacked_len(&self) -> usize {
+        self.inner.unacked_len()
+    }
+
+    // ── reads (mirror WasmGame, so the front-end renders either with one code path) ──
+    pub fn width(&self) -> i32 {
+        self.inner.game().board().width
+    }
+    pub fn height(&self) -> i32 {
+        self.inner.game().board().height
+    }
+    pub fn is_game_over(&self) -> bool {
+        self.inner.game().is_game_over()
+    }
+    pub fn is_in_bazaar(&self) -> bool {
+        self.inner.game().is_in_bazaar()
+    }
+    pub fn lines_til_bazaar(&self) -> i32 {
+        self.inner.game().lines_til_bazaar()
+    }
+    pub fn score(&self) -> i32 {
+        self.inner.game().score().score as i32
+    }
+    pub fn lines(&self) -> i32 {
+        self.inner.game().score().lines as i32
+    }
+    pub fn funds(&self) -> i32 {
+        self.inner.game().score().funds as i32
+    }
+    pub fn op_score(&self) -> i32 {
+        self.inner.game().score().op_score as i32
+    }
+    pub fn op_lines(&self) -> i32 {
+        self.inner.game().score().op_lines as i32
+    }
+    pub fn op_funds(&self) -> i32 {
+        self.inner.game().score().op_funds as i32
+    }
+    pub fn arsenal_token(&self, i: u32) -> i32 {
+        self.inner.game().arsenal_token(i as usize)
+    }
+    pub fn arsenal_quantity(&self, i: u32) -> i32 {
+        self.inner.game().arsenal_quantity(i as usize) as i32
+    }
+    pub fn bazaar_price(&self, token: i32) -> i32 {
+        match WeaponToken::from_index(token) {
+            Some(t) => self.inner.game().bazaar_price(t),
+            None => 0,
+        }
+    }
+    pub fn weapon_active(&self, token: i32) -> bool {
+        WeaponToken::from_index(token).map_or(false, |t| self.inner.game().weapon_active(t))
+    }
+    pub fn weapon_remaining(&self, token: i32) -> i32 {
+        WeaponToken::from_index(token).map_or(0, |t| self.inner.game().weapon_remaining(t))
+    }
+    pub fn render_grid(&self) -> Vec<i32> {
+        render_grid_of(self.inner.game())
+    }
+    pub fn drain_events(&mut self) -> Vec<i32> {
+        let mut out = Vec::new();
+        for e in self.inner.game_mut().take_events() {
+            out.extend_from_slice(&event_quad(e));
+        }
+        out
+    }
+}
+
+impl WasmClient {
+    /// Predict an input and return the wire frame to send, or "" when it was gated
+    /// (non-shopping under a barrier) or rejected (an unaffordable buy/sell).
+    fn send(&mut self, input: Input) -> String {
+        match self.inner.predict(input) {
+            Some((seq, inp)) => input_frame(seq, &inp),
+            None => String::new(),
+        }
     }
 }
 

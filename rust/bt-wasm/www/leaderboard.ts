@@ -1,16 +1,30 @@
 // Leaderboard page: ranks online players by Elo-styled TrueSkill (served by
 // GET /api/leaderboard). TrueSkill is the engine; the Elo figure is cosmetic.
-const listEl = document.getElementById('leaderboardList');
-const statusEl = document.getElementById('leaderboardStatus');
+const listEl = document.getElementById('leaderboardList')!;
+const statusEl = document.getElementById('leaderboardStatus')!;
+
+/** One ranked player as returned by GET /api/leaderboard. */
+interface LeaderboardPlayer {
+    name: string;
+    elo: number;
+    games: number;
+    mu: number;
+    sigma: number;
+}
+
+/** Shape of the GET /api/leaderboard JSON response. */
+interface LeaderboardResponse {
+    players?: LeaderboardPlayer[];
+}
 
 (async () => {
-    let data;
+    let data: LeaderboardResponse | undefined;
     try {
         const res = await fetch('/api/leaderboard');
         if (!res.ok) throw new Error('server ' + res.status);
         data = await res.json();
     } catch (e) {
-        statusEl.textContent = 'Could not load leaderboard: ' + e.message;
+        statusEl.textContent = 'Could not load leaderboard: ' + (e as Error).message;
         return;
     }
 
@@ -37,8 +51,13 @@ const statusEl = document.getElementById('leaderboardStatus');
 })();
 
 // Names are user-supplied - escape before injecting as HTML.
-function escapeHtml(s) {
+function escapeHtml(s: string): string {
     return String(s).replace(/[&<>"']/g, (c) => ({
         '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-    }[c]));
+    }[c]!));
 }
+
+// Loaded as <script type="module"> (leaderboard.html), so mark this a module —
+// isolates its top-level scope from the other page scripts under tsc's single-
+// program compile (else `listEl`/`statusEl` collide with library.ts).
+export {};

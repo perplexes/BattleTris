@@ -1,0 +1,27 @@
+{
+  // TypeScript build for the browser client. The www/ sources are plain ES modules
+  // served as-is (no bundler): tsc compiles each www/*.ts -> www/*.js BESIDE it (no
+  // outDir — setting outDir to the source dir would make tsc exclude the sources),
+  // so the page's <script type="module"> and the relative `../pkg/bt_wasm.js` import
+  // keep resolving exactly as before. The emitted *.js / *.js.map are gitignored
+  // (www/.gitignore); the Dockerfile runs `npm run build:ts`.
+  //
+  // The WASM boundary is typed for free by the generated pkg/bt_wasm.d.ts.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "noImplicitOverride": true,
+    "noUncheckedIndexedAccess": false,
+    "sourceMap": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmitOnError": true,
+    // Browser code only — don't auto-pull @types/* (e.g. @types/node via Playwright),
+    // which would leak Node globals into the client surface.
+    "types": []
+  },
+  "include": ["www/**/*.ts"]
+}

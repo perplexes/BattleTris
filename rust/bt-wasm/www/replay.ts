@@ -4,6 +4,55 @@
 import init, { WasmReplayPlayer, WasmVersusReplayPlayer, fixed_dt, weapon_name } from '../pkg/bt_wasm.js';
 import { CELL_SIZE, drawBoard } from './render.js';
 
+// Per-side HUD object the page renders. Returned by `hud(sideA)`; null for the
+// AI side of a single-board replay (no funds/arsenal recorded for Ernie).
+interface Hud {
+    score: number;
+    lines: number;
+    funds: number;
+    linesTil: number;
+    inBazaar: boolean;
+    arsenal: number[];   // flat [token0, qty0, token1, qty1, …]
+    effects: number[];   // flat [tokenIndex, linesRemaining, …]
+}
+
+// The common interface BOTH adapters below expose — the single shape the page
+// drives, regardless of whether the source is a one-board or two-board replay.
+interface PlayerAdapter {
+    render_grid(): Int32Array;
+    render_ai_grid(): Int32Array;
+    has_ai(): boolean;
+    width(): number;
+    height(): number;
+    tick_index(): number;
+    tick_count(): number;
+    step(): boolean;
+    seek(t: number): void;
+    result(): number;
+    mode(): string;
+    seed(): string;
+    engine_sha(): string;
+    labelA(): string;
+    labelB(): string;
+    recentLaunches(): number[];
+    hasEvents(): boolean;
+    inputsAtTick(t: number): string[];
+    hud(a: boolean): Hud | null;
+}
+
+// Real player names threaded into the Versus replay JSON by the server.
+interface VersusNames {
+    a?: string;
+    b?: string;
+}
+
+// The small subset of the fetched replay JSON the page reads to pick an adapter.
+interface ReplayMeta {
+    seed_a?: unknown;
+    name_a?: string;
+    name_b?: string;
+}
+
 // Both adapters below expose the SAME interface the page drives:
 //   render_grid/render_ai_grid, has_ai, width/height, tick_*, step/seek/result,
 //   mode/seed/engine_sha, labelA/labelB, and hud(sideA) -> per-side HUD object
@@ -11,8 +60,8 @@ import { CELL_SIZE, drawBoard } from './render.js';
 
 // Adapt a two-board online (Versus) replay: side A on the main canvas, side B on
 // the second canvas. Each side gets a full HUD (both players are real games).
-function versusAdapter(vp, names) {
-    const hud = (a) => ({
+function versusAdapter(vp: WasmVersusReplayPlayer, names: VersusNames): PlayerAdapter {
+    const hud = (a: boolean): Hud => ({
         score: a ? vp.score_a() : vp.score_b(),
         lines: a ? vp.lines_a() : vp.lines_b(),
         funds: a ? vp.funds_a() : vp.funds_b(),
@@ -51,9 +100,9 @@ function versusAdapter(vp, names) {
 // Adapt a single-board (practice / vs-computer) replay. Side A is the player and
 // gets the full HUD; the AI side (Ernie) shows its board only (the recording
 // doesn't carry Ernie's funds/arsenal), so hud(false) is null.
-function singleAdapter(sp) {
-    const arsenal = () => {
-        const a = [];
+function singleAdapter(sp: WasmReplayPlayer): PlayerAdapter {
+    const arsenal = (): number[] => {
+        const a: number[] = [];
         for (let i = 0; i < 10; i++) { a.push(sp.arsenal_token(i), sp.arsenal_quantity(i)); }
         return a;
     };
@@ -84,55 +133,55 @@ function singleAdapter(sp) {
     };
 }
 
-const boards = document.getElementById('replayBoards');
-const canvas = document.getElementById('replayCanvas');
-const ctx = canvas.getContext('2d');
-const aiBoard = document.getElementById('replayAiBoard');
-const aiCanvas = document.getElementById('replayAiCanvas');
-const aiCtx = aiCanvas.getContext('2d');
-const labelAEl = document.getElementById('replayLabelA');
-const labelBEl = document.getElementById('replayLabelB');
-const hudAEl = document.getElementById('replayHudA');
-const hudBEl = document.getElementById('replayHudB');
-const bazaarAEl = document.getElementById('replayBazaarA');
-const bazaarBEl = document.getElementById('replayBazaarB');
-const playBtn = document.getElementById('replayPlay');
-const restartBtn = document.getElementById('replayRestart');
-const seek = document.getElementById('replaySeek');
-const tickLabel = document.getElementById('replayTick');
-const speedSel = document.getElementById('replaySpeed');
-const metaEl = document.getElementById('replayMeta');
-const errBox = document.getElementById('replayError');
+const boards = document.getElementById('replayBoards')!;
+const canvas = document.getElementById('replayCanvas') as HTMLCanvasElement;
+const ctx = canvas.getContext('2d')!;
+const aiBoard = document.getElementById('replayAiBoard')!;
+const aiCanvas = document.getElementById('replayAiCanvas') as HTMLCanvasElement;
+const aiCtx = aiCanvas.getContext('2d')!;
+const labelAEl = document.getElementById('replayLabelA')!;
+const labelBEl = document.getElementById('replayLabelB')!;
+const hudAEl = document.getElementById('replayHudA')!;
+const hudBEl = document.getElementById('replayHudB')!;
+const bazaarAEl = document.getElementById('replayBazaarA')!;
+const bazaarBEl = document.getElementById('replayBazaarB')!;
+const playBtn = document.getElementById('replayPlay')!;
+const restartBtn = document.getElementById('replayRestart')!;
+const seek = document.getElementById('replaySeek') as HTMLInputElement;
+const tickLabel = document.getElementById('replayTick')!;
+const speedSel = document.getElementById('replaySpeed') as HTMLSelectElement;
+const metaEl = document.getElementById('replayMeta')!;
+const errBox = document.getElementById('replayError')!;
 const eventLogEl = document.getElementById('replayEventLog');
-const eventLogBodyEl = document.getElementById('replayEventLogBody');
+const eventLogBodyEl = document.getElementById('replayEventLogBody')!;
 const debugEl = document.getElementById('replayDebug');
 const debugInputsEl = document.getElementById('replayDebugInputs');
 const debugTickEl = document.getElementById('replayDebugTick');
 const stepBtn = document.getElementById('replayStep');
-const jumpInput = document.getElementById('replayJump');
+const jumpInput = document.getElementById('replayJump') as HTMLInputElement | null;
 const goBtn = document.getElementById('replayGo');
 const copyBtn = document.getElementById('replayCopy');
 const debugMode = new URLSearchParams(location.search).get('debug') === '1';
 
-let player = null;
+let player: PlayerAdapter | null = null;
 let playing = false;
 let FIXED_DT = 16;
 let accum = 0;
 let lastT = 0;
 
-function showError(msg) {
+function showError(msg: string): void {
     errBox.style.display = '';
     errBox.textContent = msg;
 }
 
-function idFromUrl() {
+function idFromUrl(): string | null {
     const q = new URLSearchParams(location.search).get('id');
     if (q) return q;
     const m = location.pathname.match(/\/replay\/([0-9a-fA-F]+)/);
     return m ? m[1] : null;
 }
 
-function sizeCanvas(c, w, h, scale) {
+function sizeCanvas(c: HTMLCanvasElement, w: number, h: number, scale: number): void {
     c.width = w * CELL_SIZE;
     c.height = h * CELL_SIZE;
     c.style.width = (w * CELL_SIZE * scale) + 'px';
@@ -145,7 +194,7 @@ function sizeCanvas(c, w, h, scale) {
 const HUD_W = 168;        // px reserved for the HUD panel beside a board
 const COL_GAP = 18;       // gap between the two columns
 
-function layoutBoards() {
+function layoutBoards(): void {
     if (!player) return;
     const w = player.width(), h = player.height();
     const boardW = w * CELL_SIZE, boardH = h * CELL_SIZE;   // native px
@@ -170,15 +219,15 @@ function layoutBoards() {
     if (twoUp) sizeCanvas(aiCanvas, w, h, scale);   // EQUAL scale — same as side A
 }
 
-function renderHud(el, h) {
+function renderHud(el: HTMLElement, h: Hud | null): void {
     if (!h) { el.style.display = 'none'; el.innerHTML = ''; return; }
     el.style.display = '';
 
-    const effects = [];
+    const effects: string[] = [];
     for (let i = 0; i + 1 < h.effects.length; i += 2) {
         effects.push(`<div><span>${weapon_name(h.effects[i])}</span><b>${h.effects[i + 1]}</b></div>`);
     }
-    const slots = [];
+    const slots: string[] = [];
     for (let i = 0; i < 10 && i * 2 + 1 < h.arsenal.length; i++) {
         const tok = h.arsenal[i * 2], qty = h.arsenal[i * 2 + 1];
         const n = (i + 1) % 10;
@@ -198,15 +247,15 @@ function renderHud(el, h) {
         `<div class="rh-list rh-arsenal"><div class="rh-h">Arsenal</div>${slots.join('')}</div>`;
 }
 
-function escapeHtml(s) {
-    return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+function escapeHtml(s: string): string {
+    return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
 }
 
 // Append the weapon launches from the latest step() to the scrolling log. Called
 // once per simulated step (not per rendered frame) so nothing is missed when
 // playback advances several ticks between frames at high speed.
-function captureLaunches() {
-    if (!player.hasEvents || !player.hasEvents()) return;
+function captureLaunches(): void {
+    if (!player || !player.hasEvents || !player.hasEvents()) return;
     const l = player.recentLaunches();
     if (!l || l.length === 0) return;
     const tick = player.tick_index();
@@ -218,36 +267,39 @@ function captureLaunches() {
         row.innerHTML = `<span class="rel-t">${tick}</span> <span class="rel-who">${escapeHtml(who)}</span> launched <b>${escapeHtml(weapon_name(token))}</b>`;
         eventLogBodyEl.appendChild(row);
     }
-    while (eventLogBodyEl.childElementCount > 200) eventLogBodyEl.removeChild(eventLogBodyEl.firstChild);
+    while (eventLogBodyEl.childElementCount > 200) eventLogBodyEl.removeChild(eventLogBodyEl.firstChild!);
     eventLogBodyEl.scrollTop = eventLogBodyEl.scrollHeight;
 }
 
 // The log builds during real-time forward play; a seek/restart jumps the sim
 // (no per-step launches captured), so reset it to avoid a misleading partial log.
-function clearEventLog() {
+function clearEventLog(): void {
     if (eventLogBodyEl) eventLogBodyEl.innerHTML = '';
 }
 
 // ── Replay debug controls (?debug=1) ─────────────────────────────────────────
-function updateInputStream() {
-    if (!debugMode || !debugInputsEl) return;
+function updateInputStream(): void {
+    if (!debugMode || !debugInputsEl || !player) return;
     const tick = player.tick_index();
-    if (debugTickEl) debugTickEl.textContent = tick;
+    if (debugTickEl) debugTickEl.textContent = String(tick);
     const inputs = player.inputsAtTick ? player.inputsAtTick(tick) : [];
     debugInputsEl.textContent = inputs.length ? inputs.join('    ') : '—';
 }
-function stepOne() {
+function stepOne(): void {
+    if (!player) return;
     setPlaying(false);
     if (player.step()) captureLaunches();
     renderFrame();
 }
-function jumpTo(t) {
+function jumpTo(t: number): void {
+    if (!player) return;
     setPlaying(false);
     player.seek(Math.max(0, Math.min(player.tick_count(), t | 0)));
     clearEventLog();
     renderFrame();
 }
-async function copyState() {
+async function copyState(): Promise<void> {
+    if (!player) return;
     const state = {
         tick: player.tick_index(), tick_count: player.tick_count(), result: player.result(),
         a: player.hud(true), b: player.hud(false),
@@ -257,7 +309,8 @@ async function copyState() {
     if (copyBtn) { copyBtn.textContent = 'Copied!'; setTimeout(() => { copyBtn.textContent = 'Copy state'; }, 1200); }
 }
 
-function renderFrame() {
+function renderFrame(): void {
+    if (!player) return;
     drawBoard(ctx, player.render_grid(), player.width(), player.height());
     const ha = player.hud(true);
     renderHud(hudAEl, ha);
@@ -269,18 +322,18 @@ function renderFrame() {
         renderHud(hudBEl, hb);
         bazaarBEl.style.display = (hb && hb.inBazaar) ? '' : 'none';
     }
-    seek.value = player.tick_index();
+    seek.value = String(player.tick_index());
     tickLabel.textContent = `${player.tick_index()} / ${player.tick_count()}`;
     if (debugMode) updateInputStream();
 }
 
-function setPlaying(p) {
+function setPlaying(p: boolean): void {
     playing = p;
     playBtn.innerHTML = p ? '&#9208; Pause' : '&#9654; Play';
     if (p) { lastT = 0; accum = 0; }
 }
 
-function loop(now) {
+function loop(now: number): void {
     if (player && playing) {
         if (lastT === 0) lastT = now;
         let dt = now - lastT;
@@ -302,7 +355,7 @@ function loop(now) {
     requestAnimationFrame(loop);
 }
 
-function resultText(r, mode) {
+function resultText(r: number, mode: string): string {
     if (mode === 'Online') {
         if (r === 1) return ' · side A won';
         if (r === 2) return ' · side B won';
@@ -321,13 +374,13 @@ function resultText(r, mode) {
 
     if (!id) { showError('No replay id in the URL.'); return; }
 
-    let text;
+    let text: string;
     try {
         const res = await fetch(`/api/replays/${id}`);
         if (!res.ok) throw new Error(`server returned ${res.status}`);
         text = await res.text();
     } catch (e) {
-        showError('Could not load replay: ' + e.message);
+        showError('Could not load replay: ' + (e as Error).message);
         return;
     }
 
@@ -335,7 +388,7 @@ function resultText(r, mode) {
         // An online match recording carries two seeds (seed_a/seed_b); play it
         // with the two-board Versus player. Everything else is a single-board game.
         // The server threads the real player names (name_a/name_b) into the JSON.
-        let parsed = {};
+        let parsed: ReplayMeta = {};
         try { parsed = JSON.parse(text) || {}; } catch (_) {}
         const isVersus = parsed.seed_a !== undefined;
         player = isVersus
@@ -352,7 +405,7 @@ function resultText(r, mode) {
     if (player.hasEvents && player.hasEvents() && eventLogEl) eventLogEl.style.display = '';
     layoutBoards();
     window.addEventListener('resize', layoutBoards);
-    seek.max = player.tick_count();
+    seek.max = String(player.tick_count());
 
     // Determine the final outcome once (it's only known at the end), then rewind.
     player.seek(player.tick_count());
@@ -364,16 +417,19 @@ function resultText(r, mode) {
     renderFrame();
 
     playBtn.addEventListener('click', () => {
+        if (!player) return;
         if (player.tick_index() >= player.tick_count()) player.seek(0);
         setPlaying(!playing);
     });
     restartBtn.addEventListener('click', () => {
+        if (!player) return;
         player.seek(0);
         setPlaying(false);
         clearEventLog();
         renderFrame();
     });
     seek.addEventListener('input', () => {
+        if (!player) return;
         player.seek(parseInt(seek.value, 10) || 0);
         setPlaying(false);
         clearEventLog();
@@ -383,9 +439,9 @@ function resultText(r, mode) {
     // Debug controls (?debug=1): single-step, jump-to-tick, copy-state.
     if (debugMode && debugEl) {
         debugEl.style.display = '';
-        if (jumpInput) jumpInput.max = player.tick_count();
+        if (jumpInput) jumpInput.max = String(player.tick_count());
         if (stepBtn) stepBtn.addEventListener('click', stepOne);
-        if (goBtn) goBtn.addEventListener('click', () => jumpTo(parseInt(jumpInput.value, 10) || 0));
+        if (goBtn) goBtn.addEventListener('click', () => jumpTo(parseInt(jumpInput!.value, 10) || 0));
         if (jumpInput) jumpInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') jumpTo(parseInt(jumpInput.value, 10) || 0); });
         if (copyBtn) copyBtn.addEventListener('click', copyState);
         updateInputStream();

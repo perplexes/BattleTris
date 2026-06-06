@@ -9,8 +9,11 @@
 FROM rust:1-bookworm AS builder
 WORKDIR /build
 
+# musl-tools: static server build. nodejs/npm: compile the browser TypeScript
+# (www/*.ts -> www/*.js) — the page is served as plain ES modules, tsc is the only
+# build step (no bundler). Bookworm ships node 18 + npm 9, ample for tsc.
 RUN rustup target add wasm32-unknown-unknown x86_64-unknown-linux-musl \
- && apt-get update && apt-get install -y --no-install-recommends musl-tools \
+ && apt-get update && apt-get install -y --no-install-recommends musl-tools nodejs npm \
  && rm -rf /var/lib/apt/lists/* \
  && curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
 
@@ -23,6 +26,11 @@ ARG BT_GIT_SHA=dev
 
 # Browser client (release) -> bt-wasm/pkg, and a static server binary.
 RUN BT_GIT_SHA="$BT_GIT_SHA" wasm-pack build bt-wasm --target web --out-dir pkg --release
+# Compile the browser TypeScript -> www/*.js. Runs AFTER wasm-pack so the generated
+# pkg/bt_wasm.d.ts exists to type the `../pkg/bt_wasm.js` import. noEmitOnError is set
+# in tsconfig, so a type error fails the build here. Skip Playwright's browser
+# download (only `typescript` is needed to compile; the e2e isn't run in the image).
+RUN cd bt-wasm && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci && npm run build:ts
 # bt-server now embeds SQLite (rusqlite "bundled" compiles it from C). Point the
 # cc crate at the musl cross-compiler so SQLite links statically into the musl
 # binary — keeps the runtime image libc-free.

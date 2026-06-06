@@ -209,6 +209,7 @@ dependencies = [
  "bt-ai",
  "bt-core",
  "bt-identity",
+ "bt-netcode",
  "bt-replay",
  "futures-util",
  "proptest",
@@ -234,6 +235,17 @@ dependencies = [
  "proptest",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "bt-netcode"
+version = "0.1.0"
+dependencies = [
+ "bt-core",
+ "bt-replay",
+ "proptest",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -281,6 +293,7 @@ version = "0.1.0"
 dependencies = [
  "bt-ai",
  "bt-core",
+ "bt-netcode",
  "bt-replay",
  "bt-trueskill",
  "wasm-bindgen",

@@ -1,0 +1,107 @@
+// The websocket wire protocol between the browser and bt-server, as TypeScript
+// types. Server frames are a discriminated union on `type`, so the message handler
+// (onSignalMessage in main.ts) is exhaustively checked — a new server message, or a
+// renamed field, is a compile error rather than a silent `undefined` at runtime.
+//
+// These mirror the JSON bt-server emits/accepts (see bt-server/src/main.rs and the
+// Snapshot struct in bt-server/src/bout.rs). Input frames are built in Rust now
+// (bt-netcode `input_frame`, surfaced via WasmClient.predict_*), so they're not
+// modelled here — the client only constructs the control frames in ClientMessage.
+
+// ─── Shared sub-shapes ───────────────────────────────────────────────────────
+
+/** A player as listed in the lobby roster (`players` frame). */
+export interface PlayerInfo {
+    name: string;
+    status: string;          // e.g. 'available' | 'searching' | 'in_game'
+    ping?: number;
+    bot?: boolean;
+    geo?: string;
+    elo?: number;
+}
+
+/** Authoritative own-side status carried every snapshot (`msg.you`). */
+export interface SideStatus {
+    funds: number;
+    in_bazaar: boolean;
+    lines_til_bazaar: number;
+}
+
+/** Authoritative opponent view carried every snapshot (`msg.opp`). */
+export interface OppStatus {
+    score: number;
+    lines: number;
+    game_over: boolean;
+    in_bazaar?: boolean;
+}
+
+// ─── Server → client frames ──────────────────────────────────────────────────
+
+export interface StatsMsg { type: 'stats'; players?: number; hits?: number; }
+export interface PlayersMsg { type: 'players'; players: PlayerInfo[]; }
+export interface ChallengedMsg { type: 'challenged'; from: string; }
+export interface ChallengeDeclinedMsg { type: 'challengeDeclined'; by: string; }
+export interface DrainingMsg { type: 'draining'; }
+export interface ResumedMsg { type: 'resumed'; }
+export interface OpponentReconnectingMsg { type: 'opponentReconnecting'; grace_secs?: number; }
+export interface OpponentResumedMsg { type: 'opponentResumed'; }
+export interface RejoinFailedMsg { type: 'rejoinFailed'; }
+
+export interface MatchStartMsg {
+    type: 'matchStart';
+    seed: number;
+    match_id: number;
+    opponent?: string;
+    opp_elo?: number;
+}
+
+export interface SnapshotMsg {
+    type: 'snapshot';
+    ack: number;
+    you: SideStatus;
+    opp: OppStatus;
+    /** 0 = ongoing, 1 = you won, 2 = you lost. */
+    result?: number;
+    /** Full authoritative state (Game::snapshot_bytes); present only on keyframes. */
+    keyframe?: number[];
+    /** A spy of ours is active this frame. */
+    spying?: boolean;
+    /** Server-degraded opponent board (rides keyframes while spying). */
+    spy_board?: number[];
+}
+
+export interface RatingMsg { type: 'rating'; mu: number; sigma: number; won: boolean; }
+export interface MatchReplayMsg { type: 'matchReplay'; id: string; }
+export interface OpponentLeftMsg { type: 'opponentLeft'; }
+
+/** Every frame the server can send on the lobby/match socket. */
+export type ServerMessage =
+    | StatsMsg
+    | PlayersMsg
+    | ChallengedMsg
+    | ChallengeDeclinedMsg
+    | DrainingMsg
+    | ResumedMsg
+    | OpponentReconnectingMsg
+    | OpponentResumedMsg
+    | RejoinFailedMsg
+    | MatchStartMsg
+    | SnapshotMsg
+    | RatingMsg
+    | MatchReplayMsg
+    | OpponentLeftMsg;
+
+/** Discriminant strings, for narrowing helpers/tests. */
+export type ServerMessageType = ServerMessage['type'];
+
+// ─── Client → server frames (control only; input frames come from WasmClient) ──
+
+export type ClientMessage =
+    | { type: 'available'; value: boolean; name?: string; token?: string; geo?: string; bot?: boolean }
+    | { type: 'queue'; name: string; token: string; authoritative: true }
+    | { type: 'challenge'; target: string }
+    | { type: 'challengeAccept'; from: string }
+    | { type: 'rejoin'; match_id: number; token: string; name: string }
+    | { type: 'leaveMatch' }
+    | { type: 'watch'; target: string }
+    | { type: 'active' };

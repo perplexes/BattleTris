@@ -1,9 +1,13 @@
-import init, { WasmGame, WasmVsComputer, fixed_dt, max_weapons, weapon_name, weapon_description, weapon_price, weapon_duration } from '../pkg/bt_wasm.js';
+import init, { WasmGame, WasmVsComputer, WasmClient, fixed_dt, max_weapons, weapon_name, weapon_description, weapon_price, weapon_duration } from '../pkg/bt_wasm.js';
 import { CELL_SIZE, drawBoard } from './render.js';
 import { Sound } from './sound.js';
+import type { ServerMessage, PlayerInfo } from './protocol.js';
+
+// The `game` variable holds one of three wasm classes or null.
+type AnyGame = WasmGame | WasmVsComputer | WasmClient;
 
 // Game state
-let game = null;
+let game: AnyGame | null = null;
 let mode = 'practice'; // 'practice', 'vscomputer', 'online' (online = server-authoritative)
 let lastFrameTime = 0;
 // Fixed-timestep accumulator. The engine is advanced in constant FIXED_DT steps
@@ -18,81 +22,82 @@ let paused = false;
 let gameEnded = false;
 
 // Online (server-authoritative matchmaking + match) state
-let ws = null;       // WebSocket: matchmaking handoff + the authoritative match
+let ws: WebSocket | null = null;       // WebSocket: matchmaking handoff + the authoritative match
 let onlinePaused = true;  // true until a match starts
 let onlineOpponentName = '';
 let searching = false;    // background matchmaking in progress (queued, not yet matched)
 
 // Server-authoritative online play (the client-server migration). In an
 // authoritative match the server runs the real simulation; the client predicts
-// locally for a 0-latency feel, sends each input to the server (tagged with a
-// monotonic seq), and reconciles against the server's keyframes by restoring the
-// full game state and re-applying its not-yet-acknowledged inputs.
+// locally for a 0-latency feel, sends each input to the server, and reconciles
+// against the server's keyframes. The prediction/reconciliation core — the input
+// seq, the unacked-input queue, and the keyframe-restore-then-replay — lives in
+// the shared `WasmClient` (bt-netcode's Predictor), the SAME code the bot runs, so
+// `game` is a `WasmClient` during an online match (and a `WasmGame` /
+// `WasmVsComputer` otherwise; all three expose the same read API for rendering).
 let authoritative = false; // true during a server-authoritative online match
-let currentMatchId = null; // the live bout's id; parked in the URL for rejoin-on-refresh
-let currentSeed = null;    // the game's RNG seed (shown in the debug overlay)
-let inputSeq = 0;          // monotonic client input counter
-let unackedInputs = [];    // [{seq, repr}] sent to the server, not yet acked
-let authSelf = null;       // latest authoritative own-status {funds,in_bazaar,lines_til_bazaar}
-let authOpp = null;        // latest authoritative opponent view {score,lines,game_over}
+let currentMatchId: number | string | null = null; // the live bout's id; parked in the URL for rejoin-on-refresh
+let currentSeed: number | null = null;    // the game's RNG seed (shown in the debug overlay)
+let authSelf: { funds: number; in_bazaar: boolean; lines_til_bazaar: number } | null = null;       // latest authoritative own-status {funds,in_bazaar,lines_til_bazaar}
+let authOpp: { score: number; lines: number; game_over: boolean; in_bazaar?: boolean } | null = null;        // latest authoritative opponent view {score,lines,game_over}
 let authSpying = false;    // is a spy of ours active (server-authorized)?
-let authSpyBoard = null;   // latest server-DEGRADED opponent board (from a keyframe), or null
-let playerName = null;    // remembered after the first prompt
+let authSpyBoard: Int32Array | null = null;   // latest server-DEGRADED opponent board (from a keyframe), or null
+let playerName: string | null = null;    // remembered after the first prompt
 
 // Canvas and context
-const canvas = document.getElementById('gameCanvas');
-const ctx = canvas.getContext('2d');
-const aiGridCanvas = document.getElementById('aiGridCanvas');
-const aiCtx = aiGridCanvas.getContext('2d');
+const canvas = document.getElementById('gameCanvas') as HTMLCanvasElement;
+const ctx = canvas.getContext('2d')!;
+const aiGridCanvas = document.getElementById('aiGridCanvas') as HTMLCanvasElement;
+const aiCtx = aiGridCanvas.getContext('2d')!;
 
 // UI elements
-const scoreValue = document.getElementById('scoreValue');
-const linesValue = document.getElementById('linesValue');
-const fundsValue = document.getElementById('fundsValue');
-const linesToBazaarValue = document.getElementById('linesToBazaarValue');
-const gameOverOverlay = document.getElementById('gameOverOverlay');
-const gameOverText = document.getElementById('gameOverText');
-const watchReplayBtn = document.getElementById('watchReplayBtn');
+const scoreValue = document.getElementById('scoreValue') as HTMLElement;
+const linesValue = document.getElementById('linesValue') as HTMLElement;
+const fundsValue = document.getElementById('fundsValue') as HTMLElement;
+const linesToBazaarValue = document.getElementById('linesToBazaarValue') as HTMLElement;
+const gameOverOverlay = document.getElementById('gameOverOverlay') as HTMLElement;
+const gameOverText = document.getElementById('gameOverText') as HTMLElement;
+const watchReplayBtn = document.getElementById('watchReplayBtn') as HTMLElement | null;
 // The just-finished online match's stored replay id (sent by the server at
 // match end) — drives the game-over "Watch replay" button.
-let lastMatchReplayId = null;
-const newGameBtn = document.getElementById('newGameBtn');
-const bazaarOverlay = document.getElementById('bazaarOverlay');
-const bazaarFunds = document.getElementById('bazaarFunds');
-const bazaarDoneBtn = document.getElementById('bazaarDoneBtn');
-const bazaarBarrierStatus = document.getElementById('bazaarBarrierStatus');
-const bazaarAddBtn = document.getElementById('bazaarAddBtn');
-const bazaarRemoveBtn = document.getElementById('bazaarRemoveBtn');
-const bazaarWeaponList = document.getElementById('bazaarWeaponList');
-const bazaarArsenalList = document.getElementById('bazaarArsenalList');
-const bazaarInfoPrice = document.getElementById('bazaarInfoPrice');
-const bazaarInfoDuration = document.getElementById('bazaarInfoDuration');
-const bazaarInfoDesc = document.getElementById('bazaarInfoDesc');
-const arsenalList = document.getElementById('arsenalList');
-const opponentScore = document.getElementById('opponentScore');
-const opponentLines = document.getElementById('opponentLines');
-const modePracticeBtn = document.getElementById('modePractice');
-const playComputerBtn = document.getElementById('playComputerBtn');
-const findMatchBtn = document.getElementById('findMatchBtn');
-const aiBoard = document.getElementById('aiBoard');
-const gameAreaEl = document.querySelector('.game-area');
-const aiLabel = document.getElementById('aiLabel');
-const onlineStatus = document.getElementById('onlineStatus');
+let lastMatchReplayId: string | null = null;
+const newGameBtn = document.getElementById('newGameBtn') as HTMLElement;
+const bazaarOverlay = document.getElementById('bazaarOverlay') as HTMLElement;
+const bazaarFunds = document.getElementById('bazaarFunds') as HTMLElement;
+const bazaarDoneBtn = document.getElementById('bazaarDoneBtn') as HTMLButtonElement;
+const bazaarBarrierStatus = document.getElementById('bazaarBarrierStatus') as HTMLElement | null;
+const bazaarAddBtn = document.getElementById('bazaarAddBtn') as HTMLElement;
+const bazaarRemoveBtn = document.getElementById('bazaarRemoveBtn') as HTMLElement;
+const bazaarWeaponList = document.getElementById('bazaarWeaponList') as HTMLElement;
+const bazaarArsenalList = document.getElementById('bazaarArsenalList') as HTMLElement;
+const bazaarInfoPrice = document.getElementById('bazaarInfoPrice') as HTMLElement;
+const bazaarInfoDuration = document.getElementById('bazaarInfoDuration') as HTMLElement;
+const bazaarInfoDesc = document.getElementById('bazaarInfoDesc') as HTMLElement;
+const arsenalList = document.getElementById('arsenalList') as HTMLElement;
+const opponentScore = document.getElementById('opponentScore') as HTMLElement;
+const opponentLines = document.getElementById('opponentLines') as HTMLElement;
+const modePracticeBtn = document.getElementById('modePractice') as HTMLElement;
+const playComputerBtn = document.getElementById('playComputerBtn') as HTMLElement;
+const findMatchBtn = document.getElementById('findMatchBtn') as HTMLElement;
+const aiBoard = document.getElementById('aiBoard') as HTMLElement;
+const gameAreaEl = document.querySelector('.game-area') as HTMLElement | null;
+const aiLabel = document.getElementById('aiLabel') as HTMLElement;
+const onlineStatus = document.getElementById('onlineStatus') as HTMLElement;
 
 // Two-screen views (lobby <-> playfield) — like the original window swapping the
 // BTChallenge and BTGame forms (BTStartup.C). Only one is visible at a time.
-const lobbyScreen = document.getElementById('lobbyScreen');
-const gameScreen = document.getElementById('gameScreen');
-const onlineListEl = document.getElementById('onlineList');
-const challengeBtn = document.getElementById('challengeBtn');
-const updateBtn = document.getElementById('updateBtn');
-const availableToggle = document.getElementById('availableToggle');
-const availableToggleGame = document.getElementById('availableToggleGame');
-const statsPanelEl = document.getElementById('statsPanel');
-const playingStatusEl = document.getElementById('playingStatus');
-const ernieSlider = document.getElementById('ernieSlider');
-const nameInput = document.getElementById('nameInput');
-const nameHint = document.getElementById('nameHint');
+const lobbyScreen = document.getElementById('lobbyScreen') as HTMLElement;
+const gameScreen = document.getElementById('gameScreen') as HTMLElement;
+const onlineListEl = document.getElementById('onlineList') as HTMLElement | null;
+const challengeBtn = document.getElementById('challengeBtn') as HTMLButtonElement | null;
+const updateBtn = document.getElementById('updateBtn') as HTMLElement | null;
+const availableToggle = document.getElementById('availableToggle') as HTMLInputElement | null;
+const availableToggleGame = document.getElementById('availableToggleGame') as HTMLInputElement | null;
+const statsPanelEl = document.getElementById('statsPanel') as HTMLElement | null;
+const playingStatusEl = document.getElementById('playingStatus') as HTMLElement | null;
+const ernieSlider = document.getElementById('ernieSlider') as HTMLInputElement | null;
+const nameInput = document.getElementById('nameInput') as HTMLInputElement | null;
+const nameHint = document.getElementById('nameHint') as HTMLElement | null;
 
 // Ernie difficulty names (the original slider's labels), index = level 0..14.
 const ERNIE_NAMES = ['Comatose', 'Somnambulant', 'Lethargic', 'Pensive', 'Able',
@@ -124,7 +129,7 @@ function showLobby() {
 // accidental browser refresh reconnects straight back into it (the server froze
 // the bout for a grace window and reattaches us). Cleared the moment the match is
 // no longer live, so a later refresh lands cleanly in the lobby.
-function setMatchUrl(id) {
+function setMatchUrl(id: number | string | null | undefined) {
     if (id === undefined || id === null) return;
     currentMatchId = id;
     try { history.replaceState(null, '', '?match=' + encodeURIComponent(id)); } catch (_) {}
@@ -136,13 +141,13 @@ function clearMatchUrl() {
 
 // The reconnect overlay ("Reconnecting…" for us / "Opponent reconnecting…" for the
 // other side) — shown while the server has the bout frozen during a grace window.
-const reconnectOverlay = document.getElementById('reconnectOverlay');
-const reconnectText = document.getElementById('reconnectText');
-let reconnectTimer = null; // the live forfeit countdown (connected side)
+const reconnectOverlay = document.getElementById('reconnectOverlay') as HTMLElement | null;
+const reconnectText = document.getElementById('reconnectText') as HTMLElement | null;
+let reconnectTimer: number | null = null; // the live forfeit countdown (connected side)
 function stopReconnectCountdown() {
     if (reconnectTimer) { clearInterval(reconnectTimer); reconnectTimer = null; }
 }
-function showReconnect(text) {
+function showReconnect(text: string) {
     if (reconnectText) reconnectText.textContent = text;
     if (reconnectOverlay) reconnectOverlay.style.display = 'flex';
 }
@@ -153,7 +158,7 @@ function hideReconnect() {
 // Tick a visible countdown to the forfeit while the opponent reconnects. The
 // server still decides the actual forfeit (it sends opponentLeft at expiry); this
 // just shows how long is left so the wait doesn't feel open-ended.
-function startReconnectCountdown(secs) {
+function startReconnectCountdown(secs: number) {
     stopReconnectCountdown();
     let remaining = Math.max(0, secs | 0);
     const render = () => showReconnect(`Opponent reconnecting…\n${remaining}s to forfeit`);
@@ -189,13 +194,13 @@ function setPlayingStatus() {
 // ─── Lobby presence + challenge (server wiring lands in Phases 3-4) ──────────
 // Selected player in the online list (null = none). Drives the Challenge button
 // and the stats panel.
-let selectedPlayer = null;
-let lobbyPlayers = [];
+let selectedPlayer: string | null = null;
+let lobbyPlayers: PlayerInfo[] = [];
 
 // Render the online players list. Each row selects the player (loads their stats
 // + enables Challenge). Populated from the server's `players` push; empty until
 // presence tracking lands.
-function renderOnlineList(players) {
+function renderOnlineList(players: PlayerInfo[]) {
     lobbyPlayers = players || [];
     if (!onlineListEl) return;
     if (!lobbyPlayers.length) {
@@ -216,7 +221,7 @@ function renderOnlineList(players) {
     }
 }
 
-function selectPlayer(name) {
+function selectPlayer(name: string) {
     selectedPlayer = name;
     if (challengeBtn) challengeBtn.disabled = !name;
     renderOnlineList(lobbyPlayers);
@@ -233,12 +238,22 @@ function selectPlayer(name) {
 // threshold it gets concerned about you; past a higher one it grants a saved achievement.
 const UPDATE_CONCERNED_AFTER = 25; // the "we are concerned" line only after this many
 const UPDATE_ACHIEVEMENT_AT = 50;  // press count that unlocks the achievement (once, persisted)
-function gagOrdinal(n) { const s = ['th', 'st', 'nd', 'rd'], v = n % 100; return n + (s[(v - 20) % 10] || s[v] || s[0]); }
-function gagElapsed(ms) { const t = Math.max(0, Math.floor(ms / 1000)); return Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0'); }
+function gagOrdinal(n: number) { const s = ['th', 'st', 'nd', 'rd'], v = n % 100; return n + (s[(v - 20) % 10] || s[v] || s[0]); }
+function gagElapsed(ms: number) { const t = Math.max(0, Math.floor(ms / 1000)); return Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0'); }
+
+// Context passed to a dynamic gag.
+interface GagCtx { n: number; elapsed: number; idx: number; }
+// A gag entry: a plain string, a dynamic function, a threshold-gated function, or a
+// one-shot sequence.
+type GagEntry =
+    | string
+    | ((c: GagCtx) => string)
+    | { after: number; fn: (c: GagCtx) => string }
+    | { seq: string[] };
 
 // The opening sequence (the original escalating bit). Plays once, in order, the moment
 // you first press; it's NOT in the random pool, so it can never surface mid-way.
-const UPDATE_INTRO = [
+const UPDATE_INTRO: GagEntry[] = [
     'You press UPDATE. Nothing happens.',
     'You press UPDATE again. Still nothing happens.',
     'You press UPDATE yet again and meditate on the nature of nothing.',
@@ -253,7 +268,7 @@ const UPDATE_INTRO = [
 // The pool drawn from after the intro. Standalone entries repeat; a `{seq}` is a
 // one-shot sequence (plays whole, in order, then never again — and since only the
 // unit sits in the pool, you can never land on a sequence's middle).
-const UPDATE_GAGS = [
+const UPDATE_GAGS: GagEntry[] = [
     'You press UPDATE harder. The nothing intensifies.',
     'Nothing happened. But you grew, a little, as a person.',
     'You press UPDATE. There is no undo without a do.',
@@ -311,15 +326,15 @@ const UPDATE_GAGS = [
 ];
 
 let updatePresses = 0, updateFirstMs = 0;
-let updateSeq = null;                // { list, pos } while a sequence is playing
+let updateSeq: { list: GagEntry[]; pos: number } | null = null;                // { list, pos } while a sequence is playing
 let updateIntroDone = false;         // the opening sequence is one-shot
-const updatePlayedSeq = new Set();   // pool indices of one-shot sequences already run
+const updatePlayedSeq = new Set<number>();   // pool indices of one-shot sequences already run
 function updateAchUnlocked() { try { return localStorage.getItem('bt_ach_update') === '1'; } catch (_) { return false; } }
-function resolveGag(e, ctx) { return typeof e === 'function' ? e(ctx) : (e && e.fn ? e.fn(ctx) : e); }
+function resolveGag(e: GagEntry, ctx: GagCtx): string { return typeof e === 'function' ? e(ctx) : ((e as any) && (e as any).fn ? (e as any).fn(ctx) : e as string); }
 function pressUpdate() {
     updatePresses++;
     if (!updateFirstMs) updateFirstMs = Date.now();
-    const ctx = { n: updatePresses, elapsed: Date.now() - updateFirstMs, idx: 0 };
+    const ctx: GagCtx = { n: updatePresses, elapsed: Date.now() - updateFirstMs, idx: 0 };
 
     // A sequence in progress runs to its end — never interrupted, never re-entered.
     if (updateSeq) {
@@ -351,21 +366,21 @@ function pressUpdate() {
     for (let tries = 0; tries < 30; tries++) {
         const j = Math.floor(Math.random() * UPDATE_GAGS.length);
         const e = UPDATE_GAGS[j];
-        if (e && e.after && updatePresses < e.after) continue;
-        if (e && e.seq && updatePlayedSeq.has(j)) continue;
+        if ((e as any) && (e as any).after && updatePresses < (e as any).after) continue;
+        if ((e as any) && (e as any).seq && updatePlayedSeq.has(j)) continue;
         i = j; break;
     }
     if (i < 0) { // everything eligible was gated/spent — fall back to a plain entry
-        i = UPDATE_GAGS.findIndex((e) => !(e && (e.seq || e.after)));
+        i = UPDATE_GAGS.findIndex((e) => !((e as any) && ((e as any).seq || (e as any).after)));
         if (i < 0) i = 0;
     }
     ctx.idx = i;
     const e = UPDATE_GAGS[i];
     // Start a one-shot sequence: play its first message now, the rest on later presses.
-    if (e && e.seq) {
+    if ((e as any) && (e as any).seq) {
         updatePlayedSeq.add(i);
-        updateSeq = { list: e.seq, pos: 1 };
-        showToast(resolveGag(e.seq[0], ctx), 4500);
+        updateSeq = { list: (e as any).seq, pos: 1 };
+        showToast(resolveGag((e as any).seq[0], ctx), 4500);
         return;
     }
     showToast(resolveGag(e, ctx), 4500);
@@ -394,13 +409,13 @@ async function challengeSelected() {
 
 // "Open to matches" lives in two places — the lobby and the in-game top bar —
 // so keep both checkboxes showing the same state.
-function syncAvailableUI(v) {
+function syncAvailableUI(v: boolean) {
     if (availableToggle) availableToggle.checked = v;
     if (availableToggleGame) availableToggleGame.checked = v;
 }
 
 // Open-to-matches: become challengeable AND eligible for auto-pairing.
-async function setAvailable(v) {
+async function setAvailable(v: boolean) {
     if (v && !await ensureIdentity()) {
         // Can't be challengeable without a signed identity — revert the toggle and
         // leave the name field focused so the player can fix it.
@@ -414,15 +429,15 @@ async function setAvailable(v) {
 }
 
 // An incoming challenge invite (server -> us).
-let pendingChallenger = null;
-const challengeOverlay = document.getElementById('challengeOverlay');
-function onChallenged(from) {
+let pendingChallenger: string | null = null;
+const challengeOverlay = document.getElementById('challengeOverlay') as HTMLElement | null;
+function onChallenged(from: string) {
     pendingChallenger = from;
     const t = document.getElementById('challengeText');
     if (t) t.textContent = `${from} challenges you!`;
     if (challengeOverlay) challengeOverlay.classList.add('open');
 }
-function respondChallenge(accept) {
+function respondChallenge(accept: boolean) {
     if (challengeOverlay) challengeOverlay.classList.remove('open');
     if (!pendingChallenger) return;
     const from = pendingChallenger;
@@ -432,7 +447,7 @@ function respondChallenge(accept) {
     }
     if (accept) { setOnlineStatus(`Accepting ${from}…`); if (onlineStatus) onlineStatus.style.display = 'block'; }
 }
-async function loadPlayerStats(name) {
+async function loadPlayerStats(name: string) {
     if (!statsPanelEl || !name) return;
     statsPanelEl.textContent = 'Loading ' + name + '…';
     try {
@@ -447,8 +462,8 @@ async function loadPlayerStats(name) {
 
 // Render the stats panel in the original's right-aligned-label monospace style
 // (BTPlayer::formatInfo).
-function formatPlayerStats(p) {
-    const row = (label, val) => label.padStart(14) + ': ' + val;
+function formatPlayerStats(p: any) {
+    const row = (label: string, val: unknown) => label.padStart(14) + ': ' + val;
     return [
         row('Name', p.name ?? '—'),
         row('Rank', p.elo ?? '—'),
@@ -466,8 +481,8 @@ function formatPlayerStats(p) {
     ].join('\n');
 }
 
-function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+function escapeHtml(s: string) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 }
 
 // ─── Board display scale ──────────────────────────────────────────────────
@@ -489,7 +504,7 @@ const AI_SCALE_RATIO = 0.55;        // vs-Computer side board, a smaller seconda
 // board-wrapper's live top when the game screen is visible, and fall back to an
 // estimate of the top chrome when it's momentarily hidden (rect top ≈ 0).
 const ESTIMATED_TOP_CHROME = 64;       // ~game top bar height, for the hidden-screen fallback
-function boardDisplayScale(bufHeightPx) {
+function boardDisplayScale(bufHeightPx: number) {
     const wrapChromeY = 26;            // wrapper padding (10*2) + border (3*2)
     const wrapper = canvas.parentElement;
     const top = wrapper ? wrapper.getBoundingClientRect().top : 0;
@@ -517,20 +532,20 @@ function applyBoardScale() {
 
 window.addEventListener('resize', applyBoardScale);
 
-const cancelSearchBtn = document.getElementById('cancelSearch');
-const playersCountEl = document.getElementById('playersCount');
-const hitCounterEl = document.getElementById('hitCounter');
+const cancelSearchBtn = document.getElementById('cancelSearch') as HTMLElement;
+const playersCountEl = document.getElementById('playersCount') as HTMLElement | null;
+const hitCounterEl = document.getElementById('hitCounter') as HTMLElement | null;
 // Default Ernie difficulty: "Willing" (index 5 -> 1000ms/move). The original
 // defaults to the slider minimum (Comatose); 1000ms is a fairer modern default.
 const DEFAULT_ERNIE_LEVEL = 5;
 
 // Mobile UI elements
-const mobileScore = document.getElementById('mobileScore');
-const mobileLines = document.getElementById('mobileLines');
-const mobileFunds = document.getElementById('mobileFunds');
-const mobileLinesToBazaar = document.getElementById('mobileLinesToBazaar');
-const mobileOpponent = document.getElementById('mobileOpponent');
-const mobileArsenalList = document.getElementById('mobileArsenalList');
+const mobileScore = document.getElementById('mobileScore') as HTMLElement;
+const mobileLines = document.getElementById('mobileLines') as HTMLElement;
+const mobileFunds = document.getElementById('mobileFunds') as HTMLElement;
+const mobileLinesToBazaar = document.getElementById('mobileLinesToBazaar') as HTMLElement;
+const mobileOpponent = document.getElementById('mobileOpponent') as HTMLElement;
+const mobileArsenalList = document.getElementById('mobileArsenalList') as HTMLElement;
 
 const ARSENAL_KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
 
@@ -543,7 +558,7 @@ const GAMEPLAY_KEYS = new Set([
 
 // ─── Online helpers ───────────────────────────────────────────────────────────
 
-function setOnlineStatus(msg) {
+function setOnlineStatus(msg: string) {
     onlineStatus.textContent = msg;
 }
 
@@ -558,9 +573,9 @@ function setOnlineStatus(msg) {
 // players/presence/challenge) AND the authoritative match (matchStart/snapshot/
 // input). One connection per client = the server's model; it also means a
 // challenge accepted in the lobby flows straight into a match on the same socket.
-let lobbyReconnectTimer = null;
+let lobbyReconnectTimer: number | null = null;
 let pendingQueue = false;   // queue for a match as soon as the socket (re)opens
-let pendingRejoin = null;   // match_id to reattach to as soon as the socket (re)opens
+let pendingRejoin: number | string | null = null;   // match_id to reattach to as soon as the socket (re)opens
 
 function connectLobby() {
     // Never open a second socket on top of a live one.
@@ -604,7 +619,6 @@ function connectLobby() {
             stopReconnectCountdown(); // it's now US reconnecting, not the opponent
             showReconnect('Reconnecting…');
         }
-        unackedInputs = [];
         if (searching) {
             searching = false;
             findMatchBtn.classList.remove('searching');
@@ -612,7 +626,7 @@ function connectLobby() {
         }
         ws = null;
         renderOnlineList([]); // clear the roster while disconnected
-        clearTimeout(lobbyReconnectTimer);
+        clearTimeout(lobbyReconnectTimer!);
         // Reconnect fast when a rejoin is pending (get back into the frozen match
         // before the grace window expires); the usual cadence otherwise.
         lobbyReconnectTimer = setTimeout(connectLobby, pendingRejoin !== null ? 600 : 3000);
@@ -625,7 +639,7 @@ function connectLobby() {
 // could be dismissed/blocked, leaving you stuck — the bug this replaces). On a
 // name set/change we mint a signed JWT from the server (cached in localStorage) so
 // the name is tamper-evident while held. Online actions require a name + token.
-let identityToken = null;
+let identityToken: string | null = null;
 
 function loadIdentity() {
     try {
@@ -640,7 +654,7 @@ function loadIdentity() {
     if (nameInput) nameInput.value = playerName;
 }
 
-function setNameHint(msg, isError) {
+function setNameHint(msg: string, isError?: boolean) {
     if (!nameHint) return;
     nameHint.textContent = msg || '';
     nameHint.classList.toggle('name-hint-error', !!isError);
@@ -664,7 +678,7 @@ async function ensureIdentity() {
         });
         if (res.ok) {
             identityToken = (await res.json()).token;
-            try { localStorage.setItem('bt_token', identityToken); } catch (_) {}
+            try { localStorage.setItem('bt_token', identityToken!); } catch (_) {}
             setNameHint('');
         } else {
             setNameHint('Could not register that name. Try another.', true);
@@ -692,15 +706,15 @@ async function commitNameFromField() {
     if (tok && availableToggle && availableToggle.checked) setAvailable(true);
 }
 
-function updateLiveStats(m) {
+function updateLiveStats(m: { players?: number; hits?: number }) {
     if (typeof m.players === 'number' && playersCountEl) {
-        playersCountEl.textContent = m.players;
+        playersCountEl.textContent = m.players as unknown as string;
     }
     if (typeof m.hits === 'number') setHitCounter(m.hits);
 }
 
 // Render the visit total as fixed-width odometer digits (classic web-counter look).
-function setHitCounter(n) {
+function setHitCounter(n: number) {
     if (!hitCounterEl) return;
     const s = String(Math.max(0, n | 0)).padStart(6, '0');
     hitCounterEl.innerHTML = Array.from(s, (d) => `<span class="odo-digit">${d}</span>`).join('');
@@ -726,7 +740,6 @@ function cleanupOnline() {
     onlinePaused = true;
     onlineOpponentName = '';
     authoritative = false;
-    unackedInputs = [];
     authSelf = null;
     authOpp = null;
     authSpying = false;
@@ -735,91 +748,70 @@ function cleanupOnline() {
 
 // ─── Server-authoritative client (prediction + reconciliation) ────────────────
 
-// Apply a gameplay action to the LOCAL game (prediction) and, in an authoritative
-// match, send it to the server tagged with a seq (and remember it for replay on
-// the next keyframe). Returns the buy/sell success for the bazaar UI.
-function predict(kind, arg) {
-    // The bazaar freezes play: only shopping actions are valid (the server
-    // rejects the rest). Gate centrally so NO call site — keys, touch, arsenal
-    // clicks — can predict/send a non-shopping input while in the bazaar.
-    if (inBazaar() && kind !== 'BuyWeapon' && kind !== 'SellWeapon' && kind !== 'LeaveBazaar') {
+// Apply a gameplay action. In an authoritative (online) match this routes through
+// the shared `WasmClient` predictor (predict locally + hand back the wire frame to
+// send); the server-side seq/unacked/replay bookkeeping all lives in there. In local
+// modes (practice / vs-computer) it just mutates the local engine — nothing is sent.
+// Returns the buy/sell success for the bazaar UI.
+function predict(kind: string, arg?: any): boolean | void {
+    if (authoritative) {
+        if (gameEnded) return;
+        // The Predictor gates internally (a non-shopping input under a bazaar barrier,
+        // or an unaffordable buy/sell, returns "") — so there's no JS-side gate here.
+        let frame = '';
+        switch (kind) {
+            case 'MoveLeft':     frame = (game as WasmClient).predict_move_left();  break;
+            case 'MoveRight':    frame = (game as WasmClient).predict_move_right(); break;
+            case 'Rotate':       frame = (game as WasmClient).predict_rotate();     break;
+            case 'BeginDrop':    frame = (game as WasmClient).predict_begin_drop(); break;
+            case 'SoftDrop':     frame = (game as WasmClient).predict_soft_drop();  break;
+            case 'LaunchWeapon': frame = (game as WasmClient).predict_launch(arg >>> 0); break;
+            case 'LeaveBazaar':  frame = (game as WasmClient).predict_leave_bazaar(); break;
+            case 'BuyWeapon':    frame = (game as WasmClient).predict_buy(arg);  break;
+            case 'SellWeapon':   frame = (game as WasmClient).predict_sell(arg); break;
+            case 'SetPaused':    return; // local only; the server rejects pause
+        }
+        if (frame && ws && ws.readyState === WebSocket.OPEN) ws.send(frame);
+        // For buy/sell the bazaar UI wants the accept bool; a non-empty frame ⇒ the
+        // engine accepted it (and we sent it).
+        if (kind === 'BuyWeapon' || kind === 'SellWeapon') return !!frame;
         return;
     }
-    let repr = null;
-    switch (kind) {
-        case 'MoveLeft':  game.move_left();  repr = 'MoveLeft';  break;
-        case 'MoveRight': game.move_right(); repr = 'MoveRight'; break;
-        case 'Rotate':    game.rotate();     repr = 'Rotate';    break;
-        case 'BeginDrop': game.begin_drop(); repr = 'BeginDrop'; break;
-        case 'SoftDrop':  game.soft_drop();  repr = 'SoftDrop';  break;
-        case 'LaunchWeapon': game.launch_weapon(arg); repr = { LaunchWeapon: arg >>> 0 }; break;
-        case 'LeaveBazaar':
-            // In an authoritative match the bazaar is a server-side barrier: send
-            // "done" but DON'T leave locally (the keyframe clears in_bazaar once
-            // BOTH players are done; leaving early would tick while the server is
-            // frozen). Local modes leave immediately.
-            if (!authoritative) game.leave_bazaar();
-            repr = 'LeaveBazaar';
-            break;
-        case 'BuyWeapon': {
-            const ok = game.buy_weapon(arg);
-            if (authoritative && !gameEnded) sendInput({ BuyWeapon: arg });
-            return ok;
-        }
-        case 'SellWeapon': {
-            const ok = game.sell_weapon(arg);
-            if (authoritative && !gameEnded) sendInput({ SellWeapon: arg });
-            return ok;
-        }
-        case 'SetPaused': game.set_paused(arg); return; // local only; the server rejects pause
+    // ── Local modes: apply directly to the engine. The bazaar freezes play, so
+    // gate out non-shopping inputs while the local bazaar is open. ──
+    if ((game as WasmGame).is_in_bazaar() && kind !== 'BuyWeapon' && kind !== 'SellWeapon' && kind !== 'LeaveBazaar') {
+        return;
     }
-    if (authoritative && !gameEnded && repr !== null) sendInput(repr);
-}
-
-function sendInput(repr) {
-    // Only queue when we can actually send: if the socket is gone the input can
-    // never be acked, so queuing it would grow unackedInputs forever (the local
-    // prediction has already applied it; the match is effectively over anyway).
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    inputSeq += 1;
-    unackedInputs.push({ seq: inputSeq, repr });
-    ws.send(JSON.stringify({ type: 'input', seq: inputSeq, input: repr }));
+    switch (kind) {
+        case 'MoveLeft':     (game as WasmGame).move_left();  break;
+        case 'MoveRight':    (game as WasmGame).move_right(); break;
+        case 'Rotate':       (game as WasmGame).rotate();     break;
+        case 'BeginDrop':    (game as WasmGame).begin_drop(); break;
+        case 'SoftDrop':     (game as WasmGame).soft_drop();  break;
+        case 'LaunchWeapon': (game as WasmGame).launch_weapon(arg); break;
+        case 'LeaveBazaar':  (game as WasmGame).leave_bazaar(); break;
+        case 'BuyWeapon':    return (game as WasmGame).buy_weapon(arg);
+        case 'SellWeapon':   return (game as WasmGame).sell_weapon(arg);
+        case 'SetPaused':    (game as WasmGame).set_paused(arg); break;
+    }
 }
 
 // The bazaar barrier is server-authoritative online (authSelf.in_bazaar is prompt
-// every frame); local modes use the engine flag. Used to gate input + replay so
-// the client never sends/replays a non-shopping action the server would reject.
+// every frame); local modes use the engine flag. Used by the touch/key handlers to
+// block gameplay gestures while the screen is frozen. (Online input gating proper
+// now lives inside the Predictor; this is the UI-side read.)
 function inBazaar() {
     if (authoritative && authSelf) {
         // Barrier active while EITHER side is still shopping — keep gameplay
         // inputs blocked (and the overlay up) until BOTH players have hit Done.
         return authSelf.in_bazaar || !!(authOpp && authOpp.in_bazaar);
     }
-    return game.is_in_bazaar();
-}
-
-// Re-apply a not-yet-acked input to the (just-restored) local game, WITHOUT
-// re-sending it — the reconciliation replay on top of a keyframe.
-function applyReprToGame(repr) {
-    // After a keyframe restore the game reflects the authoritative bazaar state.
-    // While in the bazaar the server only accepts Buy/Sell, so replay only those
-    // (re-applying movement/drop/launch here would drift from the server).
-    const shopping = repr && (repr.BuyWeapon !== undefined || repr.SellWeapon !== undefined);
-    if (game.is_in_bazaar() && !shopping) return;
-    if (repr === 'MoveLeft') game.move_left();
-    else if (repr === 'MoveRight') game.move_right();
-    else if (repr === 'Rotate') game.rotate();
-    else if (repr === 'BeginDrop') game.begin_drop();
-    else if (repr === 'SoftDrop') game.soft_drop();
-    else if (repr === 'LeaveBazaar') { /* server-confirmed; not predicted locally */ }
-    else if (repr && repr.LaunchWeapon !== undefined) game.launch_weapon(repr.LaunchWeapon);
-    else if (repr && repr.BuyWeapon !== undefined) game.buy_weapon(repr.BuyWeapon);
-    else if (repr && repr.SellWeapon !== undefined) game.sell_weapon(repr.SellWeapon);
+    return game!.is_in_bazaar();
 }
 
 // An authoritative snapshot from the server: update opponent/own status, reconcile
-// against the keyframe (when present), and latch the result.
-function applySnapshot(msg) {
+// the local prediction against it (in the shared Predictor), and latch the result.
+function applySnapshot(msg: Extract<ServerMessage, { type: 'snapshot' }>) {
     authSelf = msg.you;
     authOpp = msg.opp;
     // Server-authorized spy: `spying` every frame; the degraded opponent board
@@ -827,13 +819,13 @@ function applySnapshot(msg) {
     authSpying = !!msg.spying;
     if (msg.spy_board) authSpyBoard = Int32Array.from(msg.spy_board);
     if (!authSpying) authSpyBoard = null;
-    // Discard inputs the server has now applied.
-    unackedInputs = unackedInputs.filter((i) => i.seq > msg.ack);
-    // On a keyframe, snap to the authoritative state then replay the unacked inputs.
-    if (msg.keyframe && game.restore_keyframe) {
-        game.restore_keyframe(Uint8Array.from(msg.keyframe));
-        for (const i of unackedInputs) applyReprToGame(i.repr);
-    }
+    // Reconcile: prune acked inputs and, on a keyframe, restore the authoritative
+    // state then replay the still-unacked tail — all inside WasmClient.on_snapshot
+    // (the shared, proptested core). An empty keyframe array ⇒ no keyframe this frame.
+    const youBaz = !!(msg.you && msg.you.in_bazaar);
+    const oppBaz = !!(msg.opp && msg.opp.in_bazaar);
+    const keyframe = msg.keyframe ? Uint8Array.from(msg.keyframe) : new Uint8Array(0);
+    (game as WasmClient).on_snapshot(msg.ack >>> 0, youBaz, oppBaz, keyframe);
     if (!gameEnded && (msg.result === 1 || msg.result === 2)) {
         gameEnded = true;
         gameOverText.textContent = msg.result === 1 ? 'YOU WIN!' : 'GAME OVER - You Lost';
@@ -845,7 +837,7 @@ function applySnapshot(msg) {
 // Drop into a server-authoritative match: build the local prediction game with
 // the server-assigned seed and start predicting immediately (we share the seed,
 // so we're in lockstep with the server until a cross-player event arrives).
-function enterAuthoritativeGame(msg) {
+function enterAuthoritativeGame(msg: Extract<ServerMessage, { type: 'matchStart' }>) {
     searching = false;
     findMatchBtn.classList.remove('searching');
     cancelSearchBtn.style.display = 'none';
@@ -860,10 +852,10 @@ function enterAuthoritativeGame(msg) {
     showGame();
 
     currentSeed = msg.seed >>> 0;
-    game = new WasmGame(currentSeed);
+    // Online uses the shared prediction/reconciliation client (a fresh one starts with
+    // input_seq 0 and an empty unacked queue — per-bout, matching the server's ack).
+    game = new WasmClient(currentSeed);
     resetMatchState();
-    inputSeq = 0;
-    unackedInputs = [];
     authSelf = null;
     authOpp = null;
     authSpying = false;
@@ -936,8 +928,8 @@ function cancelSearch() {
 // Matchmaking-socket message handler: the match handoff (matchStart) + the
 // per-frame authoritative state (snapshot) + rating / opponentLeft. Shared by
 // the background search and the live authoritative match.
-async function onSignalMessage(ev) {
-    const msg = JSON.parse(ev.data);
+async function onSignalMessage(ev: MessageEvent) {
+    const msg = JSON.parse(ev.data) as ServerMessage;
 
     // ── Lobby channel (live on the same socket) ──────────────────────────────
     if (msg.type === 'stats') { updateLiveStats(msg); return; }
@@ -1090,7 +1082,7 @@ function applyScreenFromUrl() {
 // game screen with a "Reconnecting…" overlay, then connect + send `rejoin` on open
 // (connectLobby.onopen consumes pendingRejoin). The server answers with either a
 // matchStart handoff + keyframe (we're back in) or rejoinFailed (→ lobby).
-function rejoinMatch(id) {
+function rejoinMatch(id: string) {
     currentMatchId = id;
     mode = 'online';
     authoritative = true;
@@ -1102,7 +1094,7 @@ function rejoinMatch(id) {
     connectLobby();
 }
 
-function startGame(newMode) {
+function startGame(newMode: string) {
     // Online matchmaking is a background action, not a local mode - route there.
     if (newMode === 'online') {
         findMatch();
@@ -1194,14 +1186,14 @@ function newGame() {
 
 function render() {
     // Draw player board
-    const grid = game.render_grid();
-    const width = game.width();
-    const height = game.height();
+    const grid = game!.render_grid();
+    const width = game!.width();
+    const height = game!.height();
     drawBoard(ctx, grid, width, height);
 
     // Draw AI board in vscomputer mode
     if (mode === 'vscomputer') {
-        const aiGrid = game.render_ai_grid();
+        const aiGrid = (game as WasmVsComputer).render_ai_grid();
         drawBoard(aiCtx, aiGrid, width, height);
     } else if (authoritative) {
         // Server-authorized spy: show the opponent's board (already degraded to
@@ -1216,32 +1208,32 @@ function render() {
 }
 
 function updateStats() {
-    const score = game.score();
-    const lines = game.lines();
+    const score = game!.score();
+    const lines = game!.lines();
     // In an authoritative match, funds (changed by opponent taxes) and the bazaar
     // countdown (depends on combined lines) are authoritative per-frame; score and
     // lines come from local prediction.
-    const funds = (authoritative && authSelf) ? authSelf.funds : game.funds();
-    const tilBazaar = (authoritative && authSelf) ? authSelf.lines_til_bazaar : game.lines_til_bazaar();
+    const funds = (authoritative && authSelf) ? authSelf.funds : game!.funds();
+    const tilBazaar = (authoritative && authSelf) ? authSelf.lines_til_bazaar : game!.lines_til_bazaar();
 
-    scoreValue.textContent = score;
-    linesValue.textContent = lines;
-    fundsValue.textContent = funds;
-    linesToBazaarValue.textContent = tilBazaar;
+    scoreValue.textContent = score as unknown as string;
+    linesValue.textContent = lines as unknown as string;
+    fundsValue.textContent = funds as unknown as string;
+    linesToBazaarValue.textContent = tilBazaar as unknown as string;
 
     // Mirror to mobile stats bar
-    mobileScore.textContent = score;
-    mobileLines.textContent = lines;
-    mobileFunds.textContent = funds;
-    mobileLinesToBazaar.textContent = tilBazaar;
+    mobileScore.textContent = score as unknown as string;
+    mobileLines.textContent = lines as unknown as string;
+    mobileFunds.textContent = funds as unknown as string;
+    mobileLinesToBazaar.textContent = tilBazaar as unknown as string;
 }
 
 function updateOpponentPanel() {
     // The opponent's score/lines are authoritative per-frame in an online match.
-    const opScore = (authoritative && authOpp) ? authOpp.score : game.op_score();
-    const opLines = (authoritative && authOpp) ? authOpp.lines : game.op_lines();
-    opponentScore.textContent = opScore >= 0 ? opScore : '-';
-    opponentLines.textContent = opLines >= 0 ? opLines : '-';
+    const opScore = (authoritative && authOpp) ? authOpp.score : game!.op_score();
+    const opLines = (authoritative && authOpp) ? authOpp.lines : game!.op_lines();
+    opponentScore.textContent = opScore >= 0 ? opScore as unknown as string : '-';
+    opponentLines.textContent = opLines >= 0 ? opLines as unknown as string : '-';
 
     // Derive opponent name for mobile stats bar
     let oppName = 'Opponent';
@@ -1259,13 +1251,13 @@ function updateOpponentPanel() {
     }
 }
 
-let lastArsenalSig = null;
+let lastArsenalSig: string | null = null;
 function updateArsenalPanel() {
     // Only rebuild the DOM when the arsenal actually changes. Rebuilding it every
     // frame (this runs from the game loop) was destroying the item a user is
     // mid-click on, so the click — which deploys the weapon — never landed.
     let sig = '';
-    for (let i = 0; i < 10; i++) sig += game.arsenal_token(i) + ':' + game.arsenal_quantity(i) + ',';
+    for (let i = 0; i < 10; i++) sig += game!.arsenal_token(i) + ':' + game!.arsenal_quantity(i) + ',';
     if (sig === lastArsenalSig) return;
     lastArsenalSig = sig;
 
@@ -1273,7 +1265,7 @@ function updateArsenalPanel() {
     mobileArsenalList.innerHTML = '';
 
     for (let i = 0; i < 10; i++) {
-        const token = game.arsenal_token(i);
+        const token = game!.arsenal_token(i);
         const key = ARSENAL_KEYS[i];
         const slot = i; // capture for closure
 
@@ -1283,7 +1275,7 @@ function updateArsenalPanel() {
 
         if (token >= 0) {
             const name = weapon_name(token);
-            const qty = game.arsenal_quantity(i);
+            const qty = game!.arsenal_quantity(i);
             div.textContent = `${key}. ${name} (x${qty})`;
             div.classList.add('occupied');
             div.addEventListener('click', () => {
@@ -1301,7 +1293,7 @@ function updateArsenalPanel() {
 
         if (token >= 0) {
             const name = weapon_name(token);
-            const qty = game.arsenal_quantity(i);
+            const qty = game!.arsenal_quantity(i);
             mslot.textContent = `${key}\n${name}\nx${qty}`;
             mslot.style.whiteSpace = 'pre';
             mslot.classList.add('occupied');
@@ -1323,12 +1315,12 @@ let bazaarSelectedToken = -1;
 function refreshBazaarArsenal() {
     bazaarArsenalList.innerHTML = '';
     for (let i = 0; i < 10; i++) {
-        const token = game.arsenal_token(i);
+        const token = game!.arsenal_token(i);
         const key = ARSENAL_KEYS[i];
         const slot = document.createElement('div');
         slot.className = 'bazaar-arsenal-slot';
         if (token >= 0) {
-            const qty = game.arsenal_quantity(i);
+            const qty = game!.arsenal_quantity(i);
             const nm = weapon_name(token);
             slot.textContent = `${key}. ${nm} x${qty}`;
             slot.classList.add('occupied');
@@ -1339,13 +1331,13 @@ function refreshBazaarArsenal() {
     }
 }
 
-function selectBazaarToken(token) {
+function selectBazaarToken(token: number) {
     bazaarSelectedToken = token;
 
     // Highlight the selected row
     const rows = bazaarWeaponList.querySelectorAll('.bazaar-weapon-row');
     rows.forEach((r) => {
-        if (parseInt(r.dataset.token, 10) === token) {
+        if (parseInt((r as HTMLElement).dataset.token!, 10) === token) {
             r.classList.add('selected');
         } else {
             r.classList.remove('selected');
@@ -1354,7 +1346,7 @@ function selectBazaarToken(token) {
 
     // Show weapon info
     if (token >= 0) {
-        const price = game.bazaar_price(token);
+        const price = game!.bazaar_price(token);
         const duration = weapon_duration(token);
         const desc = weapon_description(token);
         bazaarInfoPrice.textContent = `Price: $${price}`;
@@ -1379,7 +1371,7 @@ function populateBazaar() {
         const name = weapon_name(t);
         const row = document.createElement('div');
         row.className = 'bazaar-weapon-row';
-        row.dataset.token = t;
+        row.dataset.token = t as unknown as string;
         row.textContent = name;
         row.addEventListener('click', () => {
             selectBazaarToken(t);
@@ -1387,7 +1379,7 @@ function populateBazaar() {
         bazaarWeaponList.appendChild(row);
     }
 
-    bazaarFunds.textContent = game.funds();
+    bazaarFunds.textContent = game!.funds() as unknown as string;
     refreshBazaarArsenal();
 }
 
@@ -1397,7 +1389,7 @@ function populateBazaar() {
 // in local modes the engine's own flag drives it.
 let bazaarWasOpen = false;
 // Dev preview override set by ?screen=bazaar&baz=… : 'both' | 'waiting' | 'oppready'.
-let debugBazaar = null;
+let debugBazaar: string | null = null;
 
 // Reset per-match overlay state when a new game starts.
 function resetMatchState() {
@@ -1411,13 +1403,13 @@ function updateBazaarOverlay() {
     // prompt every frame) — not just our own flag, which clears the instant WE
     // hit Done. Local modes use the engine's own flag.
     const online = authoritative && authSelf;
-    let youShopping, oppShopping;
+    let youShopping: boolean, oppShopping: boolean;
     if (debugBazaar) {
         // Dev preview: 'waiting' = you've hit Done; 'oppready' = opponent has.
         youShopping = debugBazaar !== 'waiting';
         oppShopping = debugBazaar !== 'oppready';
     } else {
-        youShopping = online ? authSelf.in_bazaar : game.is_in_bazaar();
+        youShopping = online ? authSelf!.in_bazaar : game!.is_in_bazaar();
         oppShopping = online ? !!(authOpp && authOpp.in_bazaar) : false;
     }
     const inBaz = youShopping || oppShopping;
@@ -1436,7 +1428,7 @@ function updateBazaarOverlay() {
             }
         } else {
             // Keep funds and arsenal display fresh while open
-            bazaarFunds.textContent = online ? authSelf.funds : game.funds();
+            bazaarFunds.textContent = online ? authSelf!.funds as unknown as string : game!.funds() as unknown as string;
             refreshBazaarArsenal();
         }
         if (online || debugBazaar) updateBazaarBarrierStatus(youShopping, oppShopping);
@@ -1452,7 +1444,7 @@ function updateBazaarOverlay() {
 //   • I hit Done, opponent still shopping  → "Waiting for opponent…" (Done locked)
 //   • Opponent hit Done, I'm still shopping → "Opponent is ready" (I can keep buying)
 //   • Both still shopping                   → no prompt
-function updateBazaarBarrierStatus(youShopping, oppShopping) {
+function updateBazaarBarrierStatus(youShopping: boolean, oppShopping: boolean) {
     if (!bazaarBarrierStatus) return;
     if (!youShopping && oppShopping) {
         bazaarBarrierStatus.textContent = 'Waiting for opponent...';
@@ -1468,7 +1460,7 @@ function updateBazaarBarrierStatus(youShopping, oppShopping) {
 }
 
 function processEvents() {
-    const events = game.drain_events();
+    const events = game!.drain_events();
 
     for (let i = 0; i < events.length; i += 4) {
         const tag = events[i];
@@ -1511,7 +1503,7 @@ function processEvents() {
 // Off by default; ?debug=1 or the backtick key toggles it. A diagnostic surface
 // for netcode/desync work: tick/seed/match, prediction-vs-server drift, unacked
 // inputs, and active weapons + remaining lines.
-const debugOverlayEl = document.getElementById('debugOverlay');
+const debugOverlayEl = document.getElementById('debugOverlay') as HTMLElement | null;
 let debugOn = new URLSearchParams(location.search).get('debug') === '1';
 window.addEventListener('keydown', (e) => {
     if (e.key === '`') {
@@ -1523,15 +1515,20 @@ function updateDebugOverlay() {
     if (!debugOverlayEl) return;
     if (!debugOn || lobbyActive || !game) { debugOverlayEl.style.display = 'none'; return; }
     debugOverlayEl.style.display = '';
-    const L = [];
+    const L: string[] = [];
     L.push('▟ DEBUG  (` toggles)');
     L.push(`mode=${mode} auth=${authoritative} ended=${gameEnded}`);
     if (authoritative) L.push(`onlinePaused=${onlinePaused}`);
     if (currentMatchId) L.push(`match=${currentMatchId}`);
     if (currentSeed != null) L.push(`seed=${currentSeed}`);
-    L.push(`inputSeq=${inputSeq} unacked=${unackedInputs.length}`);
+    // Prediction queue stats come from the shared client (online only).
+    if (authoritative && typeof (game as WasmClient).input_seq === 'function') {
+        L.push(`inputSeq=${(game as WasmClient).input_seq()} unacked=${(game as WasmClient).unacked_len()}`);
+    }
     try {
-        L.push(`local you: score=${game.score()} lines=${game.lines()} funds=${game.funds()} tilBaz=${game.lines_til_bazaar()} baz=${game.is_in_bazaar()} result=${game.result()}`);
+        // `result()` exists on the vs-computer engine, not the online WasmClient.
+        const localResult = (typeof (game as WasmVsComputer).result === 'function') ? (game as WasmVsComputer).result() : '—';
+        L.push(`local you: score=${game.score()} lines=${game.lines()} funds=${game.funds()} tilBaz=${game.lines_til_bazaar()} baz=${game.is_in_bazaar()} result=${localResult}`);
         L.push(`local opp: score=${game.op_score()} lines=${game.op_lines()}`);
     } catch (_) {}
     if (authoritative && authSelf) {
@@ -1546,17 +1543,17 @@ function updateDebugOverlay() {
     }
     if (authoritative) L.push(`spying=${authSpying}`);
     try {
-        const active = [];
+        const active: string[] = [];
         const max = (typeof max_weapons === 'function') ? max_weapons() : 34;
         for (let t = 0; t < max; t++) {
-            if (game.weapon_active(t)) active.push(`${weapon_name(t)}(${game.weapon_remaining(t)})`);
+            if ((game as WasmGame).weapon_active(t)) active.push(`${weapon_name(t)}(${(game as WasmGame).weapon_remaining(t)})`);
         }
         L.push('weapons: ' + (active.length ? active.join(', ') : '—'));
     } catch (_) {}
     debugOverlayEl.textContent = L.join('\n');
 }
 
-function gameLoop(now) {
+function gameLoop(now: number) {
     // While the lobby is showing there is nothing to tick or render.
     if (lobbyActive || !game) {
         requestAnimationFrame(gameLoop);
@@ -1604,7 +1601,7 @@ function gameLoop(now) {
     // in result != 0), so gating on it would suppress the win banner when Ernie
     // tops out (the player is still alive). Read `result` directly.
     if (mode === 'vscomputer' && !gameEnded) {
-        const result = game.result();
+        const result = (game as WasmVsComputer).result();
         if (result === 1) {
             gameEnded = true;
             gameOverText.textContent = 'YOU WIN!';
@@ -1633,9 +1630,22 @@ function gameLoop(now) {
 }
 
 
+interface TouchGesture {
+    id: number;
+    startX: number;
+    startY: number;
+    lastX: number;
+    startTime: number;
+    accDx: number;
+    totalDx: number;
+    totalDy: number;
+    cell: number;
+    dropped: boolean;
+}
+
 // ─── Touch gesture handling on game canvas ────────────────────────────────────
 
-let touchState = null; // Tracks the active game touch gesture
+let touchState: TouchGesture | null = null; // Tracks the active game touch gesture
 
 canvas.addEventListener('touchstart', (e) => {
     // Only track the first touch
@@ -1667,7 +1677,7 @@ canvas.addEventListener('touchmove', (e) => {
     if (!touchState || !game) return;
 
     // Find our tracked touch
-    let touch = null;
+    let touch: Touch | null = null;
     for (let i = 0; i < e.changedTouches.length; i++) {
         if (e.changedTouches[i].identifier === touchState.id) {
             touch = e.changedTouches[i];
@@ -1709,7 +1719,7 @@ canvas.addEventListener('touchend', (e) => {
     if (!touchState || !game) return;
 
     // Find our tracked touch
-    let touch = null;
+    let touch: Touch | null = null;
     for (let i = 0; i < e.changedTouches.length; i++) {
         if (e.changedTouches[i].identifier === touchState.id) {
             touch = e.changedTouches[i];
@@ -1749,7 +1759,7 @@ canvas.addEventListener('touchcancel', (e) => {
 
 // ─── On-screen touch control bar ─────────────────────────────────────────────
 
-function setupTouchButton(btnId, action, repeatInterval) {
+function setupTouchButton(btnId: string, action: () => void, repeatInterval: number | null) {
     const btn = document.getElementById(btnId);
     if (!btn) return;
 
@@ -1757,8 +1767,8 @@ function setupTouchButton(btnId, action, repeatInterval) {
     // style). A quick tap fires exactly once; only holding past this repeats.
     const REPEAT_DELAY = 250;
 
-    let repeatTimer = null;
-    let delayTimer = null;
+    let repeatTimer: number | null = null;
+    let delayTimer: number | null = null;
 
     function fireAction() {
         if (!game || gameEnded || game.is_game_over() || inBazaar()) return;
@@ -1822,7 +1832,7 @@ function setupTouchControls() {
 }
 
 // Input handling
-function handleKeyDown(e) {
+function handleKeyDown(e: KeyboardEvent) {
     if (!game) return;
 
     // First keypress is the user gesture that unlocks Web Audio.
@@ -1907,7 +1917,7 @@ bazaarDoneBtn.addEventListener('click', () => {
             bazaarBarrierStatus.className = 'bazaar-barrier-status waiting';
         }
     } else {
-        game.leave_bazaar();
+        (game as WasmGame | WasmVsComputer).leave_bazaar();
         bazaarOverlay.style.display = 'none';
     }
 });
@@ -1915,7 +1925,7 @@ bazaarDoneBtn.addEventListener('click', () => {
 bazaarAddBtn.addEventListener('click', () => {
     if (bazaarSelectedToken < 0 || !game) return;
     if (predict('BuyWeapon', bazaarSelectedToken)) {
-        bazaarFunds.textContent = game.funds();
+        bazaarFunds.textContent = game.funds() as unknown as string;
         updateStats();
         updateArsenalPanel();
         refreshBazaarArsenal();
@@ -1927,7 +1937,7 @@ bazaarAddBtn.addEventListener('click', () => {
 bazaarRemoveBtn.addEventListener('click', () => {
     if (bazaarSelectedToken < 0 || !game) return;
     if (predict('SellWeapon', bazaarSelectedToken)) {
-        bazaarFunds.textContent = game.funds();
+        bazaarFunds.textContent = game.funds() as unknown as string;
         updateStats();
         updateArsenalPanel();
         refreshBazaarArsenal();
@@ -2008,14 +2018,14 @@ if (leaveGameTop) leaveGameTop.addEventListener('click', leaveToLobby);
 // link, and open a prefilled GitHub issue. No server-side secret: the user
 // reviews and posts the issue themselves.
 const BUG_REPO = 'perplexes/BattleTris';
-const bugOverlay = document.getElementById('bugOverlay');
-const bugTitleInput = document.getElementById('bugTitle');
-const bugExpected = document.getElementById('bugExpected');
-const bugActual = document.getElementById('bugActual');
-const bugStatus = document.getElementById('bugStatus');
-const bugSubmit = document.getElementById('bugSubmit');
-const bugCancel = document.getElementById('bugCancel');
-const reportBugBtn = document.getElementById('reportBug');
+const bugOverlay = document.getElementById('bugOverlay') as HTMLElement;
+const bugTitleInput = document.getElementById('bugTitle') as HTMLInputElement;
+const bugExpected = document.getElementById('bugExpected') as HTMLTextAreaElement;
+const bugActual = document.getElementById('bugActual') as HTMLTextAreaElement;
+const bugStatus = document.getElementById('bugStatus') as HTMLElement;
+const bugSubmit = document.getElementById('bugSubmit') as HTMLButtonElement;
+const bugCancel = document.getElementById('bugCancel') as HTMLElement | null;
+const reportBugBtn = document.getElementById('reportBug') as HTMLElement | null;
 
 // Sound on/off toggle (persisted). Default on.
 const soundToggleBtn = document.getElementById('soundToggle');
@@ -2034,10 +2044,10 @@ if (soundToggleBtn) {
 
 // Replay snapshot taken when the modal opens - the "bug moment" - so it isn't
 // affected by play continuing while the user types.
-let bugReplayJson = null;
+let bugReplayJson: string | null = null;
 
 function openBug() {
-    bugReplayJson = (game && typeof game.export_replay === 'function') ? game.export_replay() : null;
+    bugReplayJson = (game && typeof (game as WasmGame).export_replay === 'function') ? (game as WasmGame).export_replay() : null;
     bugStatus.textContent = bugReplayJson ? '' : 'No active game - the report will have no replay attached.';
     bugSubmit.disabled = false;
     bugOverlay.classList.add('open');
@@ -2048,7 +2058,7 @@ function closeBug() {
     bugOverlay.classList.remove('open');
 }
 
-async function uploadReplay(json) {
+async function uploadReplay(json: string) {
     const res = await fetch('/api/replays', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2058,7 +2068,7 @@ async function uploadReplay(json) {
     return (await res.json()).id;
 }
 
-function downloadReplay(json) {
+function downloadReplay(json: string) {
     const blob = new Blob([json], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -2067,7 +2077,7 @@ function downloadReplay(json) {
     URL.revokeObjectURL(a.href);
 }
 
-function buildIssueBody(expected, actual, replayUrl, meta) {
+function buildIssueBody(expected: string, actual: string, replayUrl: string | null, meta: any) {
     let b = '';
     b += '**Expected**\n' + (expected.trim() || '_(not provided)_') + '\n\n';
     b += '**Actual**\n' + (actual.trim() || '_(not provided)_') + '\n\n';
@@ -2085,8 +2095,8 @@ function buildIssueBody(expected, actual, replayUrl, meta) {
 
 async function submitBug() {
     bugSubmit.disabled = true;
-    let replayUrl = null;
-    let meta = null;
+    let replayUrl: string | null = null;
+    let meta: any = null;
     if (bugReplayJson) {
         try {
             const r = JSON.parse(bugReplayJson);
@@ -2117,18 +2127,18 @@ if (bugOverlay) bugOverlay.addEventListener('click', (e) => { if (e.target === b
 // ─── Share replay ─────────────────────────────────────────────────────────
 // Save the current game to the replay library and copy a shareable link.
 const shareReplayBtn = document.getElementById('shareReplay');
-const toast = document.getElementById('toast');
-let toastTimer = null;
+const toast = document.getElementById('toast') as HTMLElement;
+let toastTimer: number | null = null;
 
-function showToast(msg, ms = 4500) {
+function showToast(msg: string, ms = 4500) {
     toast.textContent = msg;
     toast.classList.add('show');
-    clearTimeout(toastTimer);
+    clearTimeout(toastTimer!);
     toastTimer = setTimeout(() => toast.classList.remove('show'), ms);
 }
 
 // Copy a /replay/<id> link to the clipboard (with a visible fallback).
-async function shareReplayLink(id) {
+async function shareReplayLink(id: string) {
     const url = `${location.origin}/replay/${id}`;
     try { await navigator.clipboard.writeText(url); showToast('Replay link copied: ' + url); }
     catch (e) { showToast('Replay link: ' + url); }
@@ -2140,7 +2150,7 @@ async function shareReplay() {
     // client's prediction. So for online (or when there's no local game, e.g. in
     // the lobby after a match) share the stored id; only a local practice /
     // vs-computer game uploads its own recording.
-    if (mode === 'online' || !game || typeof game.export_replay !== 'function') {
+    if (mode === 'online' || !game || typeof (game as WasmGame).export_replay !== 'function') {
         if (lastMatchReplayId) {
             await shareReplayLink(lastMatchReplayId);
         } else {
@@ -2150,9 +2160,9 @@ async function shareReplay() {
     }
     showToast('Saving replay...', 10000);
     try {
-        await shareReplayLink(await uploadReplay(game.export_replay()));
+        await shareReplayLink(await uploadReplay((game as WasmGame).export_replay()));
     } catch (e) {
-        showToast('Share failed: ' + e.message);
+        showToast('Share failed: ' + (e as Error).message);
     }
 }
 
@@ -2167,7 +2177,7 @@ if (openLeaderboardBtn) openLeaderboardBtn.addEventListener('click', () => { loc
 // Debug / e2e hook: live access to the current game instance + mode (the getter
 // closes over the module's `game`, so it always returns the active one). Used by
 // the Playwright weapon-deploy test to pre-stock weapons and read Ernie's board.
-window.bt = { get game() { return game; }, get mode() { return mode; } };
+(window as any).bt = { get game() { return game; }, get mode() { return mode; } };
 
 // Initialize and start game loop
 (async () => {

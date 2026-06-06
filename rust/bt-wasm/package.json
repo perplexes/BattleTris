@@ -2,13 +2,17 @@
   "name": "bt-wasm-e2e",
   "version": "0.0.0",
   "private": true,
-  "description": "Browser e2e tests for the BattleTris wasm client (Playwright).",
+  "description": "Browser client for the BattleTris wasm engine (TypeScript) + its Playwright e2e tests.",
   "scripts": {
     "build:wasm": "wasm-pack build . --target web --out-dir pkg --dev",
+    "build:ts": "tsc -p tsconfig.json",
+    "build": "npm run build:wasm && npm run build:ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
     "test:e2e": "playwright test",
-    "test": "npm run build:wasm && playwright test"
+    "test": "npm run build && playwright test"
   },
   "devDependencies": {
-    "@playwright/test": "^1.49.0"
+    "@playwright/test": "^1.49.0",
+    "typescript": "^5.6.0"
   }
 }

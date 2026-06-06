@@ -9,13 +9,16 @@
 // Wrapping keeps the content element's identity, so the app's `innerHTML = …`
 // re-renders are fine — a MutationObserver re-measures the thumb.
 
-function motifScroll(content) {
+/** A content element tagged once-initialized via the `__msl` marker property. */
+type MslElement = HTMLElement & { __msl?: boolean };
+
+function motifScroll(content: MslElement): void {
   if (!content || content.__msl) return;
   content.__msl = true;
 
   const wrap = document.createElement('div');
   wrap.className = 'msl-wrap';
-  content.parentNode.insertBefore(wrap, content);
+  content.parentNode!.insertBefore(wrap, content);
   wrap.appendChild(content);
   content.classList.add('msl-content');
 
@@ -36,7 +39,7 @@ function motifScroll(content) {
   wrap.appendChild(bar);
 
   let thumbTop = 0;
-  function refresh() {
+  function refresh(): void {
     const sh = content.scrollHeight;
     const ch = content.clientHeight;
     if (sh <= ch + 1) {
@@ -63,7 +66,7 @@ function motifScroll(content) {
 
   // Arrow buttons: scroll by a line, repeating while held.
   const STEP = 34;
-  function holdScroll(delta) {
+  function holdScroll(delta: number): void {
     content.scrollTop += delta;
     let t = setTimeout(function rep() {
       content.scrollTop += delta;
@@ -75,11 +78,11 @@ function motifScroll(content) {
     };
     window.addEventListener('mouseup', stop);
   }
-  up.addEventListener('mousedown', (e) => { e.preventDefault(); holdScroll(-STEP); });
-  down.addEventListener('mousedown', (e) => { e.preventDefault(); holdScroll(STEP); });
+  up.addEventListener('mousedown', (e: MouseEvent) => { e.preventDefault(); holdScroll(-STEP); });
+  down.addEventListener('mousedown', (e: MouseEvent) => { e.preventDefault(); holdScroll(STEP); });
 
   // Click the trough above/below the thumb → page.
-  track.addEventListener('mousedown', (e) => {
+  track.addEventListener('mousedown', (e: MouseEvent) => {
     if (e.target !== track) return;
     const r = track.getBoundingClientRect();
     const dir = e.clientY - r.top < thumbTop ? -1 : 1;
@@ -87,7 +90,7 @@ function motifScroll(content) {
   });
 
   // Drag the thumb.
-  thumb.addEventListener('mousedown', (e) => {
+  thumb.addEventListener('mousedown', (e: MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
     const startY = e.clientY;
@@ -95,11 +98,11 @@ function motifScroll(content) {
     const range = content.scrollHeight - content.clientHeight;
     const maxTop = Math.max(1, track.clientHeight - thumb.offsetHeight);
     thumb.classList.add('dragging');
-    function move(ev) {
+    function move(ev: MouseEvent): void {
       const dy = ev.clientY - startY;
       content.scrollTop = startScroll + dy * (range / maxTop);
     }
-    function end() {
+    function end(): void {
       thumb.classList.remove('dragging');
       document.removeEventListener('mousemove', move);
       document.removeEventListener('mouseup', end);
@@ -122,9 +125,9 @@ const MSL_SELECTORS = [
   '.leaderboard-list',
 ];
 
-function initMotifScroll() {
+function initMotifScroll(): void {
   MSL_SELECTORS.forEach((sel) => {
-    document.querySelectorAll(sel).forEach(motifScroll);
+    document.querySelectorAll<HTMLElement>(sel).forEach(motifScroll);
   });
 }
 

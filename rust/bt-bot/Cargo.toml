@@ -14,6 +14,9 @@ bt-core = { path = "../bt-core" }
 bt-ai = { path = "../bt-ai" }
 bt-replay = { path = "../bt-replay" }
 bt-identity = { path = "../bt-identity" }
+# Shared prediction/reconciliation core — the bot and the browser (bt-wasm's
+# WasmClient) both run this one Predictor, so the netcode invariants stay unified.
+bt-netcode = { path = "../bt-netcode" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
 # Plaintext WebSocket client only — the bot reaches the server over fly's private
 # 6PN network (ws://battletris.internal:8080) or localhost, so no TLS is needed

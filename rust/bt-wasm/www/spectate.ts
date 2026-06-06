@@ -4,7 +4,7 @@
 import init, { weapon_name } from '../pkg/bt_wasm.js';
 import { CELL_SIZE, drawBoard } from './render.js';
 
-const $ = (id) => document.getElementById(id);
+const $ = (id: string): HTMLElement => document.getElementById(id)!;
 const errBox = $('spectateError');
 const matchListEl = $('matchList');
 const matchListBodyEl = $('matchListBody');
@@ -12,17 +12,52 @@ const boardsEl = $('spectateBoards');
 const labelAEl = $('specLabelA'), labelBEl = $('specLabelB');
 const hudAEl = $('specHudA'), hudBEl = $('specHudB');
 const bazaarAEl = $('specBazaarA'), bazaarBEl = $('specBazaarB');
-const canvasA = $('specCanvasA'), canvasB = $('specCanvasB');
-const ctxA = canvasA.getContext('2d'), ctxB = canvasB.getContext('2d');
+const canvasA = $('specCanvasA') as HTMLCanvasElement, canvasB = $('specCanvasB') as HTMLCanvasElement;
+const ctxA = canvasA.getContext('2d')!, ctxB = canvasB.getContext('2d')!;
 const metaEl = $('spectateMeta');
 
-function showError(msg) { errBox.textContent = msg; errBox.style.display = ''; }
-function escapeHtml(s) {
-    return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+// One side of a spectate frame: the read-only HUD + board state for one player.
+interface SpectateSide {
+    score: number;
+    lines: number;
+    funds: number;
+    lines_til: number;
+    arsenal: number[]; // flat [token, qty, …]
+    effects: number[]; // flat [token, linesRemaining, …]
+    board: number[];   // flat row-major cell ids
+    in_bazaar: boolean;
+}
+
+// A {type:"spectate"} frame: both boards plus match metadata.
+interface SpectateFrame {
+    type: 'spectate';
+    w: number;
+    h: number;
+    name_a?: string;
+    name_b?: string;
+    a: SpectateSide;
+    b: SpectateSide;
+    result: number; // 0 = ongoing, 1 = A won, 2 = B won
+    tick: number;
+}
+
+// Any frame read off the socket; only `type` is guaranteed before narrowing.
+type ServerMessage = SpectateFrame | { type: 'spectateFailed' } | { type: string };
+
+// One in-progress match as returned by /api/debug/matches.
+interface MatchSummary {
+    match_id: string;
+    name_a?: string;
+    name_b?: string;
+}
+
+function showError(msg: string): void { errBox.textContent = msg; errBox.style.display = ''; }
+function escapeHtml(s: string): string {
+    return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
 }
 
 let boardW = 0, boardH = 0;
-function fitCanvases() {
+function fitCanvases(): void {
     if (!boardW) return;
     const vh = window.innerHeight || 800;
     let scale = (vh - 320) / (boardH * CELL_SIZE);
@@ -36,12 +71,12 @@ function fitCanvases() {
 
 // HUD: mirrors the replay viewer's renderHud, fed by a spectate frame's side obj
 // ({score, lines, funds, lines_til, arsenal[], effects[]}).
-function renderHud(el, s) {
-    const effects = [];
+function renderHud(el: HTMLElement, s: SpectateSide): void {
+    const effects: string[] = [];
     for (let i = 0; i + 1 < s.effects.length; i += 2) {
         effects.push(`<div><span>${weapon_name(s.effects[i])}</span><b>${s.effects[i + 1]}</b></div>`);
     }
-    const slots = [];
+    const slots: string[] = [];
     for (let i = 0; i < 10 && i * 2 + 1 < s.arsenal.length; i++) {
         const tok = s.arsenal[i * 2], qty = s.arsenal[i * 2 + 1];
         const n = (i + 1) % 10;
@@ -60,7 +95,7 @@ function renderHud(el, s) {
         `<div class="rh-list rh-arsenal"><div class="rh-h">Arsenal</div>${slots.join('')}</div>`;
 }
 
-function renderFrame(m) {
+function renderFrame(m: SpectateFrame): void {
     if (boardW !== m.w || boardH !== m.h) {
         boardW = m.w; boardH = m.h;
         canvasA.width = boardW * CELL_SIZE; canvasA.height = boardH * CELL_SIZE;
@@ -80,10 +115,10 @@ function renderFrame(m) {
 }
 
 // ── Live-matches picker ───────────────────────────────────────────────────
-async function loadMatchList() {
+async function loadMatchList(): Promise<void> {
     matchListEl.style.display = '';
     boardsEl.style.display = 'none';
-    let matches = [];
+    let matches: MatchSummary[] = [];
     try { matches = (await (await fetch('/api/debug/matches')).json()).matches || []; } catch (_) {}
     matchListBodyEl.innerHTML = matches.length
         ? matches.map((m) =>
@@ -94,23 +129,23 @@ async function loadMatchList() {
 }
 
 // ── Spectate a match ──────────────────────────────────────────────────────
-function spectate(matchId) {
+function spectate(matchId: string): void {
     matchListEl.style.display = 'none';
     boardsEl.style.display = '';
     metaEl.textContent = 'Connecting…';
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${proto}://${location.host}/ws`);
     ws.onopen = () => ws.send(JSON.stringify({ type: 'spectate', match_id: matchId }));
-    ws.onmessage = (ev) => {
-        let m; try { m = JSON.parse(ev.data); } catch (_) { return; }
-        if (m.type === 'spectate') renderFrame(m);
+    ws.onmessage = (ev: MessageEvent) => {
+        let m: ServerMessage; try { m = JSON.parse(ev.data); } catch (_) { return; }
+        if (m.type === 'spectate') renderFrame(m as SpectateFrame);
         else if (m.type === 'spectateFailed') {
             showError('That match is no longer live.');
             metaEl.textContent = '';
             setTimeout(() => { location.href = '/www/spectate.html'; }, 1500);
         }
     };
-    ws.onclose = () => { if (metaEl.textContent.startsWith('🔴')) metaEl.textContent += ' · stream ended'; };
+    ws.onclose = () => { if (metaEl.textContent!.startsWith('🔴')) metaEl.textContent += ' · stream ended'; };
 }
 
 window.addEventListener('resize', fitCanvases);

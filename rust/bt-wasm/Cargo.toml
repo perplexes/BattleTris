@@ -13,6 +13,9 @@ bt-core = { path = "../bt-core" }
 bt-ai = { path = "../bt-ai" }
 bt-replay = { path = "../bt-replay" }
 bt-trueskill = { path = "../bt-trueskill" }
+# Shared prediction/reconciliation core — the browser's `WasmClient` and the bot
+# (bt-bot) both run this one Predictor, so the netcode invariants live in one place.
+bt-netcode = { path = "../bt-netcode" }
 wasm-bindgen = "0.2"
 
 [dependencies.web-sys]

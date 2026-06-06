@@ -1,5 +1,5 @@
-// Shared board rendering for the live game (main.js) and the replay player
-// (replay.js). Keeping a single draw path guarantees playback looks pixel-for-
+// Shared board rendering for the live game (main.ts) and the replay player
+// (replay.ts). Keeping a single draw path guarantees playback looks pixel-for-
 // pixel identical to the original game. Faithful to BTBox.C.
 
 // Preload gimp image for cell id 23 (resolved relative to the page; both the
@@ -7,10 +7,12 @@
 export const gimpImg = new Image();
 gimpImg.src = 'assets/btgimp.png';
 
+interface CellColor { bright: string; dark: string; }
+
 // Palette: cell id -> { bright, dark }. Exact RGB from the original X11
 // resource defaults (BattleTris.C): bright = base color, dark = its
 // dark/shadow variant used for the bevel border.
-export const PALETTE = {
+export const PALETTE: Record<number, CellColor> = {
     1: { bright: '#eeeee0', dark: '#a8a8a8' }, // IVORY  / GRAY
     2: { bright: '#eeee00', dark: '#daa520' }, // YELLOW / dark (goldenrod)
     3: { bright: '#ee0000', dark: '#8b0000' }, // RED    / dark red
@@ -27,7 +29,15 @@ export const PALETTE = {
 export const CELL_SIZE = 23;
 export const BEVEL_BORDER = 3;
 
-export function drawBoard(context, grid, width, height) {
+/** A flat row-major grid of cell ids (the wasm `render_grid()` shape). */
+export type Grid = ArrayLike<number>;
+
+export function drawBoard(
+    context: CanvasRenderingContext2D,
+    grid: Grid,
+    width: number,
+    height: number,
+): void {
     // Clear canvas with black background
     context.fillStyle = '#000000';
     context.fillRect(0, 0, width * CELL_SIZE, height * CELL_SIZE);
@@ -41,7 +51,12 @@ export function drawBoard(context, grid, width, height) {
     }
 }
 
-export function drawCellOnContext(context, x, y, cellId) {
+export function drawCellOnContext(
+    context: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    cellId: number,
+): void {
     const px = x * CELL_SIZE;
     const py = y * CELL_SIZE;
 
@@ -98,7 +113,7 @@ export function drawCellOnContext(context, x, y, cellId) {
         const X1 = 2, X2 = 3, X3 = 11, Y1 = 1, Y2 = 8, Y3 = 13;
         const XRAD = 4, YRAD = 7, XRAD2 = 11, YRAD2 = 5;
         // X11 arc box (x,y,w,h) -> canvas ellipse centered in that box.
-        const arcBox = (bx, by, w, h, start, end) => {
+        const arcBox = (bx: number, by: number, w: number, h: number, start: number, end: number) => {
             context.beginPath();
             context.ellipse(px + bx + w / 2, py + by + h / 2, w / 2, h / 2, 0, start, end);
         };
@@ -143,7 +158,7 @@ export function drawCellOnContext(context, x, y, cellId) {
         const pipSize = 5;
 
         context.fillStyle = '#000000';
-        const drawPip = (offsetX, offsetY) => {
+        const drawPip = (offsetX: number, offsetY: number) => {
             context.fillRect(px + offsetX, py + offsetY, pipSize, pipSize);
         };
 

@@ -1,0 +1,18 @@
+[package]
+name = "bt-netcode"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Shared client-side prediction + reconciliation for BattleTris. One Predictor, used by both the browser (via bt-wasm) and the bot (bt-bot), so the seq/ack/keyframe-replay netcode invariants live in a single proptested place instead of being implemented twice."
+
+[dependencies]
+bt-core = { path = "../bt-core" }
+bt-replay = { path = "../bt-replay" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# Property-based tests for the predictor: the snap-back invariant (no unacked input
+# is ever dropped on reconciliation), bazaar replay-gating, ack-convergence, and
+# browser-vs-bot cross-consistency.
+proptest = "1"

@@ -1,9 +1,9 @@
 // Replay library browse page: lists stored games (newest first) with a link to
 // watch each via /replay/:id.
-const listEl = document.getElementById('libraryList');
-const statusEl = document.getElementById('libraryStatus');
+const listEl = document.getElementById('libraryList')!;
+const statusEl = document.getElementById('libraryStatus')!;
 
-function fmtAge(mtime) {
+function fmtAge(mtime: number | null | undefined): string {
     if (!mtime) return '';
     const secs = Math.max(0, Math.floor(Date.now() / 1000) - mtime);
     if (secs < 60) return secs + 's ago';
@@ -12,14 +12,30 @@ function fmtAge(mtime) {
     return Math.floor(secs / 86400) + 'd ago';
 }
 
+/** One stored replay as returned by GET /api/replays (only the fields read here). */
+interface Replay {
+    id: number | string;
+    ai_level?: number | null;
+    title?: string | null;
+    name_a?: string | null;
+    name_b?: string | null;
+    mode?: string | null;
+    lines?: number | null;
+    mtime?: number | null;
+}
+
+interface ReplaysResponse {
+    replays?: Replay[];
+}
+
 (async () => {
-    let data;
+    let data: ReplaysResponse | null;
     try {
         const res = await fetch('/api/replays');
         if (!res.ok) throw new Error('server ' + res.status);
         data = await res.json();
     } catch (e) {
-        statusEl.textContent = 'Could not load library: ' + e.message;
+        statusEl.textContent = 'Could not load library: ' + (e as Error).message;
         return;
     }
 
@@ -30,12 +46,12 @@ function fmtAge(mtime) {
     }
     statusEl.textContent = `${replays.length} replay${replays.length === 1 ? '' : 's'}`;
 
-    const esc = (s) => String(s).replace(/[&<>"]/g, (c) => (
-        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]
+    const esc = (s: unknown): string => String(s).replace(/[&<>"]/g, (c) => (
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' } as Record<string, string>)[c]
     ));
 
     // A player name as a link to their profile (the lobby stats panel).
-    const playerLink = (n) => n
+    const playerLink = (n: string | null | undefined): string => n
         ? `<a class="library-player" href="/www/?player=${encodeURIComponent(n)}">${esc(n)}</a>`
         : '';
 
@@ -56,7 +72,7 @@ function fmtAge(mtime) {
             if (r.mode === 'Practice') modeLabel = 'User practice';
             else if (r.mode === 'VsComputer') modeLabel = 'User vs Computer' + lvl;
             else if (r.mode === 'Online') modeLabel = 'User vs User';
-            else modeLabel = r.mode;
+            else modeLabel = r.mode ?? '';
         }
         const modeSpan = modeLabel ? `<span class="library-mode">${modeLabel}</span>` : '';
         const lines = (r.lines !== null && r.lines !== undefined)
@@ -71,9 +87,14 @@ function fmtAge(mtime) {
         // Click anywhere on the row watches the replay — except on a real link
         // (a player profile or the Watch link), which navigates on its own.
         item.addEventListener('click', (e) => {
-            if (e.target.closest('a')) return;
+            if ((e.target as Element).closest('a')) return;
             location.href = '/replay/' + r.id;
         });
         listEl.appendChild(item);
     }
 })();
+
+// Loaded as <script type="module"> (library.html), so mark this a module —
+// isolates its top-level scope from the other page scripts under tsc's single-
+// program compile (else `listEl`/`statusEl` collide with leaderboard.ts).
+export {};

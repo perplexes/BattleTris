@@ -34,6 +34,10 @@ use bt_ai::weapons::{buy_plan, launch_choice};
 use bt_ai::{best_placement, best_placement_skill, best_placement_strong, Placement};
 use bt_core::weapons::WeaponToken;
 use bt_core::Game;
+// The SAME prediction/reconciliation core the browser runs (bt-wasm's WasmClient):
+// the local predicted sim, the unacked-input queue, per-bout seq, and keyframe replay
+// all live in `Predictor`, so the bot and the browser can't drift apart.
+use bt_netcode::{input_frame, Predictor};
 use bt_replay::Input;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -271,10 +275,14 @@ fn persona() -> Persona {
     }
 }
 
-/// Per-match local state: our predicted board plus the placement pacer and the
+/// Per-match local state: our predicted client plus the placement pacer and the
 /// bazaar gate.
 struct MatchState {
-    game: Game,
+    /// Our local prediction + reconciliation against the server's keyframes — the
+    /// shared [`bt_netcode::Predictor`] (owns the local sim, the unacked-input queue,
+    /// and the per-bout input seq). `sync::decide` reads `predictor.input_seq()`
+    /// (= "last sent") and `predictor.game().is_in_bazaar()` to gate when we act.
+    predictor: Predictor,
     /// This bot's difficulty/name persona.
     persona: Persona,
     /// Skill for this match in [0,1] — 1.0 (Bert), 0.0 (Ernie), or rating-matched
@@ -315,16 +323,14 @@ struct MatchState {
     /// has gone silent (forfeit/disconnect) and we end the match our side.
     idle_ticks: u32,
     /// The last input seq the SERVER has confirmed applying for us — the snapshot
-    /// `ack`. While this trails [`last_sent`] we have inputs still in flight.
+    /// `ack`. While this trails `predictor.input_seq()` (the seq of our most recently
+    /// sent input this bout) we have inputs still in flight, and the bot waits — so
+    /// its local prediction can't run ahead of the authoritative sim. That is the
+    /// general fix for "the bot did something before the server acked it" — most
+    /// visibly a predicted bazaar-leave racing the server's bazaar-entry and freezing
+    /// the whole match. The "last sent" half of that gate now comes straight from the
+    /// [`Predictor`] (per-bout `input_seq`, reset to 0 with each new bout).
     acked: u64,
-    /// The seq of our most recently SENT input this bout (resets to 0 with each new
-    /// [`MatchState`], so it lines up with the server's per-bout ack baseline). We
-    /// never begin a new action while `acked < last_sent` — the bot always waits for
-    /// the server to catch up, so its local prediction can't run ahead of the
-    /// authoritative sim. That is the general fix for "the bot did something before
-    /// the server acked it" — most visibly a predicted bazaar-leave racing the
-    /// server's bazaar-entry and freezing the whole match.
-    last_sent: u64,
 }
 
 impl MatchState {
@@ -339,7 +345,7 @@ impl MatchState {
         let place_interval = if persona.roam { roam_place_ticks(skill) } else { persona.place_ticks };
         let weapons_on = if persona.roam { skill >= ROAM_WEAPON_SKILL } else { persona.weapons };
         MatchState {
-            game: Game::new(seed),
+            predictor: Predictor::new(seed),
             persona,
             skill,
             place_interval,
@@ -357,7 +363,6 @@ impl MatchState {
             done: false,
             idle_ticks: 0,
             acked: 0,
-            last_sent: 0,
         }
     }
 }
@@ -467,7 +472,6 @@ async fn run_session(
     out.send(available_msg(name, geo, &token))?;
 
     let mut ms: Option<MatchState> = None;
-    let mut seq: u64 = 0; // monotonic across the whole connection (always > a fresh bout's ack=0)
     // The Count's roaming state (None for the fixed personas).
     let mut roam: Option<Roam> = if persona.roam { Some(Roam::new(name.to_string())) } else { None };
 
@@ -492,11 +496,11 @@ async fn run_session(
             }
             _ = ticker.tick() => {
                 if let Some(state) = ms.as_mut() {
-                    drive_tick(state, &out, &mut seq);
+                    drive_tick(state, &out);
                     if state.done {
                         println!(
                             "match over — {name}: {} lines cleared, {} weapons launched",
-                            state.game.score().lines, state.launched
+                            state.predictor.game().score().lines, state.launched
                         );
                         ms = None;
                         if let Some(r) = roam.as_mut() {
@@ -584,45 +588,49 @@ fn handle_text(
             if let Some(state) = ms.as_mut() {
                 state.idle_ticks = 0; // the bout is alive
                 // The server's confirmation of our inputs: `ack` is the last seq it
-                // applied for us. The driver gates every action on this catching up
-                // to what we've sent, so we never run ahead of the authoritative sim.
-                if let Some(a) = v.get("ack").and_then(|a| a.as_u64()) {
-                    state.acked = a;
-                }
+                // applied for us. `sync::decide` gates every action on this catching up
+                // to `predictor.input_seq()`, so we never run ahead of the server.
+                let ack = v.get("ack").and_then(|a| a.as_u64()).unwrap_or(state.acked);
+                state.acked = ack;
                 if v.get("result").and_then(|r| r.as_i64()).unwrap_or(0) != 0 {
                     state.done = true;
                 }
-                if let Some(b) = v
+                // Authoritative bazaar flags. The bazaar is a BARRIER: while either side
+                // shops the match is frozen, so we wait it out (decide → WaitBazaar)
+                // rather than placing (the server rejects placements anyway).
+                let you_bazaar = v
                     .get("you")
                     .and_then(|y| y.get("in_bazaar"))
                     .and_then(|x| x.as_bool())
-                {
-                    state.in_bazaar = b;
-                    if !b {
-                        state.bazaar_bought = false; // armed again for the next visit
-                    }
+                    .unwrap_or(false);
+                state.in_bazaar = you_bazaar;
+                if !you_bazaar {
+                    state.bazaar_bought = false; // armed again for the next visit
                 }
-                // Opponent's bazaar status — the barrier freezes us too while they shop.
-                state.opp_in_bazaar = v
+                let opp_bazaar = v
                     .get("opp")
                     .and_then(|o| o.get("in_bazaar"))
                     .and_then(|x| x.as_bool())
                     .unwrap_or(false);
-                // The full authoritative board rides the throttled keyframe (a
-                // JSON array of bytes) — restore our local sim to it.
-                if let Some(arr) = v.get("keyframe").and_then(|k| k.as_array()) {
-                    let bytes: Vec<u8> =
-                        arr.iter().filter_map(|n| n.as_u64().map(|x| x as u8)).collect();
-                    state.game.restore_bytes(&bytes);
-                }
+                state.opp_in_bazaar = opp_bazaar;
+                // The full authoritative board rides the throttled keyframe (a JSON
+                // array of bytes). Hand the whole frame to the predictor: it prunes
+                // acked inputs, restores our local sim to the keyframe, and replays the
+                // still-unacked tail on top — the single reconciliation path, shared
+                // with the browser, instead of a bare restore_bytes here.
+                let keyframe: Option<Vec<u8>> = v
+                    .get("keyframe")
+                    .and_then(|k| k.as_array())
+                    .map(|arr| arr.iter().filter_map(|n| n.as_u64().map(|x| x as u8)).collect());
+                state.predictor.on_snapshot(ack, you_bazaar, opp_bazaar, keyframe.as_deref());
                 // Spy intel: a `spy_board` (the opponent's board, empty cells = -2)
                 // rides keyframes only while one of our spies is active. Refresh the
                 // "is the opponent stacked high?" read used to time board-raisers.
                 if let Some(arr) = v.get("spy_board").and_then(|s| s.as_array()) {
                     let grid: Vec<i32> =
                         arr.iter().filter_map(|n| n.as_i64().map(|x| x as i32)).collect();
-                    let w = state.game.board().width;
-                    let h = state.game.board().height;
+                    let w = state.predictor.game().board().width;
+                    let h = state.predictor.game().board().height;
                     state.opp_high = opponent_is_high(&grid, w, h);
                     state.spy_fresh = SPY_FRESH_TICKS;
                 }
@@ -638,7 +646,7 @@ fn handle_text(
 /// proptested) and only the side effects here is what keeps the netcode invariants
 /// — never act ahead of the server, never leave a bazaar we only predicted entering
 /// — from drifting back into a tangle of ad-hoc booleans.
-fn drive_tick(state: &mut MatchState, out: &Out, seq: &mut u64) {
+fn drive_tick(state: &mut MatchState, out: &Out) {
     if state.done {
         return;
     }
@@ -653,7 +661,7 @@ fn drive_tick(state: &mut MatchState, out: &Out, seq: &mut u64) {
         println!(
             "[{}] progress: {} lines, {} weapons launched",
             state.persona.suffix,
-            state.game.score().lines,
+            state.predictor.game().score().lines,
             state.launched
         );
     }
@@ -671,10 +679,10 @@ fn drive_tick(state: &mut MatchState, out: &Out, seq: &mut u64) {
         done: state.done,
         idle_timed_out,
         acked: state.acked,
-        last_sent: state.last_sent,
+        last_sent: state.predictor.input_seq(),
         auth_baz: state.in_bazaar,
         opp_baz: state.opp_in_bazaar,
-        local_baz: state.game.is_in_bazaar(),
+        local_baz: state.predictor.game().is_in_bazaar(),
         bought: state.bazaar_bought,
     });
     match action {
@@ -692,20 +700,21 @@ fn drive_tick(state: &mut MatchState, out: &Out, seq: &mut u64) {
         // server stays in the bazaar until our LeaveBazaar, and we only got here after
         // it acked our prior inputs, so the leave can't race the entry.
         BotAction::Shop => {
-            shop_bazaar(state, out, seq);
+            shop_bazaar(state, out);
             state.bazaar_bought = true;
-            state.last_sent = *seq; // hold until the server confirms the buys + leave
+            // The buys + leave bumped `predictor.input_seq()` past `acked`, so the next
+            // tick's decide → WaitAck holds us until the server confirms them.
         }
-        BotAction::Play => play(state, out, seq),
+        BotAction::Play => play(state, out),
     }
 }
 
 /// Advance the local sim one tick and, subject to the launch/place cooldowns, fire a
 /// weapon and/or place a piece. Reached only when [`sync::decide`] returns `Play`, so
 /// there are no inputs in flight and no bazaar barrier is up.
-fn play(state: &mut MatchState, out: &Out, seq: &mut u64) {
-    state.game.tick(TICK_MS);
-    if state.game.is_game_over() {
+fn play(state: &mut MatchState, out: &Out) {
+    state.predictor.tick(TICK_MS);
+    if state.predictor.game().is_game_over() {
         return; // wait for the authoritative result to end the match
     }
 
@@ -714,10 +723,10 @@ fn play(state: &mut MatchState, out: &Out, seq: &mut u64) {
     if state.weapons_on {
         state.launch_cooldown -= 1;
         if state.launch_cooldown <= 0 {
-            let arsenal = arsenal_of(&state.game);
+            let arsenal = arsenal_of(state.predictor.game());
             let spy_active = state.spy_fresh > 0;
             if let Some(slot) = launch_choice(&arsenal, spy_active, state.opp_high) {
-                send_input(&mut state.game, out, seq, Input::LaunchWeapon(slot as u32));
+                send_input(&mut state.predictor, out, Input::LaunchWeapon(slot as u32));
                 state.launched += 1;
                 state.launch_cooldown = LAUNCH_INTERVAL_TICKS;
             } else {
@@ -728,23 +737,23 @@ fn play(state: &mut MatchState, out: &Out, seq: &mut u64) {
 
     if state.cooldown > 0 {
         state.cooldown -= 1;
-        state.last_sent = *seq; // a weapon may have launched above — wait for its ack
+        // A weapon may have launched above; the predictor already bumped its seq, so
+        // decide → WaitAck holds the next action until the server catches up.
         return;
     }
     // Pick the placement per this match's difficulty: roam uses the skill-noised eval,
     // Bert the strong eval, Ernie the faithful one.
-    if let Some(p) = state.game.current_piece().cloned() {
+    if let Some(p) = state.predictor.game().current_piece().cloned() {
         let pl = if state.persona.roam {
-            best_placement_skill(state.game.board(), &p, state.skill, &mut state.rng)
+            best_placement_skill(state.predictor.game().board(), &p, state.skill, &mut state.rng)
         } else if state.persona.strong {
-            best_placement_strong(state.game.board(), &p)
+            best_placement_strong(state.predictor.game().board(), &p)
         } else {
-            best_placement(state.game.board(), &p)
+            best_placement(state.predictor.game().board(), &p)
         };
-        play_piece(&mut state.game, out, seq, pl);
+        play_piece(&mut state.predictor, out, pl);
     }
     state.cooldown = state.place_interval;
-    state.last_sent = *seq; // hold the next placement until the server acks this one
 }
 
 /// The local arsenal as the ten protocol token indices (-1 = empty slot).
@@ -762,25 +771,23 @@ fn arsenal_of(game: &Game) -> [i32; 10] {
 /// rejected inputs. The caller guarantees we're authoritatively AND locally in the
 /// bazaar before calling, so the buys + the LeaveBazaar all land while the server is
 /// genuinely shopping — no entry race, sent exactly once per visit.
-fn shop_bazaar(state: &mut MatchState, out: &Out, seq: &mut u64) {
-    if state.game.is_in_bazaar() && state.weapons_on {
-        let funds = state.game.score().funds;
-        let arsenal = arsenal_of(&state.game);
-        let carter = state.game.weapon_active(WeaponToken::Carter);
+fn shop_bazaar(state: &mut MatchState, out: &Out) {
+    if state.predictor.game().is_in_bazaar() && state.weapons_on {
+        let funds = state.predictor.game().score().funds;
+        let arsenal = arsenal_of(state.predictor.game());
+        let carter = state.predictor.game().weapon_active(WeaponToken::Carter);
         for tok in buy_plan(funds, &arsenal, carter) {
-            if state.game.buy_weapon(tok) {
-                *seq += 1;
-                let iv = serde_json::to_value(Input::BuyWeapon(tok.index() as i32))
-                    .unwrap_or(Value::Null);
-                let _ = out.send(Message::Text(
-                    json!({ "type": "input", "seq": *seq, "input": iv }).to_string(),
-                ));
-            }
+            // `predict` applies the buy locally and returns a frame to send ONLY if the
+            // engine accepted it, so we forward exactly the buys that landed (no stream
+            // of rejected inputs) — the same rule as before, via the shared Predictor.
+            send_input(&mut state.predictor, out, Input::BuyWeapon(tok.index() as i32));
         }
     }
-    // Leave: tell the SERVER to leave (this is what un-freezes the match) and mirror
-    // it on our local sim so our board resumes in sync. `send_input` does both.
-    send_input(&mut state.game, out, seq, Input::LeaveBazaar);
+    // Tell the SERVER we're done — this is what un-freezes the match. The Predictor
+    // sends LeaveBazaar but does NOT leave the local sim: the bazaar is a barrier that
+    // clears (via the next keyframe) only once BOTH sides are done, so our board
+    // resumes in sync rather than ticking ahead of a still-frozen server.
+    send_input(&mut state.predictor, out, Input::LeaveBazaar);
 }
 
 /// Whether the opponent's spied board (`render_ids`, empty cells = -2, row-major
@@ -809,40 +816,40 @@ fn opponent_is_high(grid: &[i32], w: i32, h: i32) -> bool {
 /// Mirrors `bt_ai::Computer::take_turn` but emits the moves over the wire
 /// instead of only mutating locally. All loops are bounded, so a blocked piece
 /// just drops where it is rather than spinning.
-fn play_piece(game: &mut Game, out: &Out, seq: &mut u64, pl: Placement) {
-    let rot_cap = match game.current_piece() {
+fn play_piece(predictor: &mut Predictor, out: &Out, pl: Placement) {
+    let rot_cap = match predictor.game().current_piece() {
         Some(p) => p.orientations.max(1),
         None => return,
     };
     let (target_x, target_or) = (pl.x, pl.orientation);
 
-    // Rotate to the target orientation (first, like take_turn).
+    // Rotate to the target orientation (first, like take_turn). Read the orientation
+    // as a Copy value so the immutable borrow ends before the mutable `send_input`.
     for _ in 0..rot_cap {
-        match game.current_piece() {
-            Some(p) if p.orientation != target_or => send_input(game, out, seq, Input::Rotate),
+        match predictor.game().current_piece().map(|p| p.orientation) {
+            Some(or) if or != target_or => send_input(predictor, out, Input::Rotate),
             _ => break,
         }
     }
     // Slide to the target column.
-    let move_cap = game.board().width * 2;
+    let move_cap = predictor.game().board().width * 2;
     for _ in 0..move_cap {
-        match game.current_piece().map(|p| p.x) {
-            Some(px) if px < target_x => send_input(game, out, seq, Input::MoveRight),
-            Some(px) if px > target_x => send_input(game, out, seq, Input::MoveLeft),
+        match predictor.game().current_piece().map(|p| p.x) {
+            Some(px) if px < target_x => send_input(predictor, out, Input::MoveRight),
+            Some(px) if px > target_x => send_input(predictor, out, Input::MoveLeft),
             _ => break,
         }
     }
     // Slam it home.
-    send_input(game, out, seq, Input::BeginDrop);
+    send_input(predictor, out, Input::BeginDrop);
 }
 
-/// Apply an input to the local sim (prediction) and forward it to the server
-/// with the next sequence number.
-fn send_input(game: &mut Game, out: &Out, seq: &mut u64, input: Input) {
-    input.apply_to_game(game);
-    *seq += 1;
-    let iv = serde_json::to_value(&input).unwrap_or(Value::Null);
-    let _ = out.send(Message::Text(
-        json!({ "type": "input", "seq": *seq, "input": iv }).to_string(),
-    ));
+/// Predict an input through the shared [`Predictor`] (applies it to the local sim and
+/// queues it for reconciliation) and forward the wire frame it hands back to the
+/// server. A gated/rejected input (e.g. a non-shopping action under a bazaar barrier,
+/// or an unaffordable buy) returns `None` and sends nothing.
+fn send_input(predictor: &mut Predictor, out: &Out, input: Input) {
+    if let Some((seq, inp)) = predictor.predict(input) {
+        let _ = out.send(Message::Text(input_frame(seq, &inp)));
+    }
 }
