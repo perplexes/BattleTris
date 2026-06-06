@@ -296,8 +296,9 @@ struct MatchState {
     /// BARRIER: while either side shops the match is frozen, so we wait this out too
     /// (don't keep placing — the server rejects it anyway, see Bout::apply_input).
     opp_in_bazaar: bool,
-    /// Did we already shop (buy + LeaveBazaar) for this bazaar visit?
-    bazaar_left: bool,
+    /// Did we already buy our loadout for this bazaar visit? (We keep re-sending
+    /// LeaveBazaar each tick until the server confirms, but only buy once.)
+    bazaar_bought: bool,
     /// Ticks until the next weapon-launch attempt.
     launch_cooldown: i32,
     /// Ticks of remaining "spy intel" — refreshed whenever a `spy_board` arrives;
@@ -335,7 +336,7 @@ impl MatchState {
             cooldown: place_interval,
             in_bazaar: false,
             opp_in_bazaar: false,
-            bazaar_left: false,
+            bazaar_bought: false,
             launch_cooldown: LAUNCH_INTERVAL_TICKS,
             spy_fresh: 0,
             opp_high: false,
@@ -576,7 +577,7 @@ fn handle_text(
                 {
                     state.in_bazaar = b;
                     if !b {
-                        state.bazaar_left = false; // armed again for the next visit
+                        state.bazaar_bought = false; // armed again for the next visit
                     }
                 }
                 // Opponent's bazaar status — the barrier freezes us too while they shop.
@@ -643,13 +644,22 @@ fn drive_tick(state: &mut MatchState, out: &Out, seq: &mut u64) {
     }
 
     // Bazaar barrier: while EITHER side is shopping the match is frozen server-side.
-    // Shop a smart loadout once when it's OUR bazaar; otherwise just wait out the
-    // opponent's (don't keep placing — the server rejects it during the barrier).
     if state.in_bazaar || state.opp_in_bazaar || state.game.is_in_bazaar() {
-        let our_bazaar = state.in_bazaar || state.game.is_in_bazaar();
-        if our_bazaar && !state.bazaar_left {
-            shop_bazaar(state, out, seq);
-            state.bazaar_left = true;
+        // Shop + leave ONLY when the SERVER confirms WE'RE in the bazaar (the
+        // authoritative `in_bazaar`), NOT our local prediction. Our prediction can
+        // reach the bazaar a few ticks before the server; a LeaveBazaar sent then is
+        // a no-op the server eats BEFORE it enters the bazaar, and we'd never re-send
+        // — freezing the match in the bazaar forever. And keep asking to leave every
+        // tick until the server confirms (a single request can still race the entry).
+        if state.in_bazaar {
+            if !state.bazaar_bought {
+                shop_bazaar(state, out, seq);
+                state.bazaar_bought = true;
+            }
+            *seq += 1;
+            let _ = out.send(Message::Text(
+                json!({ "type": "input", "seq": *seq, "input": "LeaveBazaar" }).to_string(),
+            ));
         }
         return;
     }
@@ -705,9 +715,10 @@ fn arsenal_of(game: &Game) -> [i32; 10] {
 }
 
 /// In the bazaar, buy a smart loadout ([`buy_plan`]) within our funds — each buy
-/// applied locally (prediction) AND sent to the server — then leave so the barrier
-/// lifts. Only buys the engine accepts are forwarded, keeping the sim in sync and
-/// avoiding a stream of rejected inputs.
+/// applied locally (prediction) AND sent to the server. Only buys the engine accepts
+/// are forwarded, keeping the sim in sync and avoiding a stream of rejected inputs.
+/// Leaving the bazaar (server-side) is the caller's job, driven off the authoritative
+/// `in_bazaar` flag and retried, so it can't race the server's bazaar entry.
 fn shop_bazaar(state: &mut MatchState, out: &Out, seq: &mut u64) {
     if state.game.is_in_bazaar() && state.weapons_on {
         let funds = state.game.score().funds;
@@ -724,10 +735,9 @@ fn shop_bazaar(state: &mut MatchState, out: &Out, seq: &mut u64) {
             }
         }
     }
-    *seq += 1;
-    let _ = out.send(Message::Text(
-        json!({ "type": "input", "seq": *seq, "input": "LeaveBazaar" }).to_string(),
-    ));
+    // Leave the LOCAL prediction's bazaar so our board resumes in sync; the
+    // server-side LeaveBazaar is sent (and retried) by the caller off the
+    // authoritative `in_bazaar` flag, so it can't race the server's bazaar entry.
     if state.game.is_in_bazaar() {
         Input::LeaveBazaar.apply_to_game(&mut state.game);
     }
