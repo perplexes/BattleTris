@@ -42,7 +42,7 @@ use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{FromRef, Path, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -215,6 +215,12 @@ struct App {
     /// `rejoin` can reattach to the running tick loop. Inserted in [`start_bout`],
     /// removed when [`run_bout`] ends. See [`BoutHandle`].
     bouts: HashMap<String, BoutHandle>,
+    /// Quiesce-in-place drain: once set (via `POST /admin/drain` at the start of a
+    /// deploy) this machine accepts NO new matches — lobby clients stay connected but
+    /// "matches paused" — while its in-flight bouts finish. The deploy script waits for
+    /// the active-bout count to reach zero, then replaces the machine in place (so no
+    /// live game is ever killed); the fresh boot clears this flag. See [`admin_drain`].
+    draining: bool,
 }
 
 impl App {
@@ -239,6 +245,7 @@ impl App {
             challenges: HashMap::new(),
             last_players: Vec::new(),
             bouts: HashMap::new(),
+            draining: false,
         }
     }
 
@@ -584,6 +591,12 @@ fn try_match(app: &mut App, id: &str) -> Option<PendingBout> {
 /// matchmaking quality if known (auto-match) else `None` (a hand-picked challenge
 /// has no quality figure). Returns `None` only if a client vanished.
 fn start_bout(app: &mut App, a: &str, b: &str, quality: Option<f64>) -> Option<PendingBout> {
+    // Blue/green drain: this machine starts no new bouts once draining — it's only
+    // finishing the ones already in flight. The single chokepoint for BOTH the
+    // auto-matcher and the challenge-accept path, so nothing slips through.
+    if app.draining {
+        return None;
+    }
     app.waiting.retain(|w| w != a && w != b);
     // Drop any pending challenges involving either player — they're now in a
     // match, so a stale accept must not later kick off a second, unwanted bout.
@@ -803,6 +816,12 @@ async fn run_bout(state: Shared, pb: PendingBout) {
                         Side::B => { tx_b = tx.clone(); id_b = new_id; }
                     }
                     connected[sidx(side)] = true;
+                    // The reconnected client restarts its input `seq` at 0 (the resent
+                    // matchStart below rebuilds its local game), so drop our ack baseline
+                    // for this side to match — otherwise every fresh input would be
+                    // `seq <= ack`, get rejected, and the player's piece would snap back
+                    // all match. Done BEFORE the snapshot so the client sees `ack:0`.
+                    bout.reset_ack(side);
                     // The fresh client needs the match handoff, THEN a keyframe to resync.
                     let (opp, seed, side_str) = match side {
                         Side::A => (&name_b, seed_a, "A"),
@@ -1001,6 +1020,14 @@ async fn run_bout(state: Shared, pb: PendingBout) {
     }
     // Both players went back to Available (or left) — refresh the lobby roster.
     maybe_broadcast_players(&mut app);
+
+    // Quiesce-in-place: this bout is fully settled and removed from the registry. We
+    // do NOT exit here — the deploy script polls the active-bout count and replaces
+    // the machine once it reaches zero. (Self-exiting would just bounce us back up on
+    // the OLD image via fly's restart policy, racing that poll.)
+    if app.draining {
+        println!("drain: bout ({match_id}) settled — {} bout(s) remaining", app.bouts.len());
+    }
 }
 
 fn rating_msg(s: &PlayerState, won: bool) -> Value {
@@ -1038,6 +1065,23 @@ fn resolve_name(app: &App, v: &Value, prior: &str) -> String {
     prior.to_string()
 }
 
+/// While this machine is draining for an in-place deploy, it accepts no NEW matches.
+/// Tell the requester "matches paused" (the client shows a notice) but KEEP the
+/// socket — there's no second machine to move to; the in-place restart will reconnect
+/// them onto the new version shortly. Returns true if the request was refused (the
+/// caller should stop). Never touches `rejoin` (a mid-bout player must still reach
+/// their bout here) or clients already in a bout.
+async fn reject_if_draining(state: &Shared, id: &str) -> bool {
+    let app = state.lock().await;
+    if !app.draining {
+        return false;
+    }
+    if let Some(c) = app.clients.get(id) {
+        let _ = c.tx.send(Message::Text(json!({"type":"draining"}).to_string()));
+    }
+    true
+}
+
 async fn handle_message(state: &Shared, id: &str, text: &str) {
     let v: Value = match serde_json::from_str(text) {
         Ok(v) => v,
@@ -1071,6 +1115,9 @@ async fn handle_message(state: &Shared, id: &str, text: &str) {
             maybe_broadcast_stats(&mut app);
         }
         Some("queue") => {
+            if reject_if_draining(state, id).await {
+                return;
+            }
             // Identity: prefer the token's signed name; a bare `name` is still
             // accepted (back-compat) but the token wins when both are present.
             let pending = {
@@ -1108,6 +1155,9 @@ async fn handle_message(state: &Shared, id: &str, text: &str) {
         // Going Available also attempts an immediate auto-pair (a directed
         // challenge isn't required to get into a game).
         Some("available") => {
+            if reject_if_draining(state, id).await {
+                return;
+            }
             let value = v.get("value").and_then(|b| b.as_bool()).unwrap_or(true);
             let pending = {
                 let mut app = state.lock().await;
@@ -1151,6 +1201,9 @@ async fn handle_message(state: &Shared, id: &str, text: &str) {
         // player's Available connection and ping it with `challenged`; track the
         // pending challenge (challenger -> target) with a 30s timeout.
         Some("challenge") => {
+            if reject_if_draining(state, id).await {
+                return;
+            }
             let mut app = state.lock().await;
             // Resolve/refresh the challenger's identity from any token/name.
             let prior = app.clients.get(id).map(|c| c.name.clone()).unwrap_or_default();
@@ -2151,6 +2204,60 @@ async fn debug_matches(State(state): State<Shared>) -> impl IntoResponse {
     Json(json!({ "matches": matches })).into_response()
 }
 
+/// Verify the `x-admin-token` header against `BT_ADMIN_TOKEN`. With that env unset the
+/// admin endpoints are **closed** (fail-closed — never a silently-open admin control).
+fn admin_authed(headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
+    let configured = std::env::var("BT_ADMIN_TOKEN").ok().filter(|t| !t.is_empty());
+    let presented = headers.get("x-admin-token").and_then(|h| h.to_str().ok());
+    match (configured.as_deref(), presented) {
+        (Some(want), Some(got)) if want == got => Ok(()),
+        (None, _) => Err((StatusCode::FORBIDDEN, "admin disabled: BT_ADMIN_TOKEN not set\n".into())),
+        _ => Err((StatusCode::FORBIDDEN, "forbidden\n".into())),
+    }
+}
+
+/// `POST /admin/drain` — begin a quiesce-in-place drain (called at the START of a
+/// deploy). Flips [`App::draining`] so no new matches start, and notifies every lobby
+/// (non-bout) client that matches are paused (they stay connected; the in-place
+/// restart reconnects them onto the new version). Returns the count of bouts still in
+/// flight — the deploy script polls `/api/debug/matches` until that hits zero, then
+/// replaces the machine, so no live game is killed. Idempotent.
+async fn admin_drain(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    if let Err(resp) = admin_authed(&headers) {
+        return resp;
+    }
+    let mut app = state.lock().await;
+    app.draining = true;
+    let notice = json!({"type":"draining"}).to_string();
+    for c in app.clients.values() {
+        if c.bout.is_none() {
+            let _ = c.tx.send(Message::Text(notice.clone()));
+        }
+    }
+    let bouts = app.bouts.len();
+    println!("drain: started — new matches paused, {bouts} bout(s) to finish");
+    (StatusCode::OK, format!("draining; {bouts} bout(s) in flight\n"))
+}
+
+/// `POST /admin/resume` — clear the drain flag (an `undrain`), used by the deploy
+/// script to roll back if the deploy aborts after draining, so the lobby isn't left
+/// paused. Tells lobby clients matches are open again. Idempotent.
+async fn admin_resume(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    if let Err(resp) = admin_authed(&headers) {
+        return resp;
+    }
+    let mut app = state.lock().await;
+    app.draining = false;
+    let notice = json!({"type":"resumed"}).to_string();
+    for c in app.clients.values() {
+        if c.bout.is_none() {
+            let _ = c.tx.send(Message::Text(notice.clone()));
+        }
+    }
+    println!("drain: resumed — matchmaking re-enabled");
+    (StatusCode::OK, "resumed\n".to_string())
+}
+
 /// `POST /api/identity` with `{"name":"<str>"}` — mints an HS256 identity token
 /// `{"token":"<jwt>"}` carrying the sanitized name. Empty/whitespace names are
 /// rejected; over-long names are capped to [`identity::MAX_NAME_LEN`].
@@ -2252,6 +2359,8 @@ async fn main() {
         .route("/api/replays/:id", get(get_replay))
         .route("/api/leaderboard", get(leaderboard))
         .route("/api/debug/matches", get(debug_matches))
+        .route("/admin/drain", post(admin_drain))
+        .route("/admin/resume", post(admin_resume))
         .route("/api/identity", post(post_identity))
         .route("/api/player/:name", get(player_profile))
         .route("/replay/:id", get(replay_page))
@@ -2304,6 +2413,7 @@ mod tests {
             challenges: HashMap::new(),
             last_players: Vec::new(),
             bouts: HashMap::new(),
+            draining: false,
         }
     }
 
@@ -2376,6 +2486,26 @@ mod tests {
         assert!(drained_types(&mut rx_b).contains(&"matchStart".to_string()));
         assert_eq!(app.clients["1"].status, Some(Status::InGame));
         assert_eq!(app.clients["2"].status, Some(Status::InGame));
+    }
+
+    // Blue/green drain: a draining machine starts NO new bouts (the single chokepoint
+    // is `start_bout`, so both the auto-matcher and a challenge-accept are refused).
+    // Without this, a deploy cutover would still spin up matches on the machine that's
+    // about to be reaped.
+    #[test]
+    fn a_draining_machine_starts_no_new_bouts() {
+        let mut app = test_app();
+        let _rx_a = add_client(&mut app, "1", "alice");
+        let _rx_b = add_client(&mut app, "2", "bob");
+        app.draining = true;
+
+        assert!(try_match(&mut app, "1").is_none(), "draining: alice can't even queue a match");
+        assert!(try_match(&mut app, "2").is_none(), "draining: bob must NOT auto-pair into a bout");
+        assert!(start_bout(&mut app, "1", "2", None).is_none(), "draining: a direct start_bout is refused");
+        assert!(
+            app.clients["1"].bout.is_none() && app.clients["2"].bout.is_none(),
+            "draining: no client gets bound to a bout"
+        );
     }
 
 

@@ -941,6 +941,22 @@ async function onSignalMessage(ev) {
         if (onlineStatus) onlineStatus.style.display = 'block';
         return;
     }
+    // ── Deploy quiesce: the server paused new matches for an in-place update. Any
+    // match already in progress keeps running and finishes; only NEW matchmaking is
+    // held. Stop the search spinner and tell the player; `resumed` clears it. ───────
+    if (msg.type === 'draining') {
+        searching = false;
+        findMatchBtn.classList.remove('searching');
+        cancelSearchBtn.style.display = 'none';
+        setOnlineStatus('Server updating — new matches paused, back in a moment…');
+        if (onlineStatus) onlineStatus.style.display = 'block';
+        return;
+    }
+    if (msg.type === 'resumed') {
+        setOnlineStatus('Server ready — find a match!');
+        if (onlineStatus) onlineStatus.style.display = 'block';
+        return;
+    }
     // ── Reconnect (rejoin-on-refresh) ────────────────────────────────────────
     if (msg.type === 'opponentReconnecting') {
         // The server froze the bout while our opponent reconnects. Stop predicting

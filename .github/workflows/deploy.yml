@@ -41,4 +41,7 @@ jobs:
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         # Stamp the build with the commit so recordings carry a real engine_sha.
+        # NOTE: once the drain endpoints (this PR's server) are LIVE and the
+        # BT_ADMIN_TOKEN secrets are set, switch this step to `./deploy-quiesce.sh`
+        # (quiesce-in-place) so deploys stop severing live games. See that script.
         run: flyctl deploy --remote-only --ha=false --build-arg BT_GIT_SHA="${GITHUB_SHA::7}"

@@ -259,6 +259,17 @@ impl Bout {
         true
     }
 
+    /// Reset one side's input-sequence baseline. Called when a fresh client REATTACHES
+    /// to this bout (a reconnect/refresh): the new client restarts its `seq` at 0, but
+    /// our `ack` still holds the disconnected client's last value — so without this
+    /// every reconnected input would be `seq <= ack` and get rejected, snapping the
+    /// player's piece back for the rest of the match. The reconnecting client's old
+    /// in-flight inputs are gone (its socket closed; the input channel was drained
+    /// ticks ago), so dropping the baseline to 0 is safe and lets `seq` 1,2,3… through.
+    pub fn reset_ack(&mut self, side: Side) {
+        self.ack[side_idx(side)] = 0;
+    }
+
     /// Advance the authoritative simulation by `dt_ms` (the server's clock), and
     /// run the spy bookkeeping (BTRecon): a launched spy reveals the opponent for
     /// `duration` of the OPPONENT's line-clears; relaunch accumulates + switches
@@ -476,6 +487,37 @@ mod tests {
             Just(Input::BeginDrop),
             (0u32..10u32).prop_map(Input::LaunchWeapon),
         ]
+    }
+
+    // Reattach: a reconnecting client restarts its input `seq` at 0, so the bout must
+    // drop that side's ack baseline — otherwise every fresh input is `seq <= ack`, gets
+    // rejected, and the player's piece snaps back for the rest of the match (the bug a
+    // mid-match server redeploy triggered). Pin the contract: after `reset_ack`, the
+    // side's ack is 0 and `seq` 1 is accepted again, while the OTHER side is untouched.
+    #[test]
+    fn reset_ack_lets_a_reconnected_client_resume_from_seq_1() {
+        let mut b = Bout::new(1, 2);
+        // Drive A's ack up to 3 (three accepted moves); B advances independently to 2.
+        for seq in 1..=3 {
+            assert!(b.apply_input(Side::A, &Input::MoveLeft, seq), "A seq {seq} should apply");
+        }
+        for seq in 1..=2 {
+            assert!(b.apply_input(Side::B, &Input::MoveRight, seq), "B seq {seq} should apply");
+        }
+        assert_eq!(b.snapshot_for(Side::A, false).ack, 3);
+        assert_eq!(b.snapshot_for(Side::B, false).ack, 2);
+
+        // Before reset, a reconnected client's fresh seq 1 is rejected (1 <= ack 3) —
+        // this is exactly the stuck state.
+        assert!(!b.apply_input(Side::A, &Input::MoveLeft, 1), "stale: seq 1 must be rejected pre-reset");
+
+        // Reattach resets A's baseline; seq 1 flows again, A's ack tracks it, and B is
+        // left alone.
+        b.reset_ack(Side::A);
+        assert_eq!(b.snapshot_for(Side::A, false).ack, 0, "A's ack must drop to 0 on reattach");
+        assert_eq!(b.snapshot_for(Side::B, false).ack, 2, "B's ack must be untouched");
+        assert!(b.apply_input(Side::A, &Input::MoveLeft, 1), "post-reset: seq 1 must apply");
+        assert_eq!(b.snapshot_for(Side::A, false).ack, 1, "A's ack tracks the reconnected seq");
     }
 
     /// Force `side` into the bazaar deterministically by crossing a 20-line bazaar
