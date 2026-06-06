@@ -138,7 +138,7 @@ mod tests {
         let mut rng = Rng::new(12345);
         for _ in 0..10_000 {
             let val = rng.drand48();
-            assert!(val >= 0.0 && val < 1.0, "drand48() value {} out of range", val);
+            assert!((0.0..1.0).contains(&val), "drand48() value {} out of range", val);
         }
     }
 
@@ -156,7 +156,10 @@ mod tests {
         let mut rng = Rng::new(12345);
         for _ in 0..10_000 {
             let val = rng.rand();
-            assert!(val >= 0 && val <= RAND_MAX, "rand() value {} out of range", val);
+            // Widen to i64 for the upper bound: RAND_MAX == i32::MAX, so `val <= RAND_MAX`
+            // as i32 is vacuously true (clippy::absurd_extreme_comparisons). The i64 form
+            // still documents rand()'s `0..=RAND_MAX` contract — matching test_lrand48_range.
+            assert!(val >= 0 && val as i64 <= RAND_MAX as i64, "rand() value {} out of range", val);
         }
     }
 
@@ -166,7 +169,7 @@ mod tests {
         let mut rng = Rng::new(12345);
         for _ in 0..10_000 {
             let val = rng.rand_below(6) + 1;
-            assert!(val >= 1 && val <= 6, "die roll {} out of range", val);
+            assert!((1..=6).contains(&val), "die roll {} out of range", val);
         }
     }
 
@@ -176,7 +179,7 @@ mod tests {
         let mut rng = Rng::new(12345);
         for _ in 0..10_000 {
             let val = rng.rand_below(10);
-            assert!(val >= 0 && val < 10, "rand_below(10) value {} out of range", val);
+            assert!((0..10).contains(&val), "rand_below(10) value {} out of range", val);
         }
     }
 

@@ -178,7 +178,7 @@ impl WasmGame {
     /// Whether weapon `token` is currently active on this game (drives the
     /// online Mirror reflect/nullify check).
     pub fn weapon_active(&self, token: i32) -> bool {
-        WeaponToken::from_index(token).map_or(false, |t| self.inner.weapon_active(t))
+        WeaponToken::from_index(token).is_some_and(|t| self.inner.weapon_active(t))
     }
     /// Lines of duration left on weapon `token` (0 = inactive/expired/instant).
     /// Used by the in-game debug overlay to show active-weapon countdowns.
@@ -424,7 +424,7 @@ impl WasmClient {
         }
     }
     pub fn weapon_active(&self, token: i32) -> bool {
-        WeaponToken::from_index(token).map_or(false, |t| self.inner.game().weapon_active(t))
+        WeaponToken::from_index(token).is_some_and(|t| self.inner.game().weapon_active(t))
     }
     pub fn weapon_remaining(&self, token: i32) -> i32 {
         WeaponToken::from_index(token).map_or(0, |t| self.inner.game().weapon_remaining(t))
@@ -1063,7 +1063,7 @@ mod recording_tests {
             g.tick(FIXED_DT_MS);
         }
         let json = g.export_replay();
-        let mk = || WasmReplayPlayer::from_json(&json).ok().expect("replay parses");
+        let mk = || WasmReplayPlayer::from_json(&json).expect("replay parses");
         let total = mk().tick_count();
 
         // Reference end state, reached by stepping.

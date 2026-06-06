@@ -137,11 +137,12 @@ pub fn eval_board(board: &Board) -> f64 {
         let mut last_sq: f64 = 0.0;
         // C++ seeds prev_height = ptops_[1] (column index 1)
         let mut prev = tops[1] as f64;
-        for j in 0..w as usize {
-            let diff = (tops[j] as f64 - prev).abs();
+        for &col_top in tops.iter().take(w as usize) {
+            let h = col_top as f64;
+            let diff = (h - prev).abs();
             last_sq = diff * diff;
             temp += last_sq;
-            prev = tops[j] as f64;
+            prev = h;
         }
         temp += last_sq; // "account for furthest column"
         temp
@@ -855,14 +856,11 @@ mod tests {
                 }
                 game.tick(5);
                 for ev in game.take_events() {
-                    match ev {
-                        bt_core::GameEvent::Locked { lines: l, .. } => {
-                            locked += 1;
-                            lines += l;
-                            locked_this = true;
-                            break 'fall;
-                        }
-                        _ => {}
+                    if let bt_core::GameEvent::Locked { lines: l, .. } = ev {
+                        locked += 1;
+                        lines += l;
+                        locked_this = true;
+                        break 'fall;
                     }
                 }
             }

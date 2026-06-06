@@ -61,6 +61,7 @@
 //!   * DURATIONS/LIFECYCLE: line-based expiry restores prior state; relaunch
 //!     accumulates remaining; Speedy/Meadow drop-time round-trips on expiry.
 //!   * TRIGGER TIMING: received weapons apply at the next lock, not on receipt.
+//!
 //! ============================================================================
 
 use bt_core::constants::*;
@@ -150,6 +151,8 @@ fn value_grid(b: &Board) -> Vec<Option<i32>> {
 /// gravity step that runs when row `line` is cleared. `force`/`bottle`/`upside`
 /// select the four branches faithfully (BTBoardManager.C:73-150). Operates on a
 /// `width*height` value grid (None = empty), returning the post-shift grid.
+// Mirrors removeLine's exact branch-selecting params; a struct would just obscure it.
+#[allow(clippy::too_many_arguments)]
 fn ref_remove_line(
     grid: &[Option<i32>],
     width: i32,

@@ -6,12 +6,12 @@
 //! `None` (the grid is `Vec<Option<Cell>>`).
 //!
 //! `BTBox` semantics we reproduce:
-//!   * `value()`        — funds contribution when cleared (0 for normal boxes,
-//!                        die pip value, 150 for an un-landed happy face).
-//!   * `id()`           — render id; returns -1 when `hidden_` (Twilight Zone).
-//!   * `isRemoveable()` — false for the bottle-neck structure boxes.
-//!   * `landed()`       — a happy face that lands without clearing turns into a
-//!                        frown (`BTHappyBox::landed`), dropping its value to 0.
+//!    * `value()` — funds contribution when cleared (0 for normal boxes, die pip
+//!      value, 150 for an un-landed happy face).
+//!    * `id()` — render id; returns -1 when `hidden_` (Twilight Zone).
+//!    * `isRemoveable()` — false for the bottle-neck structure boxes.
+//!    * `landed()` — a happy face that lands without clearing turns into a frown
+//!      (`BTHappyBox::landed`), dropping its value to 0.
 
 use crate::constants::*;
 

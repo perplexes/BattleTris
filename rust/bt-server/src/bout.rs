@@ -234,6 +234,7 @@ impl Bout {
     ///   * a non-shopping action while EITHER side is in the bazaar — the bazaar is
     ///     a synchronized BARRIER, so the whole match is frozen (incl. the side that
     ///     already left); only [`is_bazaar_input`] passes.
+    ///
     /// On success `seq` becomes this side's `ack` for client reconciliation.
     pub fn apply_input(&mut self, side: Side, input: &Input, seq: u64) -> bool {
         let idx = side_idx(side);

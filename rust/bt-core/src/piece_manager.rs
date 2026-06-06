@@ -105,14 +105,17 @@ impl PieceManager {
     /// `(x, y)`.
     ///
     /// Selection (faithful, incl. RNG consumption order):
-    ///   * if `!hap_on && (!broken || (broken && rng.lrand48() % BT_BROKEN_PROB == 0))`:
-    ///     loop { `i = rng.rand_below(BT_MAX_PIECES) + 1`; if `rng.drand48() < keep_prob[i]` break }
-    ///   * else if `!hap_on && broken`: `i = old_piece`
-    ///   * else: `hap_on -= 1`; `i = BT_HAP_PIECE`
-    ///   then `old_piece = i`. The die's pip value is `rng.rand_below(6) + 1`,
-    ///   drawn ONLY when `i == BT_DIE_PIECE` (matches `BTDiePiece::construct`).
+    ///    * if `!hap_on && (!broken || rng.lrand48() % BT_BROKEN_PROB == 0)`:
+    ///      loop { `i = rng.rand_below(BT_MAX_PIECES) + 1`; if `rng.drand48() < keep_prob[i]` break }
+    ///    * else if `!hap_on && broken`: `i = old_piece`
+    ///    * else: `hap_on -= 1`; `i = BT_HAP_PIECE`
+    ///
+    /// then `old_piece = i`. The die's pip value is `rng.rand_below(6) + 1`, drawn
+    /// ONLY when `i == BT_DIE_PIECE` (matches `BTDiePiece::construct`).
     pub fn create(&mut self, rng: &mut Rng, x: i32, y: i32) -> Piece {
-        let i = if self.hap_on == 0 && (!self.broken || (self.broken && rng.lrand48() % BT_BROKEN_PROB == 0)) {
+        // `!broken || (broken && X)` simplifies to `!broken || X` (X = the lrand48 draw);
+        // identical result AND RNG-consumption (lrand48 evaluated iff broken) — clippy::nonminimal_bool.
+        let i = if self.hap_on == 0 && (!self.broken || rng.lrand48() % BT_BROKEN_PROB == 0) {
             // Standard piece selection via rejection sampling
             loop {
                 let candidate = rng.rand_below(BT_MAX_PIECES) + 1;
@@ -380,7 +383,7 @@ mod tests {
                 if let Some(cell) = piece.cells[1][1] {
                     match cell.kind {
                         CellKind::Die(v) => {
-                            assert!(v >= 1 && v <= 6, "Die value {} out of range", v);
+                            assert!((1..=6).contains(&v), "Die value {} out of range", v);
                         }
                         _ => panic!("Expected Die cell at (1, 1)"),
                     }
@@ -455,7 +458,7 @@ mod tests {
         let mut rng = Rng::new(1);
         manager.weapon_on(WeaponToken::Broken);
         let piece = manager.create(&mut rng, 0, 0); // must not panic
-        assert!(matches!(PieceKind::from_id(BT_EL_PIECE), Some(_)));
+        assert!(PieceKind::from_id(BT_EL_PIECE).is_some());
         let _ = piece.kind; // a real, constructed piece
     }
 

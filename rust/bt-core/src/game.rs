@@ -917,10 +917,12 @@ impl Game {
             }
             let mut cells: [[Option<Cell>; BT_PIECE_HEIGHT]; BT_PIECE_WIDTH] =
                 [[None; BT_PIECE_HEIGHT]; BT_PIECE_WIDTH];
-            for col in 0..BT_PIECE_WIDTH {
-                for row in 0..BT_PIECE_HEIGHT {
+            // Column-major then row (matching the encode order, since `c.next()`
+            // advances the byte stream); the indices only indexed `cells`.
+            for col_cells in cells.iter_mut() {
+                for cell in col_cells.iter_mut() {
                     let q = [c.next() as i32, c.next() as i32, c.next() as i32, c.next() as i32];
-                    cells[col][row] = Cell::decode(q);
+                    *cell = Cell::decode(q);
                 }
             }
             Some(Piece { kind, x: px, y: py, color, rot, orientation, orientations, state, cells })
@@ -1021,7 +1023,7 @@ impl Game {
     /// Restore from a [`Self::snapshot_bytes`] buffer. False if the length isn't
     /// a multiple of 8 or the keyframe is malformed (see [`Self::restore`]).
     pub fn restore_bytes(&mut self, bytes: &[u8]) -> bool {
-        if bytes.len() % 8 != 0 {
+        if !bytes.len().is_multiple_of(8) {
             return false;
         }
         let kf: Vec<i64> = bytes

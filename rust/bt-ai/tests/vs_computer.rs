@@ -132,7 +132,7 @@ fn ernie_clears_lines_at_every_difficulty() {
     // a couple dozen pieces.
     let budget_ticks = 120_000 / DT as usize;
 
-    for level in 0..AI_LEVELS.len() {
+    for (level, period_ms) in AI_LEVELS.iter().enumerate() {
         let mut vs = VsComputer::new(2024 + level as u64, level);
         vs.player_mut().set_paused(true); // isolate the AI; no human top-out
 
@@ -148,8 +148,7 @@ fn ernie_clears_lines_at_every_difficulty() {
 
         let lines = vs.ai().score().lines;
         eprintln!(
-            "level {level:2} ({:5}ms): AI cleared {lines:3} lines{}",
-            AI_LEVELS[level],
+            "level {level:2} ({period_ms:5}ms): AI cleared {lines:3} lines{}",
             match topped_out_at {
                 Some(t) => format!(" (topped out at tick {t})"),
                 None => String::new(),
@@ -157,8 +156,7 @@ fn ernie_clears_lines_at_every_difficulty() {
         );
         assert!(
             lines > 0,
-            "Ernie should clear at least one line at level {level} ({}ms)",
-            AI_LEVELS[level]
+            "Ernie should clear at least one line at level {level} ({period_ms}ms)"
         );
     }
 }

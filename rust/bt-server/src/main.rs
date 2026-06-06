@@ -1,12 +1,12 @@
 //! BattleTris server: one binary that serves the web client (static files) AND
 //! the online backend on the SAME port —
-//!   * `GET /ws`        WebSocket: matchmaking (paired by TrueSkill match
-//!                      quality) and the SERVER-AUTHORITATIVE match itself — the
-//!                      server runs the deterministic engine (a [`bout::Bout`]),
-//!                      clients send inputs and reconcile against snapshots —
-//!                      plus result -> rating updates persisted to a JSON file.
-//!   * everything else  static files from `STATIC_DIR` (default `bt-wasm`,
-//!                      which holds `www/` and `pkg/`); `/` redirects to `/www/`.
+//!    * `GET /ws`        WebSocket: matchmaking (paired by TrueSkill match
+//!      quality) and the SERVER-AUTHORITATIVE match itself — the
+//!      server runs the deterministic engine (a [`bout::Bout`]),
+//!      clients send inputs and reconcile against snapshots —
+//!      plus result -> rating updates persisted to a JSON file.
+//!    * everything else  static files from `STATIC_DIR` (default `bt-wasm`,
+//!      which holds `www/` and `pkg/`); `/` redirects to `/www/`.
 //!
 //! Serving both on one port means the browser uses a same-origin
 //! `ws(s)://<host>/ws`, which works locally and behind fly.io's TLS.
@@ -556,9 +556,7 @@ fn try_match(app: &mut App, id: &str) -> Option<PendingBout> {
     // Scan all open candidates (queued or Available/Searching), de-duped.
     let candidates: Vec<String> = app
         .clients
-        .keys()
-        .cloned()
-        .filter(|cid| is_match_candidate(app, id, cid))
+        .keys().filter(|&cid| is_match_candidate(app, id, cid)).cloned()
         .collect();
     let mut best: Option<(String, f64)> = None;
     for cid in candidates {
@@ -873,7 +871,7 @@ async fn run_bout(state: Shared, pb: PendingBout) {
             }
             // Probe any still-connected side (~2Hz) so the expiry verdict stays
             // accurate if it ALSO drops while we wait (the client ignores this).
-            if frame % 32 == 0 {
+            if frame.is_multiple_of(32) {
                 let hb = json!({"type":"heartbeat"}).to_string();
                 if connected[0] { connected[0] = tx_a.send(Message::Text(hb.clone())).is_ok(); }
                 if connected[1] { connected[1] = tx_b.send(Message::Text(hb)).is_ok(); }
@@ -904,8 +902,8 @@ async fn run_bout(state: Shared, pb: PendingBout) {
         // client disconnect is detected (the send fails). A reconciliation keyframe
         // rides the first frame, the ~2Hz heartbeat, and any frame after an
         // unpredictable cross-player event, so corrections are prompt.
-        if frame % 2 == 0 {
-            let kf = want_keyframe || frame % 32 == 0;
+        if frame.is_multiple_of(2) {
+            let kf = want_keyframe || frame.is_multiple_of(32);
             if kf {
                 want_keyframe = false;
             }
@@ -940,7 +938,7 @@ async fn run_bout(state: Shared, pb: PendingBout) {
         }
         // Stream the read-only two-board view to spectators (~15Hz). A failed send
         // means the watcher closed the tab — drop them. No effect on the players.
-        if frame % 4 == 0 && !spectators.is_empty() {
+        if frame.is_multiple_of(4) && !spectators.is_empty() {
             let msg = bout.spectator_message(&name_a, &name_b);
             spectators.retain(|tx| tx.send(Message::Text(msg.clone())).is_ok());
         }
@@ -1496,7 +1494,7 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
         let aimed_here: Vec<String> = a
             .challenges
             .iter()
-            .filter_map(|(cid, (tid, _))| (tid == &id).then(|| cid.clone()))
+            .filter(|&(_cid, (tid, _))| tid == &id).map(|(cid, (_tid, _))| cid.clone())
             .collect();
         let by = a.clients.get(&id).map(|c| c.name.clone()).unwrap_or_default();
         for cid in aimed_here {
@@ -1722,6 +1720,8 @@ fn db_insert(conn: &Connection, id: &str, r: &Replay, json: &str, created_at: i6
 /// Store a server-recorded online (`Versus`) match. Same `replays` table — mode
 /// `"Online"`, `seed` = side A's seed; the `json` holds the full [`VersusReplay`]
 /// (two seeds + the ordered input stream), which the playback page detects.
+// 8 columns to persist; bundling them into a struct wouldn't earn its keep.
+#[allow(clippy::too_many_arguments)]
 fn db_insert_versus(
     conn: &Connection,
     id: &str,
@@ -1762,13 +1762,16 @@ fn db_get(conn: &Connection, id: &str) -> rusqlite::Result<Option<String>> {
         .optional()
 }
 
+/// A replay row's JSON plus its optional stored player names (`name_a`/`name_b`).
+type ReplayWithNames = (String, Option<String>, Option<String>);
+
 /// Fetch a recording's JSON plus its stored player names (an online VersusReplay row
 /// has `name_a`/`name_b`; practice/vs-computer rows leave them NULL). Used to label
 /// the single-replay viewer with the real names instead of "Player A/B".
 fn db_get_with_names(
     conn: &Connection,
     id: &str,
-) -> rusqlite::Result<Option<(String, Option<String>, Option<String>)>> {
+) -> rusqlite::Result<Option<ReplayWithNames>> {
     conn.query_row(
         "SELECT json, name_a, name_b FROM replays WHERE id = ?1",
         [id],

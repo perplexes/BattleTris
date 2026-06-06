@@ -229,6 +229,10 @@ impl Recorder {
 
 /// The engine being replayed — a lone game (practice / one PvP side) or a full
 /// vs-computer match (so Ernie is regenerated from the seed).
+// One Engine per ReplayPlayer (never in a hot array/Vec), so the ~2KB size gap
+// between a lone Game and a full VsComputer match is irrelevant — boxing both
+// variants would only add allocations + deref noise. clippy::large_enum_variant.
+#[allow(clippy::large_enum_variant)]
 enum Engine {
     Single(Game),
     Vs(VsComputer),

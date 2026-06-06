@@ -192,6 +192,9 @@ proptest! {
 
         // Lay the rows at the BOTTOM of the well (a realistic stack).
         let n = masks.len().min(h);
+        // `i` also drives row arithmetic `(h - n + i)` and indexes `force_full`, so a
+        // bare iterator over `masks` wouldn't carry the index we need.
+        #[allow(clippy::needless_range_loop)]
         for i in 0..n {
             let y = (h - n + i) as i32;
             let mut mask = masks[i] & full;
@@ -221,7 +224,7 @@ proptest! {
         // Survivors (non-full rows, top->bottom) end bottom-aligned with empty pad on top.
         let kept: Vec<u32> = before.iter().copied().filter(|&r| r != full).collect();
         let pad = h - kept.len();
-        let expected: Vec<u32> = std::iter::repeat(0u32).take(pad).chain(kept).collect();
+        let expected: Vec<u32> = std::iter::repeat_n(0u32, pad).chain(kept).collect();
         prop_assert_eq!(after, expected, "rows did not shift down in order");
     }
 }

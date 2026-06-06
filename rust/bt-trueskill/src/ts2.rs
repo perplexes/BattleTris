@@ -227,10 +227,7 @@ mod tests {
     /// adjustments, `rate_match` must equal the classic `rate_1v1`.
     #[test]
     fn reduces_to_classic_when_lines_disabled() {
-        let mut p = Ts2Params::default();
-        p.perf_lambda = 0.0;
-        p.experience_bump = 0.0;
-        p.quit_penalty = 0.0;
+        let p = Ts2Params { perf_lambda: 0.0, experience_bump: 0.0, quit_penalty: 0.0, ..Default::default() };
 
         let r = p.base.new_rating();
         let a = PlayerState::new(r);

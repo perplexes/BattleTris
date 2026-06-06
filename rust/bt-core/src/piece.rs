@@ -331,6 +331,10 @@ impl Piece {
         }
     }
 
+    // `i`/`j` here are the rotation COORDINATES, not mere indices: they drive the
+    // `self.cells[j][rot-1-i]` transform and `board.occupied(self.x + i, self.y + j)`.
+    // An iterator rewrite would obscure the 2D rotation math, so keep the index loops.
+    #[allow(clippy::needless_range_loop)]
     fn rotate_generic(&mut self, board: &Board, reverse: bool) -> bool {
         if self.rot == 0 {
             return false;

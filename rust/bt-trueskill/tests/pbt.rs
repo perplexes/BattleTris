@@ -122,10 +122,8 @@ proptest! {
         w_lines in line_count(),
         l_lines in line_count(),
     ) {
-        let mut p = Ts2Params::default();
-        p.experience_bump = 0.0;
-        p.quit_penalty = 0.0;
-        p.perf_lambda = 0.0; // disable lines signal — pure win/loss
+        // disable lines signal (perf_lambda) — pure win/loss
+        let p = Ts2Params { experience_bump: 0.0, quit_penalty: 0.0, perf_lambda: 0.0, ..Default::default() };
 
         let a = PlayerState::new(w);
         let b = PlayerState::new(l);

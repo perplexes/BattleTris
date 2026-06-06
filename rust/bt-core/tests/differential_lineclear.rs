@@ -1,8 +1,8 @@
 //! Differential test for line-clearing + gravity — the most fundamental, and
 //! most off-by-one-prone, game rule.
 //!
-//! `Board::check_lines` is the faithful analogue of `BTBoardManager::checkLines`
-//! + `removeLine` (BTBoardManager.C:551-617, 311-...). Real FFI against the 1994
+//! `Board::check_lines` is the faithful analogue of `BTBoardManager::checkLines` +
+//! `removeLine` (BTBoardManager.C:551-617, 311-...). Real FFI against the 1994
 //! C++ is impractical — those functions are tangled with X11/Motif, packet
 //! `send()`s and display redraws. So instead this file carries an INDEPENDENT,
 //! deliberately naive reference implementation (operating on a plain
