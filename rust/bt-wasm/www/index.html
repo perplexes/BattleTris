@@ -23,21 +23,22 @@
         <div class="lobby-card">
             <!-- LEFT: player list (top) + Play Computer frame (bottom) -->
             <div class="lobby-left">
-                <div class="lobby-listbox">
-                    <div class="lobby-listbox-head">Players online</div>
-                    <div id="onlineList" class="lobby-list">
-                        <div class="lobby-list-empty">No one's around. Go "Open to matches" and wait, or Play Computer.</div>
-                    </div>
-                </div>
-
                 <!-- Your identity. Always visible + editable so you can never get
                      stuck without a way to set a name (the old prompt-only flow
-                     could wedge). This is your leaderboard name for online play. -->
+                     could wedge). This is your leaderboard name for online play.
+                     Sits directly above the "Players online" list — you, then them. -->
                 <div class="lobby-identity">
                     <label class="lobby-identity-label" for="nameInput">You:</label>
                     <input id="nameInput" class="lobby-name-input" type="text" maxlength="20"
                            autocomplete="off" spellcheck="false" placeholder="set a name to play online">
                     <span id="nameHint" class="lobby-name-hint"></span>
+                </div>
+
+                <div class="lobby-listbox">
+                    <div class="lobby-listbox-head">Players online</div>
+                    <div id="onlineList" class="lobby-list">
+                        <div class="lobby-list-empty">No one's around. Go "Open to matches" and wait, or Play Computer.</div>
+                    </div>
                 </div>
 
                 <fieldset class="lobby-frame">

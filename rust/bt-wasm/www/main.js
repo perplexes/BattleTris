@@ -372,8 +372,18 @@ function pressUpdate() {
 }
 
 // Challenge the selected player (directed). Needs a signed identity first.
+// Shown when you try to challenge yourself (you appear in your own roster while
+// "Open to matches"). A list so it's easy to add more later; one for now.
+const SELF_CHALLENGE_GAGS = [
+    "There's only one of you, and that one is busy reading this.",
+];
+
 async function challengeSelected() {
     if (!selectedPlayer) return;
+    if (selectedPlayer === playerName) {
+        showToast(SELF_CHALLENGE_GAGS[Math.floor(Math.random() * SELF_CHALLENGE_GAGS.length)], 4500);
+        return;
+    }
     if (!await ensureIdentity()) return; // need a name/token first (field is focused)
     if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'challenge', target: selectedPlayer, name: playerName, token: identityToken }));
