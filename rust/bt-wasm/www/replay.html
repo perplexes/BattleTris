@@ -61,6 +61,23 @@
                 </label>
             </div>
 
+            <!-- Debug controls (?debug=1): single-step, jump-to-tick, the raw input
+                 stream at the current tick, and copy-state. -->
+            <div id="replayDebug" class="replay-debug" style="display:none;">
+                <div class="replay-debug-row">
+                    <button id="replayStep" class="bug-btn">&#9197; Step</button>
+                    <label class="replay-jump">Tick
+                        <input id="replayJump" type="number" min="0" value="0" class="replay-jump-input">
+                    </label>
+                    <button id="replayGo" class="bug-btn">Go</button>
+                    <button id="replayCopy" class="bug-btn">Copy state</button>
+                </div>
+                <div class="replay-debug-inputs">
+                    <span class="rd-h">Inputs @ tick <span id="replayDebugTick">0</span>:</span>
+                    <span id="replayDebugInputs" class="rd-inputs">&mdash;</span>
+                </div>
+            </div>
+
             <!-- Weapon event log: scrolls "<player> launched <weapon>" as launches
                  fire during playback (online matches; hidden for practice). -->
             <div id="replayEventLog" class="replay-eventlog" style="display:none;">

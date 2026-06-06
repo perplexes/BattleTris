@@ -706,6 +706,19 @@ impl WasmVersusReplayPlayer {
         }
         out
     }
+
+    /// The raw input frames recorded AT `tick`, each as "A: <Input>" / "B: <Input>"
+    /// (Debug-formatted). Drives the replay debug "input stream" panel — what each
+    /// side actually did on that tick.
+    pub fn inputs_at_tick(&self, tick: u32) -> Vec<String> {
+        self.inner
+            .replay()
+            .frames
+            .iter()
+            .filter(|f| f.tick == tick)
+            .map(|f| format!("{}: {:?}", if f.side == 0 { "A" } else { "B" }, f.input))
+            .collect()
+    }
     pub fn seek(&mut self, tick: u32) {
         self.inner.seek(tick);
     }

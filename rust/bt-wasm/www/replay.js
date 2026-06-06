@@ -42,6 +42,8 @@ function versusAdapter(vp, names) {
         // Weapon launches from the most recent step(), flat [side, token, …].
         recentLaunches: () => Array.from(vp.recent_launches()),
         hasEvents: () => true,
+        // Raw input frames at a tick ("A: MoveLeft", …) for the debug panel.
+        inputsAtTick: (t) => Array.from(vp.inputs_at_tick(t)),
         hud,
     };
 }
@@ -73,6 +75,7 @@ function singleAdapter(sp) {
         labelB: () => 'Ernie',
         recentLaunches: () => [],
         hasEvents: () => false,
+        inputsAtTick: () => [],
         hud: (a) => a ? {
             score: sp.score(), lines: sp.lines(), funds: sp.funds(),
             linesTil: sp.lines_til_bazaar(), inBazaar: sp.is_in_bazaar(),
@@ -102,6 +105,14 @@ const metaEl = document.getElementById('replayMeta');
 const errBox = document.getElementById('replayError');
 const eventLogEl = document.getElementById('replayEventLog');
 const eventLogBodyEl = document.getElementById('replayEventLogBody');
+const debugEl = document.getElementById('replayDebug');
+const debugInputsEl = document.getElementById('replayDebugInputs');
+const debugTickEl = document.getElementById('replayDebugTick');
+const stepBtn = document.getElementById('replayStep');
+const jumpInput = document.getElementById('replayJump');
+const goBtn = document.getElementById('replayGo');
+const copyBtn = document.getElementById('replayCopy');
+const debugMode = new URLSearchParams(location.search).get('debug') === '1';
 
 let player = null;
 let playing = false;
@@ -217,6 +228,35 @@ function clearEventLog() {
     if (eventLogBodyEl) eventLogBodyEl.innerHTML = '';
 }
 
+// ── Replay debug controls (?debug=1) ─────────────────────────────────────────
+function updateInputStream() {
+    if (!debugMode || !debugInputsEl) return;
+    const tick = player.tick_index();
+    if (debugTickEl) debugTickEl.textContent = tick;
+    const inputs = player.inputsAtTick ? player.inputsAtTick(tick) : [];
+    debugInputsEl.textContent = inputs.length ? inputs.join('    ') : '—';
+}
+function stepOne() {
+    setPlaying(false);
+    if (player.step()) captureLaunches();
+    renderFrame();
+}
+function jumpTo(t) {
+    setPlaying(false);
+    player.seek(Math.max(0, Math.min(player.tick_count(), t | 0)));
+    clearEventLog();
+    renderFrame();
+}
+async function copyState() {
+    const state = {
+        tick: player.tick_index(), tick_count: player.tick_count(), result: player.result(),
+        a: player.hud(true), b: player.hud(false),
+        inputs: player.inputsAtTick ? player.inputsAtTick(player.tick_index()) : [],
+    };
+    try { await navigator.clipboard.writeText(JSON.stringify(state, null, 2)); } catch (_) {}
+    if (copyBtn) { copyBtn.textContent = 'Copied!'; setTimeout(() => { copyBtn.textContent = 'Copy state'; }, 1200); }
+}
+
 function renderFrame() {
     drawBoard(ctx, player.render_grid(), player.width(), player.height());
     const ha = player.hud(true);
@@ -231,6 +271,7 @@ function renderFrame() {
     }
     seek.value = player.tick_index();
     tickLabel.textContent = `${player.tick_index()} / ${player.tick_count()}`;
+    if (debugMode) updateInputStream();
 }
 
 function setPlaying(p) {
@@ -338,6 +379,17 @@ function resultText(r, mode) {
         clearEventLog();
         renderFrame();
     });
+
+    // Debug controls (?debug=1): single-step, jump-to-tick, copy-state.
+    if (debugMode && debugEl) {
+        debugEl.style.display = '';
+        if (jumpInput) jumpInput.max = player.tick_count();
+        if (stepBtn) stepBtn.addEventListener('click', stepOne);
+        if (goBtn) goBtn.addEventListener('click', () => jumpTo(parseInt(jumpInput.value, 10) || 0));
+        if (jumpInput) jumpInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') jumpTo(parseInt(jumpInput.value, 10) || 0); });
+        if (copyBtn) copyBtn.addEventListener('click', copyState);
+        updateInputStream();
+    }
 
     requestAnimationFrame(loop);
 })();

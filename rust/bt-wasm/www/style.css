@@ -1353,6 +1353,28 @@ body.bazaar-open #touchControls { display: none !important; }
 .replay-eventlog .rel-side-1 .rel-who { color: #b00000; font-weight: bold; }
 .replay-eventlog .rel-row b { color: #006000; }
 
+/* Replay debug controls (?debug=1): step / jump-to-tick / copy-state + the raw
+   input stream at the current tick. */
+.replay-debug {
+    width: min(90vw, 560px);
+    display: flex; flex-direction: column; gap: 8px;
+    padding: 8px 10px;
+    background: #c8c8c8;
+    border: 2px solid #808080;
+    border-top-color: #fff; border-left-color: #fff;
+    border-bottom-color: #000; border-right-color: #000;
+}
+.replay-debug-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.replay-jump { font-size: 12px; color: #333; display: flex; align-items: center; gap: 4px; }
+.replay-jump-input {
+    width: 6em; font-family: inherit; font-size: 12px; padding: 2px 4px;
+    background: #fff; border: 2px solid #808080;
+    border-top-color: #000; border-left-color: #000; border-bottom-color: #fff; border-right-color: #fff;
+}
+.replay-debug-inputs { font-family: 'lucidatypewriter', monospace; font-size: 12px; color: #222; }
+.replay-debug-inputs .rd-h { color: #0000ff; font-weight: bold; margin-right: 6px; }
+.replay-debug-inputs .rd-inputs { color: #006000; word-break: break-word; }
+
 /* Live-match spectator: the debug picker list. */
 .spectate-list { width: min(92vw, 560px); }
 .spectate-title { color: #0000ff; font-size: 18px; margin: 8px 0; text-align: center; }
