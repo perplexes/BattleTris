@@ -229,7 +229,6 @@ function selectPlayer(name) {
 // remove it, we gave it a personality: each press advances an escalating bit on the
 // futility of manual refresh in a push world. (It loops.)
 const UPDATE_GAGS = [
-    // The original escalating bit.
     'You press UPDATE. Nothing happens.',
     'You press UPDATE again. Still nothing happens.',
     'You press UPDATE yet again and meditate on the nature of nothing.',
@@ -239,23 +238,6 @@ const UPDATE_GAGS = [
     'Some sort of socket.',
     'Some sort of socket for the web.',
     'XMLHttpRequest rolls off the tongue.',
-    // Then it descends into a 90s point-and-click adventure.
-    '> USE UPDATE ON WEBSOCKET. They are already together; it would be weird.',
-    '> EXAMINE UPDATE. A button. It believes, against all evidence, that it has a job.',
-    'I do not understand "press update." Please rephrase using a verb I recognize.',
-    '> PICK UP UPDATE. Taken. Your inventory now contains one (1) button that does nothing.',
-    '> TALK TO UPDATE. It says, "I remember when people needed me."',
-    '> PULL UPDATE. A distant click echoes somewhere. It had nothing to do with you.',
-    '*** You have wandered into an unwinnable state. *** Restore? Restart? (You never saved.)',
-    'Please insert Disk 2 to continue. There is no Disk 2. There was never a Disk 2.',
-    '> LOOK BEHIND YOU. The roster quietly updated itself while you were not watching.',
-    '> OPEN UPDATE. It is already Open To Matches. So, it seems, are you.',
-    'Pixel-hunt successful: you have located the one hotspot in this room that does nothing on purpose.',
-    '> GIVE UPDATE TO PLAYER. They do not want it. The websocket already delivered.',
-    'You sense a puzzle here. There is no puzzle. There is only the button, and the void.',
-    'You have died. Cause of death: pressing UPDATE. Continue from last checkpoint? (what checkpoint)',
-    'The verb coin spins — Look, Push, Pull, Use — and every choice leads back to this button.',
-    'A grizzled NPC blocks the path. "Ye cannot refresh what is already fresh," he grunts, and says no more.',
 ];
 let updateGagIdx = 0;
 function pressUpdate() {
