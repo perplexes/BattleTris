@@ -432,6 +432,23 @@ body {
     background-color: #c0c0c0;
 }
 
+/* Mobile long-press hardening: these are buttons/controls, not text — a press-and-hold
+   (e.g. holding the touch D-pad to repeat-move, or a weapon button) must trigger the
+   game action, never text selection or the iOS/Android copy-define callout. NOTE:
+   `user-select: none` alone does NOT suppress the iOS long-press callout — that needs
+   `-webkit-touch-callout: none`, which was missing. The `:active` bevel still gives
+   tap feedback, so we also drop the default grey tap-highlight flash. */
+button,
+.touch-btn,
+.arsenal-item,
+.mobile-arsenal-slot,
+.bazaar-arsenal-slot {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+}
+
 /* ─── AI board panel ──────────────────────────────────────────────────────── */
 .ai-label {
     text-align: center;
