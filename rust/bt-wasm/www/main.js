@@ -226,18 +226,19 @@ function selectPlayer(name) {
 // The `players` roster is PUSHED live over the websocket on every change (see the
 // `players` handler in onSignalMessage), so the UPDATE button has no work to do — the
 // 1994 client needed it because it PULLED the roster; we don't. So instead it does a
-// bit. The first 9 presses are the original escalating gag IN ORDER; after that it's
-// a random draw from the pool. A few entries are dynamic — the live press count, a
-// running "speedrun" timer, a self-referential array index. Past one threshold it
-// gets concerned about you; past a higher one it grants a real, saved achievement.
-const UPDATE_INTRO_LEN = 9;
+// bit. The original escalating gag is a one-shot SEQUENCE that leads (you can't drop
+// into its middle); after it, a random draw from the pool. Sequences (the intro, the
+// infomercial) play whole, in order, and only ONCE. A few entries are dynamic — the
+// live press count, a running "speedrun" timer, a self-referential index. Past one
+// threshold it gets concerned about you; past a higher one it grants a saved achievement.
 const UPDATE_CONCERNED_AFTER = 25; // the "we are concerned" line only after this many
 const UPDATE_ACHIEVEMENT_AT = 50;  // press count that unlocks the achievement (once, persisted)
 function gagOrdinal(n) { const s = ['th', 'st', 'nd', 'rd'], v = n % 100; return n + (s[(v - 20) % 10] || s[v] || s[0]); }
 function gagElapsed(ms) { const t = Math.max(0, Math.floor(ms / 1000)); return Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0'); }
 
-const UPDATE_GAGS = [
-    // ── The original escalating bit (presses 1–9, in order). ──
+// The opening sequence (the original escalating bit). Plays once, in order, the moment
+// you first press; it's NOT in the random pool, so it can never surface mid-way.
+const UPDATE_INTRO = [
     'You press UPDATE. Nothing happens.',
     'You press UPDATE again. Still nothing happens.',
     'You press UPDATE yet again and meditate on the nature of nothing.',
@@ -247,7 +248,12 @@ const UPDATE_GAGS = [
     'Some sort of socket.',
     'Some sort of socket for the web.',
     'XMLHttpRequest rolls off the tongue.',
-    // ── The pool (random after press 9). Functions/objects are dynamic. ──
+];
+
+// The pool drawn from after the intro. Standalone entries repeat; a `{seq}` is a
+// one-shot sequence (plays whole, in order, then never again — and since only the
+// unit sits in the pool, you can never land on a sequence's middle).
+const UPDATE_GAGS = [
     'You press UPDATE harder. The nothing intensifies.',
     'Nothing happened. But you grew, a little, as a person.',
     'You press UPDATE. There is no undo without a do.',
@@ -283,9 +289,13 @@ const UPDATE_GAGS = [
     'You could be playing a game right now. Just saying.',
     'Anyway.',
     "Cool. Cool cool cool. Nothing's happening, but cool.",
-    "But WAIT — there's still nothing! Press again for even less!",
-    'For three easy payments of nothing, this button is yours.',
-    'Order now and receive a SECOND nothing, free.',
+    // A sequence: once entered, all of it plays in order (the bit only lands as a set
+    // — "a SECOND nothing" needs a first). See `seq` handling in pressUpdate.
+    { seq: [
+        "But WAIT — there's still nothing! Press again for even less!",
+        'For three easy payments of nothing, this button is yours.',
+        'Order now and receive a SECOND nothing, free.',
+    ] },
     "You can't refresh what's already whole.",
     "Today's affirmation: I am already up to date.",
     "Chef's note: this button is purely garnish.",
@@ -301,33 +311,64 @@ const UPDATE_GAGS = [
 ];
 
 let updatePresses = 0, updateFirstMs = 0;
+let updateSeq = null;                // { list, pos } while a sequence is playing
+let updateIntroDone = false;         // the opening sequence is one-shot
+const updatePlayedSeq = new Set();   // pool indices of one-shot sequences already run
 function updateAchUnlocked() { try { return localStorage.getItem('bt_ach_update') === '1'; } catch (_) { return false; } }
+function resolveGag(e, ctx) { return typeof e === 'function' ? e(ctx) : (e && e.fn ? e.fn(ctx) : e); }
 function pressUpdate() {
     updatePresses++;
     if (!updateFirstMs) updateFirstMs = Date.now();
-    // A real, saved achievement the first time you cross the threshold.
-    if (updatePresses === UPDATE_ACHIEVEMENT_AT && !updateAchUnlocked()) {
+    const ctx = { n: updatePresses, elapsed: Date.now() - updateFirstMs, idx: 0 };
+
+    // A sequence in progress runs to its end — never interrupted, never re-entered.
+    if (updateSeq) {
+        const e = updateSeq.list[updateSeq.pos++];
+        if (updateSeq.pos >= updateSeq.list.length) updateSeq = null;
+        showToast(resolveGag(e, ctx), 4500);
+        return;
+    }
+
+    // The intro is a one-shot sequence that leads.
+    if (!updateIntroDone) {
+        updateIntroDone = true;
+        if (UPDATE_INTRO.length > 1) updateSeq = { list: UPDATE_INTRO, pos: 1 };
+        showToast(resolveGag(UPDATE_INTRO[0], ctx), 4500);
+        return;
+    }
+
+    // A real, saved achievement the first time you cross the threshold (>= so a
+    // sequence that straddled the mark can't make it miss).
+    if (updatePresses >= UPDATE_ACHIEVEMENT_AT && !updateAchUnlocked()) {
         try { localStorage.setItem('bt_ach_update', '1'); } catch (_) {}
         showToast('🏆 Achievement Unlocked — "Pressed UPDATE more than anyone reasonably should"', 6000);
         return;
     }
-    // First 9 in order (the escalation); then a random draw, re-rolling past any entry
-    // still gated behind a press threshold.
-    let i;
-    if (updatePresses <= UPDATE_INTRO_LEN) {
-        i = updatePresses - 1;
-    } else {
-        i = UPDATE_INTRO_LEN;
-        for (let tries = 0; tries < 25; tries++) {
-            const j = Math.floor(Math.random() * UPDATE_GAGS.length);
-            const e = UPDATE_GAGS[j];
-            if (e && e.after && updatePresses < e.after) continue;
-            i = j; break;
-        }
+
+    // Random draw from the pool, skipping threshold-gated entries and any one-shot
+    // sequence that has already run.
+    let i = -1;
+    for (let tries = 0; tries < 30; tries++) {
+        const j = Math.floor(Math.random() * UPDATE_GAGS.length);
+        const e = UPDATE_GAGS[j];
+        if (e && e.after && updatePresses < e.after) continue;
+        if (e && e.seq && updatePlayedSeq.has(j)) continue;
+        i = j; break;
     }
-    const ctx = { n: updatePresses, elapsed: Date.now() - updateFirstMs, idx: i };
+    if (i < 0) { // everything eligible was gated/spent — fall back to a plain entry
+        i = UPDATE_GAGS.findIndex((e) => !(e && (e.seq || e.after)));
+        if (i < 0) i = 0;
+    }
+    ctx.idx = i;
     const e = UPDATE_GAGS[i];
-    showToast(typeof e === 'function' ? e(ctx) : (e && e.fn ? e.fn(ctx) : e), 4500);
+    // Start a one-shot sequence: play its first message now, the rest on later presses.
+    if (e && e.seq) {
+        updatePlayedSeq.add(i);
+        updateSeq = { list: e.seq, pos: 1 };
+        showToast(resolveGag(e.seq[0], ctx), 4500);
+        return;
+    }
+    showToast(resolveGag(e, ctx), 4500);
 }
 
 // Challenge the selected player (directed). Needs a signed identity first.

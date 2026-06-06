@@ -1413,7 +1413,10 @@ body.bazaar-open #touchControls { display: none !important; }
     z-index: 300;
     display: none;
     max-width: 90vw;
-    word-break: break-all;
+    /* Wrap at spaces (whole words), not mid-letter; a long token with no spaces
+       (e.g. a share-link URL) still breaks, but only when it would overflow. */
+    word-break: normal;
+    overflow-wrap: anywhere;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
 }
 
