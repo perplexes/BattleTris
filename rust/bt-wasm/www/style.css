@@ -180,6 +180,26 @@ body {
     text-shadow: 3px 3px 0 #8b0000;
     letter-spacing: 4px;
 }
+/* In-game debug overlay (?debug=1 / backtick): a monospace HUD pinned to the
+   corner of the playfield. pointer-events:none so it never blocks the board. */
+.debug-overlay {
+    position: fixed;
+    top: 48px;
+    left: 8px;
+    z-index: 9999;
+    margin: 0;
+    padding: 8px 10px;
+    background: rgba(0, 0, 0, 0.82);
+    color: #4ee44e;
+    font-family: 'lucidatypewriter', monospace;
+    font-size: 11px;
+    line-height: 1.45;
+    white-space: pre;
+    border: 1px solid #2a2;
+    pointer-events: none;
+    max-width: 46ch;
+}
+
 /* The reconnect/forfeit-countdown overlay reuses .game-over-text but is a status
    message (two lines), so it's smaller and renders its newline. */
 #reconnectText {

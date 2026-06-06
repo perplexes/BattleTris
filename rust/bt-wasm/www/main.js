@@ -30,6 +30,7 @@ let searching = false;    // background matchmaking in progress (queued, not yet
 // full game state and re-applying its not-yet-acknowledged inputs.
 let authoritative = false; // true during a server-authoritative online match
 let currentMatchId = null; // the live bout's id; parked in the URL for rejoin-on-refresh
+let currentSeed = null;    // the game's RNG seed (shown in the debug overlay)
 let inputSeq = 0;          // monotonic client input counter
 let unackedInputs = [];    // [{seq, repr}] sent to the server, not yet acked
 let authSelf = null;       // latest authoritative own-status {funds,in_bazaar,lines_til_bazaar}
@@ -708,7 +709,8 @@ function enterAuthoritativeGame(msg) {
     updateModeButtons();
     showGame();
 
-    game = new WasmGame((msg.seed >>> 0));
+    currentSeed = msg.seed >>> 0;
+    game = new WasmGame(currentSeed);
     resetMatchState();
     inputSeq = 0;
     unackedInputs = [];
@@ -955,6 +957,7 @@ function startGame(newMode) {
     mode = newMode;
 
     const seed = (performance.now() | 0) ^ (Math.floor(Math.random() * 1e9));
+    currentSeed = seed >>> 0;
 
     // Create game instance based on mode
     if (mode === 'vscomputer') {
@@ -1338,6 +1341,55 @@ function processEvents() {
     }
 }
 
+// ─── Debug overlay (internal state on the playfield) ─────────────────────────
+// Off by default; ?debug=1 or the backtick key toggles it. A diagnostic surface
+// for netcode/desync work: tick/seed/match, prediction-vs-server drift, unacked
+// inputs, and active weapons + remaining lines.
+const debugOverlayEl = document.getElementById('debugOverlay');
+let debugOn = new URLSearchParams(location.search).get('debug') === '1';
+window.addEventListener('keydown', (e) => {
+    if (e.key === '`') {
+        debugOn = !debugOn;
+        if (!debugOn && debugOverlayEl) debugOverlayEl.style.display = 'none';
+    }
+});
+function updateDebugOverlay() {
+    if (!debugOverlayEl) return;
+    if (!debugOn || lobbyActive || !game) { debugOverlayEl.style.display = 'none'; return; }
+    debugOverlayEl.style.display = '';
+    const L = [];
+    L.push('▟ DEBUG  (` toggles)');
+    L.push(`mode=${mode} auth=${authoritative} ended=${gameEnded}`);
+    if (authoritative) L.push(`onlinePaused=${onlinePaused}`);
+    if (currentMatchId) L.push(`match=${currentMatchId}`);
+    if (currentSeed != null) L.push(`seed=${currentSeed}`);
+    L.push(`inputSeq=${inputSeq} unacked=${unackedInputs.length}`);
+    try {
+        L.push(`local you: score=${game.score()} lines=${game.lines()} funds=${game.funds()} tilBaz=${game.lines_til_bazaar()} baz=${game.is_in_bazaar()} result=${game.result()}`);
+        L.push(`local opp: score=${game.op_score()} lines=${game.op_lines()}`);
+    } catch (_) {}
+    if (authoritative && authSelf) {
+        L.push(`srv you: funds=${authSelf.funds} baz=${authSelf.in_bazaar} tilBaz=${authSelf.lines_til_bazaar}`);
+    }
+    if (authoritative && authOpp) {
+        L.push(`srv opp: score=${authOpp.score} lines=${authOpp.lines} over=${authOpp.game_over}`);
+        try {
+            const drift = game.op_score() - authOpp.score;
+            if (drift !== 0) L.push(`  ⚠ opp-score drift=${drift}`);
+        } catch (_) {}
+    }
+    if (authoritative) L.push(`spying=${authSpying}`);
+    try {
+        const active = [];
+        const max = (typeof max_weapons === 'function') ? max_weapons() : 34;
+        for (let t = 0; t < max; t++) {
+            if (game.weapon_active(t)) active.push(`${weapon_name(t)}(${game.weapon_remaining(t)})`);
+        }
+        L.push('weapons: ' + (active.length ? active.join(', ') : '—'));
+    } catch (_) {}
+    debugOverlayEl.textContent = L.join('\n');
+}
+
 function gameLoop(now) {
     // While the lobby is showing there is nothing to tick or render.
     if (lobbyActive || !game) {
@@ -1404,6 +1456,7 @@ function gameLoop(now) {
     updateOpponentPanel();
     updateArsenalPanel();
     updateBazaarOverlay();
+    updateDebugOverlay();
 
     // When an opponent board is visible (vs-Computer Ernie, or an online spy),
     // mark the game-area so the mobile layout puts the two boards side by side

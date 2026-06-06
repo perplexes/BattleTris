@@ -94,6 +94,10 @@
     <!-- ════════════════════ GAME SCREEN (BTGame.C) ════════════════════ -->
     <div id="gameScreen" class="screen game-screen" style="display:none;">
 
+        <!-- Debug overlay: internal state (tick, seed, weapons, prediction drift).
+             Off by default; toggle with the backtick key or ?debug=1. -->
+        <pre id="debugOverlay" class="debug-overlay" style="display:none;"></pre>
+
         <!-- In-game top bar: always visible so you can bail out of a game (the
              desktop Leave/New Game column is hidden on mobile) and flip your
              match availability without trekking back to the lobby — handy when

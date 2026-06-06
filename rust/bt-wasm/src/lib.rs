@@ -179,6 +179,11 @@ impl WasmGame {
     pub fn weapon_active(&self, token: i32) -> bool {
         WeaponToken::from_index(token).map_or(false, |t| self.inner.weapon_active(t))
     }
+    /// Lines of duration left on weapon `token` (0 = inactive/expired/instant).
+    /// Used by the in-game debug overlay to show active-weapon countdowns.
+    pub fn weapon_remaining(&self, token: i32) -> i32 {
+        WeaponToken::from_index(token).map_or(0, |t| self.inner.weapon_remaining(t))
+    }
     /// Force a weapon off (online Swap clears Bottle/Upbyside on both sides).
     pub fn force_weapon_off(&mut self, token: i32) {
         if let Some(t) = WeaponToken::from_index(token) {
