@@ -224,11 +224,20 @@ function selectPlayer(name) {
 }
 
 // The `players` roster is PUSHED live over the websocket on every change (see the
-// `players` handler in onSignalMessage), so the Update button has no work to do —
-// the 1994 client needed it because it PULLED the roster; we don't. Rather than
-// remove it, we gave it a personality: each press advances an escalating bit on the
-// futility of manual refresh in a push world. (It loops.)
+// `players` handler in onSignalMessage), so the UPDATE button has no work to do — the
+// 1994 client needed it because it PULLED the roster; we don't. So instead it does a
+// bit. The first 9 presses are the original escalating gag IN ORDER; after that it's
+// a random draw from the pool. A few entries are dynamic — the live press count, a
+// running "speedrun" timer, a self-referential array index. Past one threshold it
+// gets concerned about you; past a higher one it grants a real, saved achievement.
+const UPDATE_INTRO_LEN = 9;
+const UPDATE_CONCERNED_AFTER = 25; // the "we are concerned" line only after this many
+const UPDATE_ACHIEVEMENT_AT = 50;  // press count that unlocks the achievement (once, persisted)
+function gagOrdinal(n) { const s = ['th', 'st', 'nd', 'rd'], v = n % 100; return n + (s[(v - 20) % 10] || s[v] || s[0]); }
+function gagElapsed(ms) { const t = Math.max(0, Math.floor(ms / 1000)); return Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0'); }
+
 const UPDATE_GAGS = [
+    // ── The original escalating bit (presses 1–9, in order). ──
     'You press UPDATE. Nothing happens.',
     'You press UPDATE again. Still nothing happens.',
     'You press UPDATE yet again and meditate on the nature of nothing.',
@@ -238,11 +247,87 @@ const UPDATE_GAGS = [
     'Some sort of socket.',
     'Some sort of socket for the web.',
     'XMLHttpRequest rolls off the tongue.',
+    // ── The pool (random after press 9). Functions/objects are dynamic. ──
+    'You press UPDATE harder. The nothing intensifies.',
+    'Nothing happened. But you grew, a little, as a person.',
+    'You press UPDATE. There is no undo without a do.',
+    'You press UPDATE and achieve a brief, perfect emptiness.',
+    'The button thanks you for the attention.',
+    'You press UPDATE. The absence of news continues to develop.',
+    'You poll. The server already pushed. You poll anyway.',
+    'The data arrived 30 times a second. You pressed once. Bold.',
+    '> EXAMINE UPDATE. A button, convinced it has a job.',
+    '> PICK UP UPDATE. Taken. Inventory: one (1) button that does nothing.',
+    '> TALK TO UPDATE. "I remember when people needed me," it says.',
+    'Please insert Disk 2.',
+    'A grizzled NPC blocks the path: "Ye cannot refresh what is already fresh."',
+    '> OPEN UPDATE. It is already Open To Matches. So, it seems, are you.',
+    'Thank you for your update. It has been carefully ignored.',
+    'The button would like you to know it is trying its best.',
+    'We kept this button for emotional reasons.',
+    'Please rate your nothing: ☆☆☆☆☆',
+    (c) => `The Count counts your presses: ${c.n}. The Count is delighted.`,
+    "The button is empty, and so are you, and that's alright.",
+    'To press is human; to do nothing, divine.',
+    'There is no refresh. There is only the eternal now of the open socket.',
+    { after: UPDATE_CONCERNED_AFTER, fn: (c) => `You press UPDATE for the ${gagOrdinal(c.n)} time. We are a little concerned.` },
+    'You press UPDATE. It has started a journal. You are in it.',
+    'You press UPDATE. Okay. We get it. You like the button.',
+    (c) => `UPDATE any% WR: ${gagElapsed(c.elapsed)}`,
+    'We value your press. Please continue to hold for nothing.',
+    'In a rare display, the user presses again. The button does not flee.',
+    'Mercury is in retrograde. The websocket is fine.',
+    () => 'Best viewed in ' + (Math.random() < 0.5 ? 'Netscape Navigator' : 'NCSA Mosaic') + '.',
+    'This button is under construction.',
+    'The button no longer dreams of working. The button is free.',
+    'You could be playing a game right now. Just saying.',
+    'Anyway.',
+    "Cool. Cool cool cool. Nothing's happening, but cool.",
+    "But WAIT — there's still nothing! Press again for even less!",
+    'For three easy payments of nothing, this button is yours.',
+    'Order now and receive a SECOND nothing, free.',
+    "You can't refresh what's already whole.",
+    "Today's affirmation: I am already up to date.",
+    "Chef's note: this button is purely garnish.",
+    'Somewhere, a different button does something. Not this one. Be at peace.',
+    "Entropy increased very slightly. You're welcome, universe.",
+    'You contain multitudes. The button contains a single event listener.',
+    'The heat death of the universe is now marginally closer. Worth it?',
+    'Someone wrote this message instead of removing the button.',
+    (c) => `This is the ${gagOrdinal(c.idx + 1)} thing the button can say and zero things it can do.`,
+    'A developer is watching you press this. They are not okay.',
+    "That's a lot of presses.",
+    'We admire the commitment. We worry about the commitment.',
 ];
-let updateGagIdx = 0;
+
+let updatePresses = 0, updateFirstMs = 0;
+function updateAchUnlocked() { try { return localStorage.getItem('bt_ach_update') === '1'; } catch (_) { return false; } }
 function pressUpdate() {
-    showToast(UPDATE_GAGS[updateGagIdx % UPDATE_GAGS.length], 4500);
-    updateGagIdx++;
+    updatePresses++;
+    if (!updateFirstMs) updateFirstMs = Date.now();
+    // A real, saved achievement the first time you cross the threshold.
+    if (updatePresses === UPDATE_ACHIEVEMENT_AT && !updateAchUnlocked()) {
+        try { localStorage.setItem('bt_ach_update', '1'); } catch (_) {}
+        showToast('🏆 Achievement Unlocked — "Pressed UPDATE more than anyone reasonably should"', 6000);
+        return;
+    }
+    // First 9 in order (the escalation); then a random draw, re-rolling past any entry
+    // still gated behind a press threshold.
+    let i;
+    if (updatePresses <= UPDATE_INTRO_LEN) {
+        i = updatePresses - 1;
+    } else {
+        i = UPDATE_INTRO_LEN;
+        for (let tries = 0; tries < 25; tries++) {
+            const j = Math.floor(Math.random() * UPDATE_GAGS.length);
+            const e = UPDATE_GAGS[j];
+            if (e && e.after && updatePresses < e.after) continue;
+            i = j; break;
+        }
+    }
+    const ctx = { n: updatePresses, elapsed: Date.now() - updateFirstMs, idx: i };
+    const e = UPDATE_GAGS[i];
+    showToast(typeof e === 'function' ? e(ctx) : (e && e.fn ? e.fn(ctx) : e), 4500);
 }
 
 // Challenge the selected player (directed). Needs a signed identity first.
