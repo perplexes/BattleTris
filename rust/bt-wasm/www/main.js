@@ -85,7 +85,6 @@ const lobbyScreen = document.getElementById('lobbyScreen');
 const gameScreen = document.getElementById('gameScreen');
 const onlineListEl = document.getElementById('onlineList');
 const challengeBtn = document.getElementById('challengeBtn');
-const updateBtn = document.getElementById('updateBtn');
 const availableToggle = document.getElementById('availableToggle');
 const availableToggleGame = document.getElementById('availableToggleGame');
 const statsPanelEl = document.getElementById('statsPanel');
@@ -223,13 +222,10 @@ function selectPlayer(name) {
     loadPlayerStats(name);
 }
 
-// The roster is pushed by the server whenever it changes, so "Update" just
-// re-renders the latest list (and reconnects if the socket dropped). It must NOT
-// re-send `watch` — that bumps the visitor counter.
-function requestPlayerList() {
-    if (!ws || ws.readyState !== WebSocket.OPEN) { connectLobby(); return; }
-    renderOnlineList(lobbyPlayers);
-}
+// (No manual "Update" button: the server pushes the `players` roster over the
+// websocket on every change — see the `players` handler in onSignalMessage — so a
+// manual refresh is redundant. The 1994 client had one because it pulled the
+// roster; we don't.)
 
 // Challenge the selected player (directed). Needs a signed identity first.
 async function challengeSelected() {
@@ -1787,7 +1783,6 @@ if (ernieSlider) {
 // Lobby presence/challenge controls. The list, challenge and stats are populated
 // by the presence/identity server work (Phases 3-4); wired here so the buttons
 // exist and degrade gracefully until then.
-if (updateBtn) updateBtn.addEventListener('click', () => requestPlayerList());
 // Name field: commit on blur or Enter (Enter also blurs so it's a single commit).
 if (nameInput) {
     nameInput.addEventListener('change', () => commitNameFromField());
