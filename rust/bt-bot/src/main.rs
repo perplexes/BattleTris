@@ -56,11 +56,16 @@ const PLACE_INTERVAL_TICKS: i32 = 26;
 /// Tell the server we're "active" this often, so the bot counts toward the
 /// lobby's players-online tally and the connection never idles out.
 const ACTIVE_PING: Duration = Duration::from_secs(20);
-/// If a match goes this many ticks (~2.4s) with no snapshot, treat it as over.
-/// A natural top-out sends a final result snapshot, but an opponent who FORFEITS
-/// by dropping their socket makes the server end the bout WITHOUT a last frame to
-/// us — this timeout is how we notice and return to the lobby.
-const STALE_TICKS: u32 = 150;
+/// If a match goes this many ticks (~14s) with no snapshot, treat it as over. This
+/// MUST exceed the server's `REJOIN_GRACE` (12s): when a human opponent drops, the
+/// server FREEZES the bout for that long waiting for them to reconnect (an accidental
+/// refresh drops straight back into the same game), and we get no snapshots while it's
+/// frozen. The old ~2.4s would abandon the match mid-grace — and a snapshot gap under
+/// heavy RTT could trip it too; so we pause and wait out the grace (+ a margin for the
+/// resume frame + latency) instead. A natural top-out still sends a final result
+/// snapshot; an opponent who TRULY drops makes the server end the bout without a last
+/// frame, and this (longer) timeout is how we eventually notice and return to the lobby.
+const STALE_TICKS: u32 = 875;
 /// How long to wait before reconnecting after the socket drops.
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
 /// Try to launch a weapon about this often (~1.9s) — frequent enough to spend the
