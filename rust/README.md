@@ -1,124 +1,115 @@
 # BattleTris — Rust + WASM port
 
-A faithful port of [BattleTris](../README.md) (Brown CS32, 1994) — the 2‑player
-networked Tetris‑battler — from its original pre‑standard C++/X11/Motif source
-(under [`usr/src/`](../usr/src)) to Rust, targeting the browser via WebAssembly,
-with **TrueSkill 2** matchmaking.
+A faithful Rust/WebAssembly port of [BattleTris](../README.md) — the 2-player
+networked Tetris-battler written at Brown CS32 in 1994 — from its original
+pre-standard C++/X11/Motif source (under [`usr/src/`](../usr/src)) to the
+browser, on an **authoritative WebSocket server** with **TrueSkill 2**
+matchmaking.
 
-The port preserves the original *game logic* byte‑for‑byte where it matters
-(board geometry, piece shapes & rotation, the funds/die/happy economy, the
-20‑combined‑line bazaar trigger, weapon roster) while replacing the platform
-layers: X11/Motif → HTML5 Canvas, the TCP master/slave daemons → WebRTC P2P,
-the flat‑file ELO DB → TrueSkill 2.
+**▶ Play now: <https://battletris.fly.dev>**
+
+The port keeps the original *game logic* faithful where it matters — board
+geometry, the 18 piece shapes and rotation, the funds/[die](docs/glossary.md#die-happy-frown)/[happy](docs/glossary.md#die-happy-frown)
+economy, the 20-combined-line bazaar trigger, and the 34-weapon roster — while
+modernizing the *platform*: X11/Motif → HTML5 Canvas (WASM), the TCP
+master/slave daemons → an authoritative WS server, the flat-file ELO DB →
+TrueSkill 2. Each Rust module names the C++ class it ports (`board.rs` ⇐
+`BTBoardManager`); constants are transcribed verbatim from `BTConstants.H`.
+
+One deliberate departure: the 1994 original relayed gameplay **peer-to-peer**;
+this port makes the **server authoritative** — a conscious modernization (real
+anti-cheat, a totally-ordered and therefore replayable event log), not a
+faithfulness goal. See [`docs/faithfulness.md`](docs/faithfulness.md) and
+[`docs/architecture-netcode.md`](docs/architecture-netcode.md).
+
+## Two-minute orientation
+
+- **Play it** — open <https://battletris.fly.dev>, or run vs-Computer locally
+  (no server needed): build the wasm with `wasm-pack`, serve `bt-wasm/` as static
+  files, open `/www/`. Step-by-step: [`docs/quickstart.md`](docs/quickstart.md).
+- **Hack on it** — `cargo test` for the host crates; `wasm-pack build bt-wasm
+  --target web --out-dir pkg` + `npm run build:ts` for the client; `cargo run -p
+  bt-server` for online play. Full toolchain + house rules:
+  [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`docs/building-and-running.md`](docs/building-and-running.md).
+- **Understand it** — start with [`ARCHITECTURE.md`](ARCHITECTURE.md) (crate
+  graph, three data-flow paths, where to start reading).
+
+## Documentation map
+
+| Document | What it covers |
+|----------|----------------|
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Crate graph, the three data-flow paths, "where to start reading" entry points, system invariants. |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Toolchain setup, the build/test loop, and the house rules. |
+| [`docs/overview.md`](docs/overview.md) | What BattleTris is and the port's thesis (faithful logic / modern platform). |
+| [`docs/quickstart.md`](docs/quickstart.md) | Play online or run vs-Computer locally in under a minute. |
+| [`docs/building-and-running.md`](docs/building-and-running.md) | Every run mode (Practice / vs-Computer / 2-tab / Online / region bot), the wasm + TS build, and the env-var table. |
+| [`docs/architecture-netcode.md`](docs/architecture-netcode.md) | The authoritative model, the `Predictor` (prediction/reconciliation, the snap-back fix), and the bazaar barrier. |
+| [`docs/weapons.md`](docs/weapons.md) | The 34-weapon system: economy, arsenal stacking, launch, and how the server resolves cross-player weapons. |
+| [`docs/faithfulness.md`](docs/faithfulness.md) | What's ported verbatim, what's reimagined, the codex-audit fixes, and known gaps. |
+| [`docs/engine.md`](docs/engine.md) | `bt-core` internals: determinism, the virtual tick clock, the POSIX RNG port, pieces, and line-clear/funds. |
+| [`docs/frontend.md`](docs/frontend.md) | The `www/` TypeScript front-end and the wasm boundary (no bundler, plain ES modules). |
+| [`docs/testing.md`](docs/testing.md) | The four-layer suite: property tests, TLA+/Apalache conformance, Playwright e2e, and differential/fuzz oracles. |
+| [`docs/deployment.md`](docs/deployment.md) | Fly topology, the Dockerfile, region bots, quiesce-in-place deploys, CI, and admin/secrets. |
+| [`docs/replays.md`](docs/replays.md) | The seed-replay contract, record → library → spectate, and the storage routes. |
+| [`docs/glossary.md`](docs/glossary.md) | The project's vocabulary (bazaar barrier, keyframe, snap-back, op-score, idiot, Ernie…). |
+| [`tla/README.md`](../tla/README.md) | The TLA+/Apalache models (Bazaar.tla, Netcode.tla) and the conformance harness. |
+| `screenshots/index.html` | **The project dossier** — the long-form, illustrated write-ups (netcode, weapons codex, TLA+ explainer, the Motif redesign), served over Tailscale. |
 
 ## Workspace layout
 
+Nine crates plus the `www/` TypeScript front-end. The shape: one dependency-free
+engine at the root, pure layers on top, the two deployables (browser + server) at
+the apex. Full crate-by-crate table and the dependency diagram are in
+[`ARCHITECTURE.md`](ARCHITECTURE.md).
+
 ```
 rust/
-  bt-core/       Pure, deterministic game logic (no platform/UI/net deps)
-  bt-trueskill/  TrueSkill / TrueSkill 2 ratings + matchmaking
-  bt-ai/         (planned) BTComputer opponent port
-  bt-wasm/       (planned) wasm-bindgen glue + Canvas front-end
+  bt-core/       Deterministic rules engine (no platform/UI/net deps)
+  bt-ai/         "Ernie" — the BTComputer opponent port
+  bt-replay/     Deterministic record/playback + the Input wire type
+  bt-netcode/    The shared client Predictor (browser + bot)
+  bt-wasm/       wasm-bindgen bindings + www/ TypeScript front-end
+  bt-server/     axum: matchmaking, authoritative Bouts on /ws, replays, admin
+  bt-bot/        Headless region bots (Bert / Ernie / The Count)
+  bt-identity/   HS256 JWT player identity
+  bt-trueskill/  TrueSkill 2 ratings
 ```
-
-Each Rust module names the C++ class it ports (e.g. `board.rs` ⇐
-`BTBoardManager`), and constants are transcribed verbatim from `BTConstants.H`.
 
 ## Status
 
-| Area | Crate / module | State | Tests |
-|------|----------------|-------|-------|
-| Constants | `bt-core::constants` | ✅ verbatim from `BTConstants.H` | — |
-| RNG (`drand48`/`lrand48`/`rand`) | `bt-core::rng` | ✅ POSIX LCG, deterministic | 8 |
-| Box/cell semantics (`BTBox`) | `bt-core::cell` | ✅ value/id/removable/hidden | — |
-| 18 pieces + rotation (`BTPiece`) | `bt-core::piece` | ✅ incl. Wall/Star/WeirdLong state machines | 19 |
-| Board (`BTBoardManager`) | `bt-core::board` | ✅ collision, line‑clear+funds, idiot, fall‑out | 9 |
-| Weapon data (34, `btweapons.db`) | `bt-core::weapons` | ✅ table generated from the DB | 2 |
-| Piece selection (`BTPieceManager`) | `bt-core::piece_manager` | ✅ rejection sampling + keep‑probs | 6 |
-| Game loop (`BTGame`) | `bt-core::game` | ✅ deterministic `tick`, spawn→fall→slide→lock→clear→spawn→top‑out | 9 |
-| Classic TrueSkill 1v1 | `bt-trueskill` | ✅ matches reference values | 6 |
-| Normal math (`erfc`/probit/`v`/`w`) | `bt-trueskill::math` | ✅ | 5 |
-| TrueSkill 2 (experience/lines/quit) | `bt-trueskill::ts2` | ✅ EP-consistent lines factor (reduces to classic at λ=0) | 6 |
-| Arsenal (`BTArsenal`) | `bt-core::arsenal` | ✅ stack/empty buy, use | 3 |
-| Weapon effects + relay | `bt-core::{board,game}` | ✅ all WPN_ON/OFF effects, durations, launch, op‑score, bazaar | 3 |
-| AI (`BTComputer` + `BTCBoard`) | `bt-ai` | ✅ eval heuristic + placement search + driver | 5 |
-| Canvas front‑end + WASM | `bt-wasm` | ✅ retro Canvas, arsenal, bazaar; Practice / vs Computer / 2‑tab / Online | — |
-| Matchmaking + WebRTC signaling + ratings | `bt-server` | ✅ WS server, TrueSkill match quality, signaling relay, rating persistence | 2 |
+The port is **live in production** and feature-complete against the original
+game: all six cross-player weapons (Swap Meet, Lazy Susan, Mirror Mirror, and the
+Ames/Ace/Condor spies) ship online, the netcode is server-authoritative with
+client prediction, online matches are recordable, and per-region bots keep the
+lobby populated.
 
-Total: **83 tests passing** (81 host + 2 server).
+The test suite has four layers (see [`docs/testing.md`](docs/testing.md)):
 
-## Play modes (all verified in Chrome via CDP)
+1. **Property tests** (proptest) across the workspace — engine rotation,
+   line-clear, codec, keyframe, versus, and weapons in `bt-core`; the predictor
+   invariants in `bt-netcode`; plus `bt-ai`, `bt-trueskill`, `bt-identity`, and
+   the bout-level liveness properties in `bt-server`.
+2. **TLA+/Apalache conformance** — `Bazaar.tla` + `Netcode.tla`, with traces
+   replayed against the real `apply_input` ([`tla/README.md`](../tla/README.md)).
+3. **Playwright e2e** — browser tests of the wasm client
+   (`bt-wasm/tests/*.spec.js`).
+4. **Differential / fuzz oracles** — line-clear and weapon oracles, the
+   fuzz→replay bridge.
 
-Build & serve:
-```sh
-cd rust
-wasm-pack build bt-wasm --target web --out-dir pkg --dev   # build the wasm
-cargo run -p bt-server                                      # online matchmaking/rating server (ws://127.0.0.1:9000)
-cd bt-wasm && python3 -m http.server 8000                   # then open http://localhost:8000/www/
-```
+`cargo test --workspace` runs the Rust host + server + bot tests (the engine,
+netcode, AI, ratings, identity, replay, and bout suites — several hundred cases
+in total); `npm run test:e2e` runs the Playwright layer; the formal layer runs
+under `tla/`. CI gates deploys on the test, clippy, and fast-TLA jobs being
+green. Do not infer a fixed test count from this README — `cargo test --workspace`
+is the source of truth.
 
-- **Practice** — solo play.
-- **vs Computer** — battle Ernie (the `bt-ai` opponent); his board shows alongside yours.
-- **vs Player (2 tabs)** — two same‑origin tabs battle via `BroadcastChannel`.
-- **Online** — WebRTC P2P data‑channel play; the server matchmakes by TrueSkill
-  quality and updates/persists ratings on the result.
+## License & credits
 
-## Design notes
-
-- **Determinism.** `bt-core` is seedable and side‑effect‑free; the X11/Xt
-  timeout loop is replaced by an explicit `Game::tick(dt_ms)` virtual clock, so
-  games are reproducible (important for replays and tests). See
-  `tests/game_loop.rs`.
-- **Board model.** `map_[x][y]` (a `BTBox*`‑or‑null grid) becomes
-  `Vec<Option<Cell>>`; idiot detection compares filled‑this‑turn board indices
-  instead of pointer identity.
-- **Funds economy.** `funds = (Σ pip values across cleared rows) × (#lines)`,
-  exactly as `BTBoardManager::checkLines`. Die = 1‑6 pips, happy = 150 (0 if
-  it lands without clearing → frown).
-- **TrueSkill 2.** A rating stays a single `(μ, σ)`; TS2 only changes inference.
-  The 1v1 win/loss update *is* the classic EP closed form. The applicable TS2
-  additions for a 1v1 single‑mode game are the experience offset (eq 8), the
-  individual‑statistic signal (eq 9 → lines cleared), and the quit penalty
-  (eq 12‑13). The paper gives no closed‑form for eq 9 and Microsoft released no
-  code, so the lines signal is an explicitly bounded approximation pending a
-  factor‑graph treatment.
-
-## Faithfulness to the original
-
-The game *logic* is a direct port of `usr/src/game/`; the X11/Motif UI (→ Canvas)
-and the TCP master/slave daemons (→ WebRTC + a small signaling server) are the
-agreed reimplementations. A codex audit comparing the port to the C++ confirmed
-faithful board geometry, piece shapes + rotation, spawn offset, keep
-probabilities, the line‑clear recheck, the funds economy, and the victim‑side
-effect of ~22 of the 34 weapons.
-
-Fixed after the audit: No Slide (instant lock), boolean weapon‑active flags
-(a twice‑launched weapon no longer sticks), Slick suspended during hard‑drop /
-slide, idiot flag flushed after `checkLines`, Mondale victim‑side tax, and the
-Carter‑doubled bazaar price display.
-
-Known remaining gaps (vs the original), in rough priority order — all require
-new peer payloads or launcher‑side bookkeeping beyond the current
-weapon/score relay:
-
-- **Board/arsenal‑exchange weapons:** Swap Meet (exchange boards), Lazy Susan
-  (swap arsenals), Mirror Mirror (reflect a launched weapon), and the spy
-  weapons Ames / Ace / Condor (recon view of the opponent board). These need a
-  board‑snapshot and arsenal message over the channel.
-- **Launcher‑side economy:** Mondale tax *collection* and Keating *steal‑to‑self*
-  (victim side is done) — need to track the opponent's funds delta on op‑score.
-- **Lawyers' Delite** raises the board per opponent line (faithful effect) but is
-  not the exact piece‑aware lock/slide of `BTGame::lawyers()`.
-- **AI (`bt-ai`):** `eval_board` is faithful in its dominant terms but omits the
-  happy‑piece bonus / baseline‑delta / weapon‑flag inputs; placement is a
-  column×orientation simulation rather than the reachable‑move DFS; weapon buying
-  is a greedy bazaar heuristic rather than a port of `goShopping` / `BTCOrders`.
-
-## Build & test
-
-```sh
-cd rust
-cargo test                 # whole workspace (host crates)
-cargo test -p bt-server    # matchmaking/rating server
-wasm-pack build bt-wasm --target web --out-dir pkg --dev
-```
+MIT. Original BattleTris © 1993–1997 **Bryan Cantrill, Charlie Hoecker, and
+Mike Shapiro**, written as a Brown University CS32 final project in spring 1994;
+revived several times between 1994 and 2001 and exhumed in 2026 by Adam
+Leventhal. The fuller history — including the inspiration in Wesleyan Tetris — is
+in Cantrill's [reunion blog post](https://bcantrill.dtrace.org/2026/05/25/a-portentous-reunion/)
+and the [root README](../README.md). This Rust/WASM port preserves their game
+logic; see [`docs/faithfulness.md`](docs/faithfulness.md) for exactly what is
+faithful and what is reimagined.
