@@ -235,12 +235,26 @@ impl Bout {
     ///     a synchronized BARRIER, so the whole match is frozen (incl. the side that
     ///     already left); only [`is_bazaar_input`] passes.
     ///
-    /// On success `seq` becomes this side's `ack` for client reconciliation.
+    /// Returns whether the input was actually APPLIED. Either way, a fresh legal input
+    /// advances this side's `ack` (so the client's reconciliation knows we've caught up
+    /// to its sends) — see below for why a barrier-rejected input must still be acked.
     pub fn apply_input(&mut self, side: Side, input: &Input, seq: u64) -> bool {
         let idx = side_idx(side);
         if !is_legal_client_input(input) || seq <= self.ack[idx] {
             return false;
         }
+        // Ack a fresh, legal input as soon as we've SEEN it — BEFORE the barrier check,
+        // and even if the barrier then blocks applying it. The `ack` means "I've
+        // processed your inputs up through seq N", which is what a client gates its
+        // reconciliation on; it does NOT mean "I applied it". Acking here is essential:
+        // under latency a client sends gameplay inputs that cross the bazaar boundary
+        // before its snapshot says the barrier is up; the barrier (below) drops them.
+        // If we didn't ack them, a client that waits for `ack` to catch up to what it
+        // sent (the bot's `sync::decide` WaitAck gate) would deadlock forever in the
+        // bazaar — it never reaches Shop, never sends LeaveBazaar, and the whole match
+        // freezes. (For the browser the same un-acked input would replay on every
+        // keyframe, drifting the board.) Acking it lets reconciliation discard it.
+        self.ack[idx] = seq;
         // Bazaar BARRIER: while EITHER side is shopping the whole match is frozen, so
         // even the side that left first can't keep moving/rotating/launching. Only
         // shopping actions pass (and they only do anything for the side still in the
@@ -249,11 +263,10 @@ impl Bout {
         let barrier = self.versus.game(side).is_in_bazaar()
             || self.versus.game(side.other()).is_in_bazaar();
         if barrier && !is_bazaar_input(input) {
-            return false;
+            return false; // acked above, but not applied/recorded (the sim is frozen)
         }
         let g = self.versus.game_mut(side);
         input.apply_to_game(g);
-        self.ack[idx] = seq;
         // Record it (stamped with the current tick — inputs for tick N are drained
         // before the Nth tick advances, so a replay applies them at the same tick).
         self.frames.push(VersusFrame { tick: self.tick as u32, side: idx as u8, input: input.clone() });
@@ -712,8 +725,12 @@ mod tests {
     // -----------------------------------------------------------------------
     // Property (b''): the BAZAAR INPUT GATE. While a side is shopping the match is
     //   frozen; only buy/sell/leave are legal. A non-shopping input (move / rotate
-    //   / drop / launch) must be REJECTED with NO state change — no ack advance, no
-    //   recorded frame, no game movement. This gate had zero coverage, so a mutant
+    //   / drop / launch) must be NOT APPLIED — no recorded frame, no game movement —
+    //   BUT it must STILL advance `ack` (a fresh seq is acked even when the barrier
+    //   drops it). That ack is essential: under latency a client sends gameplay inputs
+    //   that cross the bazaar boundary before its snapshot shows the barrier; if those
+    //   never got acked, a client waiting for ack to catch up (the bot's WaitAck gate)
+    //   would deadlock in the bazaar forever. This gate had thin coverage, so a mutant
     //   `if false && g.is_in_bazaar() && !is_bazaar_input(input) { return false; }`
     //   (letting a client nudge its frozen piece / fire weapons mid-shop) survived.
     // -----------------------------------------------------------------------
@@ -737,23 +754,23 @@ mod tests {
                 "precondition: the side must actually be in the bazaar");
 
             // Baseline: a SHOPPING input (SellWeapon of an empty slot) is bazaar-legal
-            // and accepted, advancing ack to 1 — so the rejection below is a true
-            // no-advance, not just "ack was already 0" (a gate that rejected
-            // EVERYTHING in the bazaar would still pass a 0==0 check).
+            // and accepted, advancing ack to 1 — a nonzero starting point, so "ack
+            // advanced to seq" below is a real advance from 1, not a 0==0 coincidence.
             prop_assert!(b.apply_input(side, &Input::SellWeapon(0), 1),
                 "a shopping input must be accepted while in the bazaar");
             prop_assert_eq!(b.snapshot_for(side, false).ack, 1, "shopping input advanced ack to 1");
 
-            let ack_before = b.snapshot_for(side, false).ack;
             let frames_before = b.frames.clone();
             let game_before = b.versus.game(side).snapshot_bytes();
 
-            // The non-shopping input must be REJECTED while in the bazaar.
+            // The non-shopping input must NOT be APPLIED while in the bazaar — but it's
+            // still a fresh legal input, so it MUST advance ack (else a client waiting
+            // on ack deadlocks; see the property comment above).
             let accepted = b.apply_input(side, &input, seq);
             prop_assert!(!accepted,
-                "non-shopping input {:?} must be rejected while in the bazaar", input);
-            prop_assert_eq!(b.snapshot_for(side, false).ack, ack_before,
-                "ack must NOT advance on a bazaar-rejected input {:?}", input);
+                "non-shopping input {:?} must not be applied while in the bazaar", input);
+            prop_assert_eq!(b.snapshot_for(side, false).ack, seq,
+                "a fresh bazaar-rejected input {:?} must STILL advance ack to its seq", input);
             prop_assert_eq!(&b.frames, &frames_before,
                 "NO frame must be recorded for a bazaar-rejected input {:?}", input);
             prop_assert_eq!(b.versus.game(side).snapshot_bytes(), game_before,
@@ -790,16 +807,19 @@ mod tests {
             prop_assert!(!b.versus.game(other).is_in_bazaar(),
                 "precondition: the other side is NOT in the bazaar");
 
-            let ack_before = b.snapshot_for(other, false).ack;
             let frames_before = b.frames.clone();
             let game_before = b.versus.game(other).snapshot_bytes();
 
-            // The OTHER side's non-shopping input must be rejected by the barrier.
+            // The OTHER side's non-shopping input must NOT be applied (the barrier
+            // freezes it) — but it's a fresh legal input, so it must STILL advance ack
+            // (this is the exact deadlock scenario: a side whose pre-bazaar gameplay
+            // inputs are in flight when the barrier comes up must still see them acked,
+            // or its WaitAck gate hangs the match in the bazaar).
             let accepted = b.apply_input(other, &input, seq);
             prop_assert!(!accepted,
-                "the non-shopping side's input {:?} must be rejected during the opponent's bazaar", input);
-            prop_assert_eq!(b.snapshot_for(other, false).ack, ack_before,
-                "ack must NOT advance for the frozen non-shopping side ({:?})", input);
+                "the non-shopping side's input {:?} must not be applied during the opponent's bazaar", input);
+            prop_assert_eq!(b.snapshot_for(other, false).ack, seq,
+                "a fresh barrier-rejected input {:?} must STILL advance the frozen side's ack", input);
             prop_assert_eq!(&b.frames, &frames_before,
                 "NO frame recorded for the frozen non-shopping side's input {:?}", input);
             prop_assert_eq!(b.versus.game(other).snapshot_bytes(), game_before,
