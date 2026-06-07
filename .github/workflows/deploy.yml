@@ -9,6 +9,14 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+  # Nightly: run the slow full-Netcode check (the tla-full job gates on this).
+  schedule:
+    - cron: "0 7 * * *"
+
+# Pin the Apalache release the TLA+ jobs install (Java is preinstalled on the GH
+# ubuntu runners). Bump together with the local /tmp/apalache-* the docs reference.
+env:
+  APALACHE_VERSION: "0.58.0"
 
 jobs:
   test:
@@ -24,12 +32,86 @@ jobs:
         working-directory: rust
         run: cargo test --workspace --locked
 
+  clippy:
+    name: Clippy (-D warnings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: cargo clippy
+        working-directory: rust
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  tla:
+    name: TLA+ model checks (Apalache, fast)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Install Apalache ${{ env.APALACHE_VERSION }}
+        run: |
+          set -euo pipefail
+          curl -fsSL -o apalache.tgz \
+            "https://github.com/apalache-mc/apalache/releases/download/v${APALACHE_VERSION}/apalache-${APALACHE_VERSION}.tgz"
+          tar -xzf apalache.tgz
+          echo "APALACHE_MC=$PWD/apalache-${APALACHE_VERSION}/bin/apalache-mc" >> "$GITHUB_ENV"
+      - name: Model checks (assert the expected outcome of each)
+        working-directory: tla
+        env:
+          # Set by the install step above; the helper below uses it.
+          APALACHE_MC: ${{ env.APALACHE_MC }}
+        run: bash ci-check.sh
+      - name: Trace fixtures are not stale
+        working-directory: tla
+        env:
+          APALACHE_MC: ${{ env.APALACHE_MC }}
+        run: bash regen-traces.sh --check
+
+  # The FULL all-fixed Netcode check is ~6.5 min — too slow for the default PR path.
+  # It runs on a manual dispatch or the nightly schedule only, NEVER gating a PR/deploy.
+  tla-full:
+    name: TLA+ full Netcode check (slow; dispatch/schedule only)
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Install Apalache ${{ env.APALACHE_VERSION }}
+        run: |
+          set -euo pipefail
+          curl -fsSL -o apalache.tgz \
+            "https://github.com/apalache-mc/apalache/releases/download/v${APALACHE_VERSION}/apalache-${APALACHE_VERSION}.tgz"
+          tar -xzf apalache.tgz
+          echo "APALACHE_MC=$PWD/apalache-${APALACHE_VERSION}/bin/apalache-mc" >> "$GITHUB_ENV"
+      - name: Netcode all-fixed (AllSafe holds, length 14)
+        working-directory: tla
+        run: |
+          set -euo pipefail
+          out="$("$APALACHE_MC" check --length=14 --config=Netcode.cfg Netcode.tla 2>&1)" || true
+          echo "$out" | tail -5
+          echo "$out" | grep -q "The outcome is: NoError" \
+            || { echo "EXPECTED NoError from the all-fixed Netcode check"; exit 1; }
+
   deploy:
     name: Deploy to fly.io
-    needs: test
-    # Only on a real push/dispatch to main — never on PRs (which may come from
-    # forks and must not touch production or see secrets).
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: [test, clippy, tla]
+    # Only on a real push or manual dispatch to main — never on PRs (which may come
+    # from forks and must not touch production or see secrets) and never on the
+    # nightly schedule (which exists only to run the slow tla-full check).
+    if: >-
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # Serialize deploys so two pushes can't race the single machine.
     concurrency: deploy-battletris

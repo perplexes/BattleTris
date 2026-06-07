@@ -111,25 +111,66 @@ still breaks its invariant.
 ## Closing the loop: TLA⁺ traces → the real Rust (conformance)
 
 The model and the implementation can drift. To tie them together — the
-[modelator](https://github.com/informalsystems/modelator) idea — we generate a trace
-from Apalache and **replay it against the real `Bout::apply_input`**, asserting the
-implementation's `(ack, in_bazaar)` tracks the model's `(serverAck, serverBazaar)` at
-every step:
+[modelator](https://github.com/informalsystems/modelator) idea — we generate traces
+from Apalache and **replay them against the real `Bout`**, asserting the
+implementation's `(ack, in_bazaar, weapons-applied)` tracks the model's
+`(serverAck, serverBazaar, weaponsApplied)` after every step.
 
-- **`Cross.tla`** is a tiny generator whose history variable `crossed` + the trap
-  `INVARIANT NotCrossed` force Apalache to emit the shortest trace that performs a
-  bazaar *crossing* (a gameplay input the barrier rejects). Its `.itf.json` is checked in
-  as a fixture at `rust/bt-server/tests/traces/bazaar_crossing.itf.json`.
-- **`apply_input_conforms_to_the_tla_crossing_trace`** (in `bt-server/src/bout.rs`)
-  parses that ITF trace, drives a real `Bout` along it (`force_into_bazaar` on a bazaar
-  entry, `apply_input` on a delivery), and asserts conformance after every state.
+### The generators
 
-The crux is the crossing step: the model says `serverAck` advances there, so the real
-`apply_input` must too. Revert the ack-on-barrier-reject fix and the test fails with
-`ACK DIVERGED from the TLA+ model at state 3` — a model-tied conformance check that runs
-in `cargo test`. Regenerate the fixture after a model change with:
+- **`Cross.tla`** is the minimal teaching generator: a history variable `crossed` + the
+  trap `INVARIANT NotCrossed` force Apalache to emit the shortest trace that performs a
+  single bazaar *crossing* (a gameplay input the barrier rejects).
+- **`Gen.tla`** is the production generator — a superset model driving the SAME server
+  semantics as `Netcode.tla`'s `ServerDeliverInput` across the whole feature space
+  (bazaar entry/exit, barrier crossings, weapon delivery, reconnect/`reset_ack`). It
+  stamps every state with an **explicit `lastAction` string** so the Rust harness maps
+  each step to exactly one `Bout` op by NAME, not by guessing from a state diff (two
+  different actions can produce the same diff — an explicit action makes the mapping
+  total and unambiguous, and any unmapped action is a hard failure). Each scenario is
+  carved out by its own trap invariant in a `Gen*.cfg`:
+
+  | Fixture | cfg / trap | What it exercises |
+  |---|---|---|
+  | `bazaar_crossing.itf.json` | `GenCross` / `NotCrossed` | a weapon crosses the barrier (ack-on-reject) |
+  | `weapon_then_cross.itf.json` | `GenWeaponCross` / `NotWeaponThenCross` | a weapon delivered in play, then a later crossing |
+  | `reconnect_snapback.itf.json` | `GenReconnect` / `NotReconnectedWithHistory` | the disconnect → reconnect → `reset_ack` snap-back path |
+  | `two_bazaar_visits.itf.json` | `GenTwoVisits` / `NotTwoVisits` | the server enters the bazaar twice in one trace |
+
+### The harness
+
+**`apply_input_conforms_to_every_tla_trace`** (in `bt-server/src/bout.rs`) is
+data-driven: it loads EVERY `*.itf.json` in `rust/bt-server/tests/traces/`, drives a
+real `Bout` along each (`force_into_bazaar` on `ServerEnterBazaar`, `apply_input` on
+`ServerDeliverInput`, `reset_ack` on `Reconnect`), and asserts `(ack, in_bazaar,
+weapons-applied)` conformance after every state. It panics loudly on any `lastAction` it
+can't map — no silent skips — and requires the corpus to contain a crossing (the teeth).
+
+The teeth are real and independent:
+- revert the ack-on-barrier-reject fix → fails at `bazaar_crossing.itf.json@3`
+  (`ACK DIVERGED from the model (1)`);
+- revert `reset_ack` → fails at `reconnect_snapback.itf.json@4`.
+
+### Regenerating the fixtures
+
+`regen-traces.sh` regenerates all four committed fixtures from the `Gen*.cfg` traps
+(normalizing Apalache's per-run timestamp so the committed files are stable):
 
 ```sh
-apalache-mc check --length=6 --config=Cross.cfg Cross.tla   # writes _apalache-out/.../violation1.itf.json
-cp _apalache-out/Cross.tla/*/violation1.itf.json ../rust/bt-server/tests/traces/bazaar_crossing.itf.json
+APALACHE_MC=/path/to/apalache-mc ./regen-traces.sh           # overwrite the fixtures
+APALACHE_MC=/path/to/apalache-mc ./regen-traces.sh --check   # CI: fail if any is stale
 ```
+
+## CI
+
+Two checked-in scripts back the GitHub Actions `tla` job (see `.github/workflows/deploy.yml`):
+
+- **`ci-check.sh`** runs the FAST model checks and **asserts the expected outcome of
+  each** — a buggy cfg MUST report `Error` (its invariant violated), a fixed cfg MUST
+  report `NoError`; anything else fails the build, so a check can never pass silently.
+  Covers `Bazaar` buggy/fixed, the `Cross` trap, the three `NetcodeBug*` teeth, and a
+  reduced-length all-fixed `Netcode` run.
+- **`regen-traces.sh --check`** asserts the committed trace fixtures aren't stale.
+
+The full all-fixed `Netcode` check (length 14, ~6.5 min) is too slow for the PR path; it
+runs only in the `tla-full` job, gated on `workflow_dispatch` / the nightly schedule.

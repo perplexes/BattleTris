@@ -48,7 +48,7 @@
         "#bigint": "3"
       },
       "MaxSeq": {
-        "#bigint": "4"
+        "#bigint": "5"
       },
       "ResetAckOnReattach": true,
       "ackAtReconnect": {
@@ -83,49 +83,14 @@
         "#bigint": "3"
       },
       "MaxSeq": {
-        "#bigint": "4"
+        "#bigint": "5"
       },
       "ResetAckOnReattach": true,
       "ackAtReconnect": {
         "#bigint": "0"
       },
       "bazaarVisits": {
-        "#bigint": "1"
-      },
-      "clientSeq": {
         "#bigint": "0"
-      },
-      "connected": true,
-      "inputChan": [],
-      "lastAction": "ServerEnterBazaar",
-      "reachedCross": false,
-      "reachedReconnect": false,
-      "reachedWeaponApply": false,
-      "serverAck": {
-        "#bigint": "0"
-      },
-      "serverBazaar": true,
-      "weaponsApplied": {
-        "#bigint": "0"
-      }
-    },
-    {
-      "#meta": {
-        "index": 2
-      },
-      "AckOnBarrierReject": true,
-      "MaxChan": {
-        "#bigint": "3"
-      },
-      "MaxSeq": {
-        "#bigint": "4"
-      },
-      "ResetAckOnReattach": true,
-      "ackAtReconnect": {
-        "#bigint": "0"
-      },
-      "bazaarVisits": {
-        "#bigint": "1"
       },
       "clientSeq": {
         "#bigint": "1"
@@ -146,9 +111,44 @@
       "serverAck": {
         "#bigint": "0"
       },
-      "serverBazaar": true,
+      "serverBazaar": false,
       "weaponsApplied": {
         "#bigint": "0"
+      }
+    },
+    {
+      "#meta": {
+        "index": 2
+      },
+      "AckOnBarrierReject": true,
+      "MaxChan": {
+        "#bigint": "3"
+      },
+      "MaxSeq": {
+        "#bigint": "5"
+      },
+      "ResetAckOnReattach": true,
+      "ackAtReconnect": {
+        "#bigint": "0"
+      },
+      "bazaarVisits": {
+        "#bigint": "0"
+      },
+      "clientSeq": {
+        "#bigint": "1"
+      },
+      "connected": true,
+      "inputChan": [],
+      "lastAction": "ServerDeliverInput",
+      "reachedCross": false,
+      "reachedReconnect": false,
+      "reachedWeaponApply": true,
+      "serverAck": {
+        "#bigint": "1"
+      },
+      "serverBazaar": false,
+      "weaponsApplied": {
+        "#bigint": "1"
       }
     },
     {
@@ -160,7 +160,49 @@
         "#bigint": "3"
       },
       "MaxSeq": {
-        "#bigint": "4"
+        "#bigint": "5"
+      },
+      "ResetAckOnReattach": true,
+      "ackAtReconnect": {
+        "#bigint": "0"
+      },
+      "bazaarVisits": {
+        "#bigint": "0"
+      },
+      "clientSeq": {
+        "#bigint": "2"
+      },
+      "connected": true,
+      "inputChan": [
+        {
+          "kind": "W",
+          "seq": {
+            "#bigint": "2"
+          }
+        }
+      ],
+      "lastAction": "ClientFireWeapon",
+      "reachedCross": false,
+      "reachedReconnect": false,
+      "reachedWeaponApply": true,
+      "serverAck": {
+        "#bigint": "1"
+      },
+      "serverBazaar": false,
+      "weaponsApplied": {
+        "#bigint": "1"
+      }
+    },
+    {
+      "#meta": {
+        "index": 4
+      },
+      "AckOnBarrierReject": true,
+      "MaxChan": {
+        "#bigint": "3"
+      },
+      "MaxSeq": {
+        "#bigint": "5"
       },
       "ResetAckOnReattach": true,
       "ackAtReconnect": {
@@ -170,20 +212,62 @@
         "#bigint": "1"
       },
       "clientSeq": {
+        "#bigint": "2"
+      },
+      "connected": true,
+      "inputChan": [
+        {
+          "kind": "W",
+          "seq": {
+            "#bigint": "2"
+          }
+        }
+      ],
+      "lastAction": "ServerEnterBazaar",
+      "reachedCross": false,
+      "reachedReconnect": false,
+      "reachedWeaponApply": true,
+      "serverAck": {
         "#bigint": "1"
+      },
+      "serverBazaar": true,
+      "weaponsApplied": {
+        "#bigint": "1"
+      }
+    },
+    {
+      "#meta": {
+        "index": 5
+      },
+      "AckOnBarrierReject": true,
+      "MaxChan": {
+        "#bigint": "3"
+      },
+      "MaxSeq": {
+        "#bigint": "5"
+      },
+      "ResetAckOnReattach": true,
+      "ackAtReconnect": {
+        "#bigint": "0"
+      },
+      "bazaarVisits": {
+        "#bigint": "1"
+      },
+      "clientSeq": {
+        "#bigint": "2"
       },
       "connected": true,
       "inputChan": [],
       "lastAction": "ServerDeliverInput",
       "reachedCross": true,
       "reachedReconnect": false,
-      "reachedWeaponApply": false,
+      "reachedWeaponApply": true,
       "serverAck": {
-        "#bigint": "1"
+        "#bigint": "2"
       },
       "serverBazaar": true,
       "weaponsApplied": {
-        "#bigint": "0"
+        "#bigint": "1"
       }
     }
   ]

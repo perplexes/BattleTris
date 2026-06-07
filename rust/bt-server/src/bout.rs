@@ -1005,14 +1005,25 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // TLA+ CONFORMANCE (à la modelator): replay an Apalache-generated trace against the
-    // REAL Bout::apply_input and assert the implementation's (ack, in_bazaar) tracks the
-    // MODEL's (serverAck, serverBazaar) at every step. The trace — tla/Cross.tla, checked
-    // in as a fixture — is forced to perform a bazaar CROSSING (a gameplay input the
-    // barrier rejects), the exact step where the ack-on-barrier-reject fix matters: the
-    // model says serverAck advances there, so the real apply_input must too. Revert the
-    // fix and the conformance assert fires at the crossing. This makes the TLA+ model and
-    // the Rust code share one source of truth instead of drifting apart.
+    // TLA+ CONFORMANCE (à la modelator), DATA-DRIVEN over a CORPUS of Apalache traces.
+    // Every `*.itf.json` in `tests/traces/` is an Apalache-generated trace of the
+    // `Gen.tla` server semantics (the same `ServerDeliverInput` as `Netcode.tla`); we
+    // replay each against the REAL `Bout` and assert the implementation's
+    // (ack, in_bazaar, weapons-applied) tracks the MODEL's (serverAck, serverBazaar,
+    // weaponsApplied) after EVERY state. The corpus covers the bazaar crossing (the
+    // ack-on-barrier-reject step), weapon delivery + a later crossing, the
+    // reconnect/reset_ack snap-back, and multiple bazaar visits — so the model and the
+    // Rust share one source of truth across the whole feature space, not just one path.
+    //
+    // The mapping is driven by each state's EXPLICIT `lastAction` string (emitted by
+    // `Gen.tla`), NOT inferred by diffing consecutive states — so a step can never be
+    // silently mis-mapped or skipped. Any `lastAction` the harness doesn't know how to
+    // drive against a `Bout` is a HARD FAILURE (`panic!`), never a silent pass.
+    //
+    // Teeth: the corpus is required to exercise a barrier crossing (a G/W input the
+    // bazaar rejects, where the model advances ack); reverting the ack-on-barrier-reject
+    // fix makes the per-state ack assertion fire at that step. (The reconnect fixture
+    // gives the reset_ack path its own teeth — see `reset_ack` below.)
     fn itf_int(v: &serde_json::Value) -> i64 {
         v.get("#bigint").and_then(|b| b.as_str()).map(|s| s.parse().unwrap())
             .unwrap_or_else(|| v.as_i64().expect("itf int"))
@@ -1022,63 +1033,146 @@ mod tests {
             .map(|e| (e["kind"].as_str().unwrap().to_string(), itf_int(&e["seq"]) as u64))
             .collect()
     }
+    /// Map a model input KIND to the concrete `Input` whose barrier CLASS matches. "W"
+    /// must be a real cross-player weapon so an applied "W" (normal play) actually
+    /// delivers — `LaunchWeapon(0)` against a stocked arsenal (see the harness setup).
     fn itf_input(kind: &str) -> Input {
         match kind {
-            "G" => Input::MoveLeft,        // gameplay
-            "W" => Input::LaunchWeapon(0), // weapon (same barrier class)
-            _ => Input::LeaveBazaar,       // "L" / "P"
+            "G" => Input::MoveLeft,        // gameplay (non-shopping; barrier-rejected in bazaar)
+            "W" => Input::LaunchWeapon(0), // weapon (same barrier class as gameplay)
+            "L" => Input::LeaveBazaar,     // shopping/leave (bazaar-legal)
+            other => panic!("trace has an unmapped input kind {other:?}"),
         }
     }
 
-    #[test]
-    fn apply_input_conforms_to_the_tla_crossing_trace() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/traces/bazaar_crossing.itf.json");
-        let raw = std::fs::read_to_string(path).expect("read the Apalache trace fixture");
-        let trace: serde_json::Value = serde_json::from_str(&raw).expect("parse ITF JSON");
-        let states = trace["states"].as_array().expect("states array");
+    /// Replay one Apalache trace against a real `Bout`, asserting conformance after every
+    /// state. Returns whether the trace exercised a barrier crossing (so the corpus-level
+    /// test can require the teeth are present somewhere). Panics loudly on any model
+    /// action it can't map — the harness never silently skips a step.
+    fn replay_itf_trace(name: &str, raw: &str) -> bool {
+        let trace: serde_json::Value = serde_json::from_str(raw)
+            .unwrap_or_else(|e| panic!("{name}: parse ITF JSON: {e}"));
+        let states = trace["states"].as_array()
+            .unwrap_or_else(|| panic!("{name}: trace has no states array"));
+        assert!(!states.is_empty(), "{name}: empty trace");
 
         let baz = |s: &serde_json::Value| s["serverBazaar"].as_bool().unwrap();
         let ack = |s: &serde_json::Value| itf_int(&s["serverAck"]) as u64;
+        let conn = |s: &serde_json::Value| s["connected"].as_bool().unwrap();
+        let w_applied = |s: &serde_json::Value| itf_int(&s["weaponsApplied"]) as u64;
+        fn action<'a>(name: &str, s: &'a serde_json::Value) -> &'a str {
+            s["lastAction"].as_str()
+                .unwrap_or_else(|| panic!("{name}: a state is missing lastAction"))
+        }
 
         let side = Side::A;
         let mut b = Bout::new(7, 11);
-
-        // State 0: a fresh bout must match the model's initial state.
-        assert_eq!(b.snapshot_for(side, false).ack, ack(&states[0]), "ack @ state 0");
-        assert_eq!(b.versus.game(side).is_in_bazaar(), baz(&states[0]), "bazaar @ state 0");
-
+        // Stock the side's arsenal with a benign cross-player weapon in slot 0, so an
+        // APPLIED "W" (LaunchWeapon(0)) really fires and the bout records it — making the
+        // weapons-applied oracle below meaningful (an empty slot would no-op every "W").
+        for _ in 0..8 {
+            b.versus.game_mut(side).grant_weapon(bt_core::WeaponToken::RiseUp);
+        }
+        // Our independent oracle of the model's `weaponsApplied`: count the "W" inputs the
+        // real `apply_input` ACCEPTS (a weapon delivered in normal play). It must track
+        // the model's cumulative counter at every state.
+        let mut weapons_applied: u64 = 0;
         let mut saw_crossing = false;
+
+        // State 0 must match the model's initial state.
+        assert_eq!(b.snapshot_for(side, false).ack, ack(&states[0]), "{name}: ack @ state 0");
+        assert_eq!(b.versus.game(side).is_in_bazaar(), baz(&states[0]), "{name}: bazaar @ state 0");
+
         for i in 1..states.len() {
             let (prev, cur) = (&states[i - 1], &states[i]);
-            let pchan = itf_chan(prev);
-
-            if baz(cur) && !baz(prev) {
-                // ServerEnterBazaar → drive the real server into the bazaar.
-                force_into_bazaar(&mut b, side);
-            } else if itf_chan(cur).len() + 1 == pchan.len() {
-                // ServerDeliverInput → feed the delivered (head) input to apply_input.
-                let (kind, seq) = pchan[0].clone();
-                let applied = b.apply_input(side, &itf_input(&kind), seq);
-                if baz(prev) && (kind == "G" || kind == "W") {
-                    // THE crossing: a gameplay input the barrier rejects.
-                    assert!(!applied, "a barrier-crossing gameplay input must not be applied");
-                    saw_crossing = true;
+            match action(name, cur) {
+                // Pure client/transport steps: no server-side `Bout` effect.
+                "ClientSendGameplay" | "ClientFireWeapon" | "ClientSendLeave" | "Disconnect" => {}
+                // The opponent's lines crossed: drive the real server into the bazaar.
+                "ServerEnterBazaar" => force_into_bazaar(&mut b, side),
+                // The client reloaded + reconnected: the server runs reset_ack. This is
+                // the snap-back fix's conformance point — the model drops serverAck to 0
+                // here, so the real Bout must too (the per-state ack check below fires if
+                // reset_ack is reverted).
+                "Reconnect" => b.reset_ack(side),
+                // Process the next client input — feed the delivered HEAD of the PREVIOUS
+                // state's channel to the real apply_input (the model's ServerDeliverInput).
+                "ServerDeliverInput" => {
+                    let pchan = itf_chan(prev);
+                    assert!(!pchan.is_empty(),
+                        "{name}: ServerDeliverInput at state {i} but the channel was empty");
+                    let (kind, seq) = pchan[0].clone();
+                    let in_bazaar_before = b.versus.game(side).is_in_bazaar();
+                    let applied = b.apply_input(side, &itf_input(&kind), seq);
+                    if in_bazaar_before && (kind == "G" || kind == "W") {
+                        // THE crossing: a gameplay/weapon input the barrier rejects.
+                        assert!(!applied,
+                            "{name}@{i}: a barrier-crossing {kind} input must not be applied");
+                        saw_crossing = true;
+                    }
+                    if applied && kind == "W" {
+                        // A weapon delivered in normal play (matches the model's
+                        // weaponsApplied++). A barrier-rejected "W" is NOT counted.
+                        weapons_applied += 1;
+                    }
                 }
+                other => panic!("{name}@{i}: unmapped model action {other:?} — the harness \
+                    must drive every action against the Bout (no silent skips)"),
             }
-            // else: ClientSend (channel grew) or a snapshot step — no server-side effect.
 
-            // Conformance: real (ack, in_bazaar) must equal the model's at this state.
+            // Conformance after this state: ack, in_bazaar, and the weapons-applied oracle
+            // must all equal the model. (When the model is disconnected the channel is
+            // frozen but ack/bazaar are still well-defined and must still match.)
+            let _ = conn(cur);
             assert_eq!(
                 b.snapshot_for(side, false).ack, ack(cur),
-                "ACK DIVERGED from the TLA+ model at state {i} — the real apply_input did not \
-                 advance ack like the model (the ack-on-barrier-reject fix is the difference)"
+                "{name}@{i}: ACK DIVERGED from the model ({}) — the real apply_input/reset_ack \
+                 did not track the model (action {:?})", ack(cur), action(name, cur)
             );
             assert_eq!(
                 b.versus.game(side).is_in_bazaar(), baz(cur),
-                "in_bazaar diverged from the model at state {i}"
+                "{name}@{i}: in_bazaar diverged from the model (action {:?})", action(name, cur)
+            );
+            assert_eq!(
+                weapons_applied, w_applied(cur),
+                "{name}@{i}: weapons-applied diverged from the model's weaponsApplied \
+                 (action {:?})", action(name, cur)
             );
         }
-        assert!(saw_crossing, "the fixture trace must exercise a bazaar crossing (its whole point)");
+        saw_crossing
+    }
+
+    #[test]
+    fn apply_input_conforms_to_every_tla_trace() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/traces");
+        let mut replayed = 0usize;
+        let mut any_crossing = false;
+        let mut seen: Vec<String> = Vec::new();
+        for entry in std::fs::read_dir(dir).expect("read the traces dir") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            // Only the ITF trace fixtures (`*.itf.json`); ignore any other JSON.
+            if !name.ends_with(".itf.json") {
+                continue;
+            }
+            let raw = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {name}: {e}"));
+            any_crossing |= replay_itf_trace(&name, &raw);
+            replayed += 1;
+            seen.push(name);
+        }
+        seen.sort();
+        // Guard against an empty/renamed corpus silently passing (no traces => nothing
+        // checked). We commit several fixtures; require the harness actually ran them.
+        assert!(replayed >= 4,
+            "expected >= 4 trace fixtures in tests/traces, replayed {replayed}: {seen:?}");
+        // Teeth: SOMEWHERE in the corpus a barrier crossing must occur, where reverting
+        // the ack-on-barrier-reject fix makes a per-state ack assertion fire.
+        assert!(any_crossing,
+            "no trace in the corpus exercised a bazaar crossing — the conformance teeth are gone");
     }
 
     // -----------------------------------------------------------------------
