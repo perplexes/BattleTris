@@ -644,6 +644,14 @@ impl WasmVsComputer {
     pub fn add_funds(&mut self, amount: i32) {
         self.inner.player_mut().add_funds(amount as i64);
     }
+    /// Test/debug: grant one of `token` to the arsenal directly (no funds).
+    /// Returns false if the arsenal already holds 10 distinct kinds.
+    pub fn grant_weapon(&mut self, token: i32) -> bool {
+        match WeaponToken::from_index(token) {
+            Some(t) => self.inner.player_mut().grant_weapon(t),
+            None => false,
+        }
+    }
     /// Test/debug: set the player's arsenal directly — used by the e2e test to
     /// pre-stock weapons against Ernie without playing to the bazaar.
     pub fn import_arsenal(&mut self, data: Vec<i32>) {

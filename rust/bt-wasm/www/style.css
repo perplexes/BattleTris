@@ -200,6 +200,35 @@ body {
     max-width: 46ch;
 }
 
+/* Debug weapon-grant picker (?debug=1). Interactive, so it keeps pointer-events. */
+.debug-tools {
+    position: fixed;
+    top: 48px;
+    right: 8px;
+    z-index: 10000;
+    width: 196px;
+    max-height: 78vh;
+    overflow-y: auto;
+    padding: 6px;
+    background: rgba(0, 0, 0, 0.88);
+    border: 1px solid #2a2;
+    font-family: 'lucidatypewriter', monospace;
+}
+.debug-tools .dt-head { color: #4ee44e; font-size: 10px; letter-spacing: 1px; margin: 0 0 6px; }
+.debug-tools .dt-funds {
+    display: block; width: 100%; margin: 0 0 6px; padding: 5px;
+    background: #1a2a0a; color: #f5d000; border: 1px solid #4a6a1a;
+    font-family: inherit; font-size: 11px; cursor: pointer;
+}
+.debug-tools .dt-funds:hover { background: #2a3a0a; }
+.debug-tools .dt-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; }
+.debug-tools .dt-wpn {
+    padding: 3px 4px; background: #111; color: #cfeccf; border: 1px solid #2a2;
+    font-family: inherit; font-size: 9.5px; line-height: 1.2; text-align: left; cursor: pointer;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.debug-tools .dt-wpn:hover { background: #1a3a1a; }
+
 /* The reconnect/forfeit-countdown overlay reuses .game-over-text but is a status
    message (two lines), so it's smaller and renders its newline. */
 #reconnectText {

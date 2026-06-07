@@ -1,4 +1,4 @@
-import init, { WasmGame, WasmVsComputer, WasmClient, fixed_dt, max_weapons, weapon_name, weapon_description, weapon_duration } from '../pkg/bt_wasm.js';
+import init, { WasmGame, WasmVsComputer, WasmClient, fixed_dt, max_weapons, weapon_name, weapon_price, weapon_description, weapon_duration } from '../pkg/bt_wasm.js';
 import { CELL_SIZE, drawBoard } from './render.js';
 import { Sound } from './sound.js';
 import type { ServerMessage, PlayerInfo, SideStatus, OppStatus, PlayerStats, ReplayMeta } from './protocol.js';
@@ -1368,11 +1368,13 @@ function processEvents() {
 // for netcode/desync work: tick/seed/match, prediction-vs-server drift, unacked
 // inputs, and active weapons + remaining lines.
 const debugOverlayEl = document.getElementById('debugOverlay') as HTMLElement | null;
+const debugToolsEl = document.getElementById('debugTools') as HTMLElement | null;
 let debugOn = new URLSearchParams(location.search).get('debug') === '1';
 window.addEventListener('keydown', (e) => {
     if (e.key === '`') {
         debugOn = !debugOn;
         if (!debugOn && debugOverlayEl) debugOverlayEl.style.display = 'none';
+        if (!debugOn && debugToolsEl) debugToolsEl.style.display = 'none';
     }
 });
 function updateDebugOverlay() {
@@ -1415,6 +1417,54 @@ function updateDebugOverlay() {
         L.push('weapons: ' + (active.length ? active.join(', ') : '—'));
     } catch (_) {}
     debugOverlayEl.textContent = L.join('\n');
+}
+
+// Debug weapon-grant picker (vs-Computer only): a funds drop + one-click grant of
+// any of the 34 weapons straight into the arsenal. Behind the same ?debug=1 / `
+// gate as the overlay. Built once, lazily. Not recorded into the replay (a debug
+// mutation), so granted weapons won't reproduce on replay — fine for live testing.
+let debugToolsBuilt = false;
+function buildDebugTools() {
+    if (!debugToolsEl || debugToolsBuilt) return;
+    debugToolsBuilt = true;
+    const head = document.createElement('div');
+    head.className = 'dt-head';
+    head.textContent = '▟ WEAPON GRANT';
+    debugToolsEl.appendChild(head);
+
+    const fundsBtn = document.createElement('button');
+    fundsBtn.className = 'dt-funds';
+    fundsBtn.textContent = '+99,999 ¢';
+    fundsBtn.addEventListener('click', () => {
+        const g = game as WasmVsComputer | null;
+        if (g && typeof g.add_funds === 'function') { g.add_funds(99999); updateArsenalPanel(); }
+    });
+    debugToolsEl.appendChild(fundsBtn);
+
+    const grid = document.createElement('div');
+    grid.className = 'dt-grid';
+    const max = (typeof max_weapons === 'function') ? max_weapons() : 34;
+    for (let t = 0; t < max; t++) {
+        const btn = document.createElement('button');
+        btn.className = 'dt-wpn';
+        btn.textContent = weapon_name(t);
+        btn.title = `${weapon_name(t)} — ${weapon_price(t)}¢`;
+        btn.addEventListener('click', () => {
+            const g = game as WasmVsComputer | null;
+            if (!g || typeof g.grant_weapon !== 'function') return;
+            if (g.grant_weapon(t)) { updateArsenalPanel(); showToast(`granted ${weapon_name(t)}`, 1200); }
+            else { showToast('arsenal full (10 slots) — sell one first', 1600); }
+        });
+        grid.appendChild(btn);
+    }
+    debugToolsEl.appendChild(grid);
+}
+function updateDebugTools() {
+    if (!debugToolsEl) return;
+    const show = debugOn && !lobbyActive && !!game && typeof (game as WasmVsComputer).grant_weapon === 'function';
+    if (!show) { debugToolsEl.style.display = 'none'; return; }
+    buildDebugTools();
+    debugToolsEl.style.display = '';
 }
 
 function gameLoop(now: number) {
@@ -1484,6 +1534,7 @@ function gameLoop(now: number) {
     updateArsenalPanel();
     updateBazaarOverlay();
     updateDebugOverlay();
+    updateDebugTools();
 
     // When an opponent board is visible (vs-Computer Ernie, or an online spy),
     // mark the game-area so the mobile layout puts the two boards side by side
