@@ -1005,6 +1005,83 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // TLA+ CONFORMANCE (à la modelator): replay an Apalache-generated trace against the
+    // REAL Bout::apply_input and assert the implementation's (ack, in_bazaar) tracks the
+    // MODEL's (serverAck, serverBazaar) at every step. The trace — tla/Cross.tla, checked
+    // in as a fixture — is forced to perform a bazaar CROSSING (a gameplay input the
+    // barrier rejects), the exact step where the ack-on-barrier-reject fix matters: the
+    // model says serverAck advances there, so the real apply_input must too. Revert the
+    // fix and the conformance assert fires at the crossing. This makes the TLA+ model and
+    // the Rust code share one source of truth instead of drifting apart.
+    fn itf_int(v: &serde_json::Value) -> i64 {
+        v.get("#bigint").and_then(|b| b.as_str()).map(|s| s.parse().unwrap())
+            .unwrap_or_else(|| v.as_i64().expect("itf int"))
+    }
+    fn itf_chan(s: &serde_json::Value) -> Vec<(String, u64)> {
+        s["inputChan"].as_array().expect("inputChan is a seq").iter()
+            .map(|e| (e["kind"].as_str().unwrap().to_string(), itf_int(&e["seq"]) as u64))
+            .collect()
+    }
+    fn itf_input(kind: &str) -> Input {
+        match kind {
+            "G" => Input::MoveLeft,        // gameplay
+            "W" => Input::LaunchWeapon(0), // weapon (same barrier class)
+            _ => Input::LeaveBazaar,       // "L" / "P"
+        }
+    }
+
+    #[test]
+    fn apply_input_conforms_to_the_tla_crossing_trace() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/traces/bazaar_crossing.itf.json");
+        let raw = std::fs::read_to_string(path).expect("read the Apalache trace fixture");
+        let trace: serde_json::Value = serde_json::from_str(&raw).expect("parse ITF JSON");
+        let states = trace["states"].as_array().expect("states array");
+
+        let baz = |s: &serde_json::Value| s["serverBazaar"].as_bool().unwrap();
+        let ack = |s: &serde_json::Value| itf_int(&s["serverAck"]) as u64;
+
+        let side = Side::A;
+        let mut b = Bout::new(7, 11);
+
+        // State 0: a fresh bout must match the model's initial state.
+        assert_eq!(b.snapshot_for(side, false).ack, ack(&states[0]), "ack @ state 0");
+        assert_eq!(b.versus.game(side).is_in_bazaar(), baz(&states[0]), "bazaar @ state 0");
+
+        let mut saw_crossing = false;
+        for i in 1..states.len() {
+            let (prev, cur) = (&states[i - 1], &states[i]);
+            let pchan = itf_chan(prev);
+
+            if baz(cur) && !baz(prev) {
+                // ServerEnterBazaar → drive the real server into the bazaar.
+                force_into_bazaar(&mut b, side);
+            } else if itf_chan(cur).len() + 1 == pchan.len() {
+                // ServerDeliverInput → feed the delivered (head) input to apply_input.
+                let (kind, seq) = pchan[0].clone();
+                let applied = b.apply_input(side, &itf_input(&kind), seq);
+                if baz(prev) && (kind == "G" || kind == "W") {
+                    // THE crossing: a gameplay input the barrier rejects.
+                    assert!(!applied, "a barrier-crossing gameplay input must not be applied");
+                    saw_crossing = true;
+                }
+            }
+            // else: ClientSend (channel grew) or a snapshot step — no server-side effect.
+
+            // Conformance: real (ack, in_bazaar) must equal the model's at this state.
+            assert_eq!(
+                b.snapshot_for(side, false).ack, ack(cur),
+                "ACK DIVERGED from the TLA+ model at state {i} — the real apply_input did not \
+                 advance ack like the model (the ack-on-barrier-reject fix is the difference)"
+            );
+            assert_eq!(
+                b.versus.game(side).is_in_bazaar(), baz(cur),
+                "in_bazaar diverged from the model at state {i}"
+            );
+        }
+        assert!(saw_crossing, "the fixture trace must exercise a bazaar crossing (its whole point)");
+    }
+
+    // -----------------------------------------------------------------------
     // Property (c): INJECTION ORACLE. A non-economic legal input (move / rotate /
     //   drop / launch) must NEVER change a player's funds when applied — funds
     //   may only move later, inside the engine tick, from real line clears. So a

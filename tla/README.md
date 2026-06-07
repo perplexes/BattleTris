@@ -107,3 +107,29 @@ mirrors it (`ClientReLeave`), which forced one more refinement: a re-leave can p
 authoritative confirmation) vs **predicted `P`** (local-only) — only a wasted `P` trips
 `LeaveOnlyWhenReal`. With the hardening on, all four invariants still hold; each fix off
 still breaks its invariant.
+
+## Closing the loop: TLA⁺ traces → the real Rust (conformance)
+
+The model and the implementation can drift. To tie them together — the
+[modelator](https://github.com/informalsystems/modelator) idea — we generate a trace
+from Apalache and **replay it against the real `Bout::apply_input`**, asserting the
+implementation's `(ack, in_bazaar)` tracks the model's `(serverAck, serverBazaar)` at
+every step:
+
+- **`Cross.tla`** is a tiny generator whose history variable `crossed` + the trap
+  `INVARIANT NotCrossed` force Apalache to emit the shortest trace that performs a
+  bazaar *crossing* (a gameplay input the barrier rejects). Its `.itf.json` is checked in
+  as a fixture at `rust/bt-server/tests/traces/bazaar_crossing.itf.json`.
+- **`apply_input_conforms_to_the_tla_crossing_trace`** (in `bt-server/src/bout.rs`)
+  parses that ITF trace, drives a real `Bout` along it (`force_into_bazaar` on a bazaar
+  entry, `apply_input` on a delivery), and asserts conformance after every state.
+
+The crux is the crossing step: the model says `serverAck` advances there, so the real
+`apply_input` must too. Revert the ack-on-barrier-reject fix and the test fails with
+`ACK DIVERGED from the TLA+ model at state 3` — a model-tied conformance check that runs
+in `cargo test`. Regenerate the fixture after a model change with:
+
+```sh
+apalache-mc check --length=6 --config=Cross.cfg Cross.tla   # writes _apalache-out/.../violation1.itf.json
+cp _apalache-out/Cross.tla/*/violation1.itf.json ../rust/bt-server/tests/traces/bazaar_crossing.itf.json
+```

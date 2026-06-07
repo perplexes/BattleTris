@@ -1,0 +1,119 @@
+{
+  "#meta": {
+    "format": "ITF",
+    "format-description": "https://apalache-mc.org/docs/adr/015adr-trace.html",
+    "description": "Created by Apalache on Sun Jun 07 11:15:04 PDT 2026",
+    "varTypes": {
+      "crossed": "Bool",
+      "serverBazaar": "Bool",
+      "clientSeq": "Int",
+      "serverAck": "Int",
+      "inputChan": "Seq({ kind: Str, seq: Int })"
+    }
+  },
+  "params": [
+    "AckOnBarrierReject",
+    "MaxChan",
+    "MaxSeq"
+  ],
+  "vars": [
+    "crossed",
+    "serverBazaar",
+    "clientSeq",
+    "serverAck",
+    "inputChan"
+  ],
+  "states": [
+    {
+      "#meta": {
+        "index": 0
+      },
+      "AckOnBarrierReject": true,
+      "MaxChan": {
+        "#bigint": "2"
+      },
+      "MaxSeq": {
+        "#bigint": "3"
+      },
+      "clientSeq": {
+        "#bigint": "0"
+      },
+      "crossed": false,
+      "inputChan": [],
+      "serverAck": {
+        "#bigint": "0"
+      },
+      "serverBazaar": false
+    },
+    {
+      "#meta": {
+        "index": 1
+      },
+      "AckOnBarrierReject": true,
+      "MaxChan": {
+        "#bigint": "2"
+      },
+      "MaxSeq": {
+        "#bigint": "3"
+      },
+      "clientSeq": {
+        "#bigint": "0"
+      },
+      "crossed": false,
+      "inputChan": [],
+      "serverAck": {
+        "#bigint": "0"
+      },
+      "serverBazaar": true
+    },
+    {
+      "#meta": {
+        "index": 2
+      },
+      "AckOnBarrierReject": true,
+      "MaxChan": {
+        "#bigint": "2"
+      },
+      "MaxSeq": {
+        "#bigint": "3"
+      },
+      "clientSeq": {
+        "#bigint": "1"
+      },
+      "crossed": false,
+      "inputChan": [
+        {
+          "kind": "G",
+          "seq": {
+            "#bigint": "1"
+          }
+        }
+      ],
+      "serverAck": {
+        "#bigint": "0"
+      },
+      "serverBazaar": true
+    },
+    {
+      "#meta": {
+        "index": 3
+      },
+      "AckOnBarrierReject": true,
+      "MaxChan": {
+        "#bigint": "2"
+      },
+      "MaxSeq": {
+        "#bigint": "3"
+      },
+      "clientSeq": {
+        "#bigint": "1"
+      },
+      "crossed": true,
+      "inputChan": [],
+      "serverAck": {
+        "#bigint": "1"
+      },
+      "serverBazaar": true
+    }
+  ]
+}
