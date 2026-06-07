@@ -95,6 +95,19 @@ abstraction did not. `Stuck` was tightened to the sound ack-gap predicate; the
 predicted-leave freeze is caught by the safety invariant `LeaveOnlyWhenReal` instead.
 That's the loop: the checker forces you to say exactly what you mean.
 
+A later review pass closed one more soundness gap: for `Stuck` to be a genuinely
+*absorbing* single-state predicate, the modelled client must be unable to make progress
+out of it. `ClientSendGameplay`/`ClientFireWeapon` originally lacked the WaitAck gate the
+real bot has (`bt-bot`'s `decide` holds **all** sends while `acked < last_sent`), so the
+model was *more permissive* than the code — and a `Stuck`-labelled state could still send.
+Adding the `clientViewAck >= clientSeq` conjunct to those actions makes the model faithful
+to the bot **and** makes `Stuck` absorbing: with the gap open and nothing in flight, every
+client send is gated off and no in-bout action can close it. The only thing that leaves a
+`Stuck` state is a `Disconnect`+`Reconnect` — i.e. the player **reloading the page**, which
+is precisely the manual escape hatch from the freeze, not an in-bout recovery. So flagging
+`Stuck` is correct. (Teeth preserved: each `NetcodeBug*` cfg still violates its invariant;
+the all-fixed run is still `NoError`.)
+
 ### …and what we hardened because of it
 
 The latent re-arm assumption was real even if production satisfies it, so we closed it

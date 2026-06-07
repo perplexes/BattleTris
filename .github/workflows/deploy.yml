@@ -63,16 +63,16 @@ jobs:
             "https://github.com/apalache-mc/apalache/releases/download/v${APALACHE_VERSION}/apalache-${APALACHE_VERSION}.tgz"
           tar -xzf apalache.tgz
           echo "APALACHE_MC=$PWD/apalache-${APALACHE_VERSION}/bin/apalache-mc" >> "$GITHUB_ENV"
+      # NOTE: the install step exported APALACHE_MC via $GITHUB_ENV, so it is already
+      # in the environment of every later step's shell. We must NOT re-declare it as a
+      # step-level `env:` mapping — `${{ env.APALACHE_MC }}` is evaluated from the job's
+      # env context (computed before this job's steps run, where APALACHE_MC is unset),
+      # so that would shadow the real path with an empty string. Just read $APALACHE_MC.
       - name: Model checks (assert the expected outcome of each)
         working-directory: tla
-        env:
-          # Set by the install step above; the helper below uses it.
-          APALACHE_MC: ${{ env.APALACHE_MC }}
         run: bash ci-check.sh
       - name: Trace fixtures are not stale
         working-directory: tla
-        env:
-          APALACHE_MC: ${{ env.APALACHE_MC }}
         run: bash regen-traces.sh --check
 
   # The FULL all-fixed Netcode check is ~6.5 min — too slow for the default PR path.

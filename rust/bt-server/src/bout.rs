@@ -534,13 +534,29 @@ mod tests {
         assert_eq!(b.snapshot_for(Side::A, false).ack, 1, "A's ack tracks the reconnected seq");
     }
 
-    /// Force `side` into the bazaar deterministically by crossing a 20-line bazaar
-    /// boundary via the score mirror (combined lines 19 -> lines_til_baz = 1, then
-    /// 20 -> update_bazaar sees new_til(20) > 1 and fires `in_bazaar`). Uses only
-    /// the engine's own bazaar logic, so it's faithful to a real entry.
+    /// Force `side` into the bazaar deterministically by crossing the NEXT 20-line bazaar
+    /// boundary via the score mirror — and do it MONOTONICALLY in the opponent's line
+    /// count, so repeated calls (a multi-visit trace) model successive real entries (20,
+    /// 40, 60, …) instead of rewinding `op_lines` (which can't happen in a real match —
+    /// the opponent's cleared-line count only grows). We read the current combined lines,
+    /// pick the next multiple of `BT_LINES_TIL_BAZ` strictly above it, and raise `op_lines`
+    /// to just-below then at that boundary (`update_bazaar` then sees `new_til` jump up and
+    /// fires `in_bazaar`). Uses only the engine's own bazaar logic, so it's faithful to a
+    /// real entry on every visit.
     fn force_into_bazaar(b: &mut Bout, side: Side) {
-        b.versus.game_mut(side).receive_op_score(0, 19, 0);
-        b.versus.game_mut(side).receive_op_score(0, 20, 0);
+        const BAZ: i64 = 20; // bt_core::BT_LINES_TIL_BAZ (private); the 20-line boundary.
+        let g = b.versus.game(side);
+        let own = g.score().lines;
+        let op = g.score().op_lines;
+        let combined = own + op;
+        // The next 20-boundary strictly above the current combined line count.
+        let boundary = (combined / BAZ + 1) * BAZ;
+        // op_lines that puts combined at boundary-1 then boundary. Both are >= the current
+        // op_lines (monotonic), since boundary > combined >= op implies boundary-1 >= op.
+        let op_just_below = boundary - 1 - own;
+        let op_at = boundary - own;
+        b.versus.game_mut(side).receive_op_score(0, op_just_below, 0);
+        b.versus.game_mut(side).receive_op_score(0, op_at, 0);
     }
 
     /// Strategy: legal client inputs that must NEVER change a player's funds via
@@ -1103,7 +1119,16 @@ mod tests {
                         "{name}: ServerDeliverInput at state {i} but the channel was empty");
                     let (kind, seq) = pchan[0].clone();
                     let in_bazaar_before = b.versus.game(side).is_in_bazaar();
+                    // Witness a REAL weapon launch (not merely "apply_input returned true"):
+                    // a genuine LaunchWeapon decrements the fired arsenal slot. We snapshot
+                    // slot-0's quantity before/after so the weapons-applied oracle counts an
+                    // actual launch — if the "W" mapping were ever changed to a non-weapon,
+                    // or launch became a no-op, the quantity wouldn't move and the assert
+                    // below would catch the count mismatch. (The harness stocked slot 0 with
+                    // 8 RiseUp, more than any fixture's W count, so the slot never empties.)
+                    let qty_before = b.versus.game(side).arsenal_quantity(0);
                     let applied = b.apply_input(side, &itf_input(&kind), seq);
+                    let qty_after = b.versus.game(side).arsenal_quantity(0);
                     if in_bazaar_before && (kind == "G" || kind == "W") {
                         // THE crossing: a gameplay/weapon input the barrier rejects.
                         assert!(!applied,
@@ -1112,7 +1137,14 @@ mod tests {
                     }
                     if applied && kind == "W" {
                         // A weapon delivered in normal play (matches the model's
-                        // weaponsApplied++). A barrier-rejected "W" is NOT counted.
+                        // weaponsApplied++). Require the launch ACTUALLY fired — the arsenal
+                        // slot must have decremented — so the oracle witnesses a real weapon,
+                        // not just an accepted input. (A barrier-rejected "W" is not applied,
+                        // so it's never counted here.)
+                        assert_eq!(qty_after + 1, qty_before,
+                            "{name}@{i}: an applied \"W\" did not actually launch a weapon \
+                             (arsenal slot 0 went {qty_before} -> {qty_after}) — the weapons \
+                             oracle would be counting a non-launch");
                         weapons_applied += 1;
                     }
                 }
