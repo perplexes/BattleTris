@@ -697,10 +697,22 @@ fn drive_tick(state: &mut MatchState, out: &Out) {
                 state.done = true; // the driver loop ends the match next tick
             }
         }
-        // Inputs in flight, or a bazaar barrier that isn't ours to clear — hold. The
-        // local sim simply doesn't tick; every piece is hard-dropped and keyframes
-        // reconcile us, so a brief pause costs nothing.
-        BotAction::WaitAck | BotAction::WaitBazaar => {}
+        // Inputs in flight — hold until the server catches up (we never run ahead).
+        BotAction::WaitAck => {}
+        // A bazaar barrier that isn't ours to initiate-clear — hold. BUT if the server
+        // authoritatively still has US in the bazaar and we've already shopped, keep
+        // (idempotently) re-sending LeaveBazaar until it takes. This makes escaping a
+        // bazaar we're in independent of the `bazaar_bought` re-arm ever observing an
+        // out-of-bazaar snapshot — a latent assumption the TLA+ model surfaced (the
+        // re-arm could miss a too-fast re-entry). Gated on `in_bazaar` (the AUTHORITATIVE
+        // flag), never on a mere local prediction, so we can't send a leave the server
+        // would eat before we're really in the bazaar (the predicted-leave freeze).
+        // We're here only when not WaitAck, so the re-leave can't race an unacked input.
+        BotAction::WaitBazaar => {
+            if state.in_bazaar && state.bazaar_bought {
+                send_input(&mut state.predictor, out, Input::LeaveBazaar);
+            }
+        }
         // Authoritatively + locally in our bazaar: buy a loadout and leave, once. The
         // server stays in the bazaar until our LeaveBazaar, and we only got here after
         // it acked our prior inputs, so the leave can't race the entry.

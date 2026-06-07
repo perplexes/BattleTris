@@ -94,3 +94,16 @@ the **in-order channel + always-sent snapshots** guarantee in production but the
 abstraction did not. `Stuck` was tightened to the sound ack-gap predicate; the
 predicted-leave freeze is caught by the safety invariant `LeaveOnlyWhenReal` instead.
 That's the loop: the checker forces you to say exactly what you mean.
+
+### …and what we hardened because of it
+
+The latent re-arm assumption was real even if production satisfies it, so we closed it
+in the code: `bt-bot`'s `WaitBazaar` arm now **idempotently re-sends `LeaveBazaar` while
+the server authoritatively still has us in the bazaar** (`DefensiveReLeave`), gated on
+the authoritative flag — never local prediction — so escaping a bazaar we're in no
+longer depends on the `bought` re-arm ever seeing an out-of-bazaar snapshot. The model
+mirrors it (`ClientReLeave`), which forced one more refinement: a re-leave can produce a
+*benign* stale `LeaveBazaar`, so leaves are now tagged **real `L`** (sent with
+authoritative confirmation) vs **predicted `P`** (local-only) — only a wasted `P` trips
+`LeaveOnlyWhenReal`. With the hardening on, all four invariants still hold; each fix off
+still breaks its invariant.

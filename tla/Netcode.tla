@@ -41,7 +41,9 @@ CONSTANTS
     \* @type: Bool;
     ResetAckOnReattach,   \* (A) drop the ack baseline on reconnect           — TRUE = fix
     \* @type: Bool;
-    LeaveNeedsAuth        \* (C) shop only on the authoritative bazaar view   — TRUE = fix
+    LeaveNeedsAuth,       \* (C) shop only on the authoritative bazaar view   — TRUE = fix
+    \* @type: Bool;
+    DefensiveReLeave      \* (hardening) re-send LeaveBazaar while authoritatively in our bazaar
 
 VARIABLES
     \* @type: Int;
@@ -124,9 +126,28 @@ ClientShop ==
     /\ clientSeq < MaxSeq /\ Len(inputChan) < MaxChan
     /\ clientBought' = TRUE
     /\ clientSeq' = clientSeq + 1
-    /\ inputChan' = Append(inputChan, [ seq |-> clientSeq + 1, kind |-> "L" ])
+    \* A leave sent WITH authoritative confirmation is a real "L"; one sent on mere
+    \* local prediction (possible only when LeaveNeedsAuth = FALSE) is a "P" — the only
+    \* kind that can be WASTED if the server eats it before its bazaar visit.
+    /\ inputChan' = Append(inputChan, [ seq |-> clientSeq + 1, kind |-> IF clientViewBazaar THEN "L" ELSE "P" ])
     /\ UNCHANGED << clientViewAck, clientViewBazaar, clientLocalBazaar, serverAck, serverBazaar,
                     snapChan, connected, weaponsFired, weaponsApplied, wastedLeave >>
+
+\* HARDENING (mirrors bt-bot's WaitBazaar arm): while the server AUTHORITATIVELY still
+\* has us in the bazaar and we've already shopped, keep (idempotently) re-sending
+\* LeaveBazaar. Escaping the bazaar then never depends on the `bought` re-arm observing
+\* an out-of-bazaar snapshot (the latent assumption the model surfaced). Gated on
+\* clientViewBazaar (authoritative), never local prediction — so it is always a real "L".
+ClientReLeave ==
+    /\ DefensiveReLeave
+    /\ connected /\ clientViewBazaar /\ clientBought
+    /\ clientViewAck >= clientSeq        \* not WaitAck
+    /\ clientSeq < MaxSeq /\ Len(inputChan) < MaxChan
+    /\ clientSeq' = clientSeq + 1
+    /\ inputChan' = Append(inputChan, [ seq |-> clientSeq + 1, kind |-> "L" ])
+    /\ UNCHANGED << clientBought, clientViewAck, clientViewBazaar, clientLocalBazaar,
+                    serverAck, serverBazaar, snapChan, connected,
+                    weaponsFired, weaponsApplied, wastedLeave >>
 
 \* Receive a snapshot: a keyframe resyncs BOTH views (authoritative + local) and
 \* re-arms `bought` whenever the server confirms we are out of the bazaar.
@@ -160,12 +181,15 @@ ServerDeliverInput ==
            THEN \* stale / replayed (e.g. a fresh client's low seq vs a NOT-reset ack):
                 \* rejected, nothing changes — this is the snap-back when reset_ack is off.
                 UNCHANGED << serverAck, serverBazaar, weaponsApplied, wastedLeave >>
-           ELSE IF in.kind = "L"
-                THEN \* LeaveBazaar: bazaar-legal, ack advances. Effective only if we are
-                     \* actually in the bazaar; eating one while NOT in it is a WASTED leave.
+           ELSE IF in.kind \in {"L", "P"}
+                THEN \* LeaveBazaar (bazaar-legal; ack advances; leaving when not in the
+                     \* bazaar is a harmless no-op). WASTED only if it was a PREDICTED leave
+                     \* ("P", no authoritative confirmation) eaten before the server's bazaar
+                     \* visit — the predicted-leave freeze. A duplicate/stale real "L" (a
+                     \* defensive re-leave arriving after we already left) is benign.
                      /\ serverAck' = in.seq
                      /\ serverBazaar' = FALSE
-                     /\ wastedLeave' = IF serverBazaar THEN wastedLeave ELSE TRUE
+                     /\ wastedLeave' = IF (in.kind = "P" /\ ~serverBazaar) THEN TRUE ELSE wastedLeave
                      /\ UNCHANGED weaponsApplied
                 ELSE IF serverBazaar
                      THEN \* gameplay / weapon hits the barrier: NOT applied. Ack advances
@@ -215,7 +239,7 @@ Reconnect ==
 
 Next ==
     \/ ClientSendGameplay \/ ClientFireWeapon \/ ClientLocalEnterBazaar
-    \/ ClientShop         \/ ClientDeliverSnapshot
+    \/ ClientShop         \/ ClientReLeave     \/ ClientDeliverSnapshot
     \/ ServerEnterBazaar  \/ ServerDeliverInput \/ ServerSendSnapshot
     \/ Disconnect         \/ Reconnect
 
