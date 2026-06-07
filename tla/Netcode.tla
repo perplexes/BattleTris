@@ -87,16 +87,17 @@ Init ==
 
 (* === Client ============================================================ *)
 
-\* Predict ahead while it believes it is playing (neither view shows the bazaar). The
-\* `clientViewAck >= clientSeq` conjunct is the bot's WaitAck gate (bt-bot's `decide`
-\* holds ALL sends — Play included — while `acked < last_sent`); without it the model
-\* would be MORE PERMISSIVE than the code, letting the client send fresh inputs while it
-\* still has unacked ones in flight. Including it also makes the `Stuck` predicate below a
-\* genuinely ABSORBING state: once the ack gap is open with nothing in flight, the client
-\* is WaitAck-gated and cannot send, so the gap can never close (the real deadlock).
+\* Predict ahead while it believes it is playing (neither view shows the bazaar). NOTE we
+\* deliberately do NOT gate this on `clientViewAck >= clientSeq`: the real bot, once
+\* `decide` returns `Play`, emits a BURST of inputs in one tick (several moves/rotates/a
+\* drop, plus maybe a weapon launch) — so MULTIPLE inputs are genuinely in flight before
+\* any ack arrives, and the server can enter the bazaar mid-burst. Keeping this ungated
+\* (bounded only by MaxChan) is what lets the model explore those multi-input crossings —
+\* the exact shape of the original freeze. (Stuck stays absorbing without a gate here: see
+\* the Stuck comment — the only ESCAPE actions, ClientShop/ClientReLeave, ARE WaitAck-gated,
+\* and a gameplay/weapon send can never advance serverAck while serverBazaar holds.)
 ClientSendGameplay ==
     /\ connected /\ ~clientLocalBazaar /\ ~clientViewBazaar
-    /\ clientViewAck >= clientSeq        \* not WaitAck (mirror bt-bot's decide)
     /\ clientSeq < MaxSeq /\ Len(inputChan) < MaxChan
     /\ clientSeq' = clientSeq + 1
     /\ inputChan' = Append(inputChan, [ seq |-> clientSeq + 1, kind |-> "G" ])
@@ -104,11 +105,10 @@ ClientSendGameplay ==
                     serverAck, serverBazaar, snapChan, connected,
                     weaponsFired, weaponsApplied, wastedLeave >>
 
-\* Fire a weapon — a non-shopping input, same barrier class as gameplay. Same WaitAck
-\* gate as ClientSendGameplay (the bot never fires a weapon with inputs in flight).
+\* Fire a weapon — a non-shopping input, same barrier class as gameplay. Ungated for the
+\* same burst reason as ClientSendGameplay (a Play tick can launch a weapon AND place).
 ClientFireWeapon ==
     /\ connected /\ ~clientLocalBazaar /\ ~clientViewBazaar
-    /\ clientViewAck >= clientSeq        \* not WaitAck (mirror bt-bot's decide)
     /\ clientSeq < MaxSeq /\ Len(inputChan) < MaxChan
     /\ clientSeq' = clientSeq + 1
     /\ weaponsFired' = weaponsFired + 1
@@ -270,13 +270,20 @@ LeaveOnlyWhenReal == ~wastedLeave
 \* The "frozen in the bazaar" state: the server is in the bazaar, the ack gap is open (a
 \* barrier-crossing input was never acked), and nothing is in flight to close it.
 \*
-\* SOUNDNESS of this as a single-state predicate. In a Stuck state, clientViewAck (which
-\* can never exceed serverAck — snapshots carry serverAck) is < clientSeq, so EVERY client
-\* send is WaitAck-gated OFF: ClientSendGameplay, ClientFireWeapon, ClientShop, and
-\* ClientReLeave all require `clientViewAck >= clientSeq` and are disabled. ServerDeliver
-\* needs a nonempty channel (disabled), ServerEnterBazaar needs ~serverBazaar (disabled),
-\* and the snapshot/local-predict actions never touch (serverAck, clientSeq, serverBazaar,
-\* inputChan). So NO in-bout action can close the gap — the match is genuinely frozen.
+\* SOUNDNESS of this as a single-state predicate. The gap closes only if serverAck rises,
+\* which happens only in ServerDeliverInput (or a Reconnect — see below). In a Stuck state
+\* inputChan is empty, so ServerDeliverInput is disabled until the client sends. The client
+\* CAN still send gameplay/weapon inputs (it may not yet know it is in the bazaar — that is
+\* the whole point), but those can NEVER advance serverAck while serverBazaar holds: under
+\* the bug a barrier-rejected input is not acked, and a fresh non-bazaar apply is impossible
+\* while serverBazaar = TRUE. The only delivery that WOULD advance serverAck-and-leave is an
+\* "L"/"P", emitted solely by ClientShop / ClientReLeave — both of which ARE WaitAck-gated
+\* (`clientViewAck >= clientSeq`). Since clientViewAck can never exceed serverAck (snapshots
+\* carry serverAck) and serverAck < clientSeq here, those escape actions are DISABLED. So no
+\* sequence of in-bout actions can close the gap — the match is genuinely frozen. (Note it
+\* is the ESCAPE actions' existing gate, not a gate on gameplay sends, that makes Stuck
+\* absorbing — so gameplay/weapon sends stay ungated and the model still explores the
+\* multi-input-in-flight bursts that produce the crossing.)
 \*
 \* The ONE thing that can leave a Stuck state is Disconnect+Reconnect — i.e. the player
 \* RELOADS THE PAGE. That is not an in-bout recovery; it is precisely the user's

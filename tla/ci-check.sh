@@ -37,6 +37,15 @@ run_check() {
           --config="$cfg" "$model" 2>&1)" || true
   rm -rf "$work"
 
+  # (0) Reject Apalache INPUT/TOOL failures outright (parse/type/config/IO). These never
+  # reach an invariant check, so they must NEVER be mistaken for a teeth "Error". (They
+  # also print no "The outcome is:" line, but we reject them explicitly + loudly.)
+  if echo "$out" | grep -qE "type input error|Error parsing|config file not found|Parsing error|SemanticError|Fatal error"; then
+    echo "   FAIL: Apalache reported an input/tool error (not an invariant result):"
+    echo "$out" | grep -E "type input error|Error parsing|config file not found|Parsing error|SemanticError|Fatal error" | head -2
+    fail=1
+    return
+  fi
   # (1) The intended invariant must have been the one Apalache checked.
   if ! echo "$out" | grep -qE "found INVARIANTS:.*\b$inv\b"; then
     echo "   FAIL: Apalache did not load the expected invariant '$inv' (malformed cfg/model?):"
@@ -45,13 +54,33 @@ run_check() {
     fail=1
     return
   fi
-  # (2) ...with the expected outcome.
-  if echo "$out" | grep -q "The outcome is: $expect"; then
-    echo "   OK: $inv -> outcome $expect"
-  else
+  # (2) ...with the expected outcome — AND, for an expected Error, the genuine
+  # invariant-VIOLATION markers (so a non-violation that still prints "outcome: Error"
+  # can't pass as teeth). For an expected NoError we additionally require there was no
+  # violation reported.
+  if ! echo "$out" | grep -q "The outcome is: $expect"; then
     echo "   FAIL: expected outcome '$expect' on '$inv' but Apalache reported:"
     echo "$out" | grep -E "The outcome is:|violated|Found .* error" || echo "$out" | tail -3
     fail=1
+    return
+  fi
+  if [[ "$expect" == "Error" ]]; then
+    if echo "$out" | grep -qE "invariant [0-9]+ violated" && echo "$out" | grep -q "Checker has found an error"; then
+      echo "   OK: $inv -> invariant violated (genuine teeth)"
+    else
+      echo "   FAIL: '$expect' on '$inv' but no genuine invariant-violation marker — \
+the Error may be a tool/parse failure, not the invariant having teeth:"
+      echo "$out" | grep -E "The outcome is:|invariant .* violated|Checker has found|error" | head -3
+      fail=1
+    fi
+  else
+    # NoError: there must be NO violation marker at all.
+    if echo "$out" | grep -qE "invariant [0-9]+ violated"; then
+      echo "   FAIL: expected NoError on '$inv' but a violation was reported."
+      fail=1
+    else
+      echo "   OK: $inv -> outcome NoError (holds)"
+    fi
   fi
 }
 
