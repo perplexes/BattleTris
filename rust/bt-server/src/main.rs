@@ -47,6 +47,7 @@ use axum::response::{IntoResponse, Redirect};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use bt_core::versus::Side;
+use bt_core::weapons::WeaponToken;
 use bt_replay::{Input, Replay, ReplayPlayer, VersusReplay, VersusReplayPlayer};
 use bt_trueskill::ts2::{rate_match, MatchOutcome, PlayerState, Ts2Params, Winner};
 use bt_trueskill::{quality_1v1, Rating};
@@ -435,6 +436,12 @@ enum BoutControl {
     /// view). The loop adds `tx` to its spectator list; the spectator sends no
     /// inputs, so there's no anti-cheat surface.
     AddSpectator { tx: mpsc::UnboundedSender<Message> },
+    /// An out-of-band ADMIN grant (the gated `POST /admin/grant` dev tool): add one
+    /// weapon and/or some funds to `side`'s authoritative game, applied INSIDE the
+    /// bout task so it never races the tick loop. It is NOT a recorded `Input` — the
+    /// loop mutates the game directly and never appends to the replay frame stream,
+    /// so it can't perturb input ordering or determinism (see `Bout::debug_grant`).
+    DebugGrant { side: Side, weapon: Option<WeaponToken>, funds: Option<i64> },
 }
 
 /// A handle to a live bout, kept in [`App::bouts`] keyed by `match_id` so the
@@ -847,6 +854,16 @@ async fn run_bout(state: Shared, pb: PendingBout) {
                     if tx.send(Message::Text(bout.spectator_message(&name_a, &name_b))).is_ok() {
                         spectators.push(tx);
                     }
+                }
+                BoutControl::DebugGrant { side, weapon, funds } => {
+                    // Out-of-band admin grant: mutate the authoritative game for `side`
+                    // right here in the bout task (so it never races the tick loop). It
+                    // is NOT a recorded input, so the replay/input stream is untouched —
+                    // determinism for normal gameplay is preserved. Force a keyframe so
+                    // the next snapshot resyncs the client with the granted arsenal/funds.
+                    let (w, f) = bout.debug_grant(side, weapon, funds);
+                    println!("bout {match_id}: admin grant side {side:?} weapon={weapon:?} funds={funds:?} (weapon_granted={w}, funds_applied={f})");
+                    want_keyframe = true;
                 }
             }
         }
@@ -2261,6 +2278,93 @@ async fn admin_resume(State(state): State<Shared>, headers: HeaderMap) -> impl I
     (StatusCode::OK, "resumed\n".to_string())
 }
 
+/// `POST /admin/grant` — a gated dev tool to inject a weapon and/or funds into a
+/// LIVE online bout, so a developer can exercise the cross-player weapon relay with
+/// a single `curl` instead of two coordinated browser tabs. Body JSON:
+///   `{ "match_id": "<string>", "side": "A"|"B", "weapon": <0..=33 optional>, "funds": <i64 optional> }`
+/// At least one of `weapon`/`funds` must be present.
+///
+/// SECURITY: same fail-closed gate as the other `/admin/*` endpoints — `admin_authed`
+/// first (403 if the `x-admin-token` header is missing/wrong, or `BT_ADMIN_TOKEN` is
+/// unset). It injects only a weapon/funds GRANT (never board state or an arbitrary
+/// input), routed through the bout's own task, so there's no determinism surface: the
+/// grant is NOT recorded into the replay's input stream (see [`BoutControl::DebugGrant`]
+/// and [`Bout::debug_grant`]).
+async fn admin_grant(State(state): State<Shared>, headers: HeaderMap, body: String) -> impl IntoResponse {
+    if let Err((code, msg)) = admin_authed(&headers) {
+        return (code, msg).into_response();
+    }
+    let bad = |m: &str| (StatusCode::BAD_REQUEST, format!("{m}\n")).into_response();
+
+    let v: Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => return bad("malformed JSON body"),
+    };
+    let match_id = match v.get("match_id").and_then(|m| m.as_str()) {
+        Some(m) if !m.is_empty() => m.to_string(),
+        _ => return bad("match_id (non-empty string) required"),
+    };
+    let side = match v.get("side").and_then(|s| s.as_str()) {
+        Some("A") => Side::A,
+        Some("B") => Side::B,
+        _ => return bad("side must be \"A\" or \"B\""),
+    };
+    // `weapon` is the wire index 0..=33 (WeaponToken::from_index validates the range).
+    let weapon = match v.get("weapon") {
+        None | Some(Value::Null) => None,
+        Some(w) => match w.as_i64().and_then(|i| i32::try_from(i).ok()).and_then(WeaponToken::from_index) {
+            Some(tok) => Some(tok),
+            None => return bad("weapon must be an integer in 0..=33"),
+        },
+    };
+    let funds = match v.get("funds") {
+        None | Some(Value::Null) => None,
+        Some(f) => match f.as_i64() {
+            Some(n) => Some(n),
+            None => return bad("funds must be an integer (i64)"),
+        },
+    };
+    if weapon.is_none() && funds.is_none() {
+        return bad("at least one of weapon/funds must be present");
+    }
+
+    // Look up the LIVE bout and hand the grant to its task (out-of-band control
+    // channel), so the mutation happens inside the bout's own loop and never races
+    // the tick. try_send (not await): we never hold the App lock across a send, and a
+    // full control channel means the bout is wedged — surface that rather than block.
+    let control = {
+        let app = state.lock().await;
+        app.bouts.get(&match_id).map(|h| h.control.clone())
+    };
+    let control = match control {
+        Some(c) => c,
+        None => return (StatusCode::NOT_FOUND, "no such live match\n".to_string()).into_response(),
+    };
+    if control
+        .try_send(BoutControl::DebugGrant { side, weapon, funds })
+        .is_err()
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "bout busy (control channel full); try again\n".to_string(),
+        )
+            .into_response();
+    }
+    let side_str = match side {
+        Side::A => "A",
+        Side::B => "B",
+    };
+    println!("admin grant queued: match {match_id} side {side_str} weapon={weapon:?} funds={funds:?}");
+    Json(json!({
+        "granted": true,
+        "match_id": match_id,
+        "side": side_str,
+        "weapon": weapon.map(|t| t.index() as i32),
+        "funds": funds,
+    }))
+    .into_response()
+}
+
 /// `POST /api/identity` with `{"name":"<str>"}` — mints an HS256 identity token
 /// `{"token":"<jwt>"}` carrying the sanitized name. Empty/whitespace names are
 /// rejected; over-long names are capped to [`identity::MAX_NAME_LEN`].
@@ -2364,6 +2468,7 @@ async fn main() {
         .route("/api/debug/matches", get(debug_matches))
         .route("/admin/drain", post(admin_drain))
         .route("/admin/resume", post(admin_resume))
+        .route("/admin/grant", post(admin_grant))
         .route("/api/identity", post(post_identity))
         .route("/api/player/:name", get(player_profile))
         .route("/replay/:id", get(replay_page))
@@ -2539,6 +2644,235 @@ mod tests {
         // Dropping both receivers ends the loop (snapshot sends fail).
         drop(rx_a);
         drop(rx_b);
+        let _ = tokio::time::timeout(Duration::from_millis(300), handle).await;
+    }
+
+    // --- admin grant (the gated live-bout weapon/funds injection dev tool) ----
+
+    use axum::body::to_bytes;
+    use axum::response::Response;
+
+    /// `BT_ADMIN_TOKEN` is PROCESS-GLOBAL, so the tests that set/unset it must not run
+    /// concurrently (one's `remove_var` would race another's read). This serializes
+    /// them: each such test holds this lock for its whole body. A poisoned lock (an
+    /// earlier panic) is fine to reuse — we only need mutual exclusion, not the data.
+    fn admin_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Build a `HeaderMap` carrying (or omitting) an `x-admin-token`.
+    fn admin_headers(token: Option<&str>) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        if let Some(t) = token {
+            h.insert("x-admin-token", t.parse().unwrap());
+        }
+        h
+    }
+
+    /// Extract (status, parsed-JSON-or-Null) from an axum response.
+    async fn response_json(resp: Response) -> (StatusCode, Value) {
+        let status = resp.status();
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v = serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null);
+        (status, v)
+    }
+
+    /// Register a fake live bout in `app.bouts` and hand back its control RECEIVER
+    /// (so a test can observe the `DebugGrant` the handler routes to it) plus the
+    /// input receiver (kept alive so the input channel isn't closed). No tick loop —
+    /// these tests assert the HTTP handler's auth/validation/routing, not application.
+    fn register_fake_bout(app: &mut App, match_id: &str) -> (mpsc::Receiver<BoutControl>, mpsc::Receiver<BoutInput>) {
+        let (control_tx, control_rx) = mpsc::channel::<BoutControl>(4);
+        let (input_tx, input_rx) = mpsc::channel::<BoutInput>(BOUT_INPUT_CAP);
+        app.bouts.insert(
+            match_id.to_string(),
+            BoutHandle { control: control_tx, input_tx, name_a: "alice".into(), name_b: "bob".into() },
+        );
+        (control_rx, input_rx)
+    }
+
+    // (1) An UNAUTHED request (no x-admin-token while BT_ADMIN_TOKEN is set) is 403,
+    // and (2) with BT_ADMIN_TOKEN UNSET admin is fail-closed: even a token-bearing
+    // request is 403. Both share one test because BT_ADMIN_TOKEN is process-global —
+    // running them as separate parallel tests would race the env var.
+    //
+    // These three tests mutate the process-global `BT_ADMIN_TOKEN`, so they (a) hold
+    // `admin_env_lock()` for mutual exclusion and (b) are SYNCHRONOUS `#[test]`s that
+    // drive the async handler via `block_on` — never holding the std guard across an
+    // `.await` in async code (which clippy's `await_holding_lock` rightly forbids).
+    fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+    }
+
+    #[test]
+    fn admin_grant_is_fail_closed_and_requires_the_token() {
+        let _env = admin_env_lock();
+        let rt = rt();
+        let shared: Shared = Arc::new(Mutex::new(test_app()));
+        let body = json!({"match_id":"match-x","side":"A","weapon":7}).to_string();
+        let status = |hdr: HeaderMap, body: String| {
+            rt.block_on(admin_grant(State(shared.clone()), hdr, body)).into_response().status()
+        };
+
+        // BT_ADMIN_TOKEN set, but the request presents NO token -> 403.
+        std::env::set_var("BT_ADMIN_TOKEN", "s3cret");
+        assert_eq!(status(admin_headers(None), body.clone()), StatusCode::FORBIDDEN,
+            "missing x-admin-token must be forbidden");
+        // A WRONG token is also 403.
+        assert_eq!(status(admin_headers(Some("nope")), body.clone()), StatusCode::FORBIDDEN,
+            "wrong x-admin-token must be forbidden");
+
+        // BT_ADMIN_TOKEN UNSET -> fail-closed: even a token-bearing request is refused.
+        std::env::remove_var("BT_ADMIN_TOKEN");
+        assert_eq!(status(admin_headers(Some("anything")), body), StatusCode::FORBIDDEN,
+            "admin disabled (BT_ADMIN_TOKEN unset) must fail closed");
+    }
+
+    // (4) Authed-but-malformed requests are 4xx: bad side, out-of-range weapon, neither
+    // field present, and an unknown match_id (404). Auth must NOT mask these — they're
+    // only reachable once admin_authed passes.
+    #[test]
+    fn admin_grant_validates_body_and_match() {
+        let _env = admin_env_lock();
+        let rt = rt();
+        std::env::set_var("BT_ADMIN_TOKEN", "s3cret");
+        let mut app = test_app();
+        let (_ctrl_rx, _in_rx) = register_fake_bout(&mut app, "match-live");
+        let shared: Shared = Arc::new(Mutex::new(app));
+        let call = |b: Value| {
+            rt.block_on(admin_grant(State(shared.clone()), admin_headers(Some("s3cret")), b.to_string()))
+                .into_response()
+                .status()
+        };
+
+        assert_eq!(call(json!({"match_id":"match-live","side":"C","weapon":7})),
+            StatusCode::BAD_REQUEST, "a bad side is rejected");
+        assert_eq!(call(json!({"match_id":"match-live","side":"A","weapon":34})),
+            StatusCode::BAD_REQUEST, "weapon 34 (out of 0..=33) is rejected");
+        assert_eq!(call(json!({"match_id":"match-live","side":"A","weapon":-1})),
+            StatusCode::BAD_REQUEST, "a negative weapon index is rejected");
+        assert_eq!(call(json!({"match_id":"match-live","side":"A"})),
+            StatusCode::BAD_REQUEST, "neither weapon nor funds present is rejected");
+        assert_eq!(call(json!({"side":"A","weapon":7})),
+            StatusCode::BAD_REQUEST, "a missing match_id is rejected");
+        assert_eq!(call(json!({"match_id":"","side":"A","weapon":7})),
+            StatusCode::BAD_REQUEST, "an empty match_id is rejected");
+        // Authed + well-formed, but no such live bout -> 404 (not 400/403).
+        assert_eq!(call(json!({"match_id":"match-ghost","side":"A","weapon":7})),
+            StatusCode::NOT_FOUND, "an unknown match_id is 404");
+
+        std::env::remove_var("BT_ADMIN_TOKEN");
+    }
+
+    // (3a) A valid authed grant ROUTES the right DebugGrant to the bout's task — the
+    // handler resolves the live bout by match_id and sends a control message carrying
+    // the parsed side/weapon/funds. (3b below proves the bout task then applies it.)
+    #[test]
+    fn admin_grant_routes_a_debug_grant_to_the_bout() {
+        let _env = admin_env_lock();
+        let rt = rt();
+        std::env::set_var("BT_ADMIN_TOKEN", "s3cret");
+        let mut app = test_app();
+        let (mut ctrl_rx, _in_rx) = register_fake_bout(&mut app, "match-live");
+        let shared: Shared = Arc::new(Mutex::new(app));
+
+        let body = json!({"match_id":"match-live","side":"B","weapon":7,"funds":500}).to_string();
+        let resp = rt.block_on(admin_grant(State(shared.clone()), admin_headers(Some("s3cret")), body)).into_response();
+        let (status, j) = rt.block_on(response_json(resp));
+        assert_eq!(status, StatusCode::OK, "a valid authed grant is 200");
+        assert_eq!(j["granted"], json!(true));
+        assert_eq!(j["side"], json!("B"));
+        assert_eq!(j["weapon"], json!(7));
+        assert_eq!(j["funds"], json!(500));
+
+        // The bout task would receive exactly this control message and apply it.
+        match ctrl_rx.try_recv() {
+            Ok(BoutControl::DebugGrant { side, weapon, funds }) => {
+                assert_eq!(side, Side::B);
+                assert_eq!(weapon, Some(WeaponToken::from_index(7).unwrap()));
+                assert_eq!(funds, Some(500));
+            }
+            _ => panic!("expected a DebugGrant on the bout control channel"),
+        }
+        std::env::remove_var("BT_ADMIN_TOKEN");
+    }
+
+    // Bout::debug_grant applies a weapon and/or funds to the named side's
+    // authoritative game WITHOUT recording an input frame — so the replay/input
+    // stream (and thus determinism) is untouched. This is the unit-level teeth for
+    // the determinism claim.
+    #[test]
+    fn debug_grant_mutates_the_named_side_without_recording_a_frame() {
+        let mut bout = bout::Bout::new(1, 2);
+        let tok = WeaponToken::from_index(7).unwrap(); // Rise Up
+        assert_eq!(bout.arsenal_count(Side::A, tok), 0, "arsenal starts empty for this weapon");
+        let funds_before = bout.funds(Side::A);
+
+        let (w, f) = bout.debug_grant(Side::A, Some(tok), Some(250));
+        assert!(w && f, "both the weapon and the funds were applied");
+        assert_eq!(bout.arsenal_count(Side::A, tok), 1, "side A's arsenal gained the weapon");
+        assert_eq!(bout.funds(Side::A), funds_before + 250, "side A's funds increased");
+        // The OTHER side is untouched.
+        assert_eq!(bout.arsenal_count(Side::B, tok), 0, "side B's arsenal is unchanged");
+
+        // Determinism: an admin grant is NOT a recorded input — the exported replay's
+        // frame stream is empty (no client inputs), so a fresh replay reproduces the
+        // bout WITHOUT the grant.
+        let replay = bout.to_replay(bout::TICK_MS, "test");
+        assert!(replay.frames.is_empty(), "the admin grant must NOT be recorded as a replay frame");
+    }
+
+    // (3b) END-TO-END through the real bout task: register a live bout, spawn run_bout,
+    // route a grant via the SAME control channel the HTTP handler uses, and confirm the
+    // change surfaces in the AUTHORITATIVE game (read back through the spectator stream,
+    // which reports each side's arsenal + funds). This exercises channel + task + apply.
+    #[tokio::test]
+    async fn admin_grant_changes_the_live_authoritative_bout() {
+        let (tx_a, _rx_a) = mpsc::unbounded_channel::<Message>();
+        let (tx_b, _rx_b) = mpsc::unbounded_channel::<Message>();
+        let (_input_tx, input_rx) = mpsc::channel::<BoutInput>(BOUT_INPUT_CAP);
+        let (control_tx, control_rx) = mpsc::channel::<BoutControl>(4);
+        let app0 = test_app();
+        let (sa, sb) = (app0.rating_for("alice"), app0.rating_for("bob"));
+        let pb = PendingBout {
+            match_id: "match-live".into(), id_a: "1".into(), id_b: "2".into(), seed_a: 11, seed_b: 22,
+            name_a: "alice".into(), name_b: "bob".into(), state_a: sa, state_b: sb,
+            tx_a, tx_b, input_rx, control_rx, human: [true, true],
+        };
+        let shared: Shared = Arc::new(Mutex::new(test_app()));
+        let handle = tokio::spawn(run_bout(shared, pb));
+
+        // A read-only spectator so we can read the authoritative arsenal/funds back.
+        let (spec_tx, mut spec_rx) = mpsc::unbounded_channel::<Message>();
+        control_tx.send(BoutControl::AddSpectator { tx: spec_tx }).await.unwrap();
+
+        // Route the grant exactly as admin_grant does: Rise Up (token 7) + 500 funds to A.
+        let tok = WeaponToken::from_index(7).unwrap();
+        control_tx.send(BoutControl::DebugGrant { side: Side::A, weapon: Some(tok), funds: Some(500) }).await.unwrap();
+
+        // Let the bout task drain the control channel and emit a fresh spectator frame.
+        tokio::time::sleep(Duration::from_millis(120)).await;
+
+        // Read the LATEST spectator frame and confirm A's authoritative game changed.
+        let mut last_a: Option<Value> = None;
+        while let Ok(Message::Text(t)) = spec_rx.try_recv() {
+            if let Ok(v) = serde_json::from_str::<Value>(&t) {
+                if v["type"] == "spectate" {
+                    last_a = Some(v["a"].clone());
+                }
+            }
+        }
+        let a = last_a.expect("got at least one spectator frame for side A");
+        assert!(a["funds"].as_i64().unwrap() >= 500, "side A's authoritative funds reflect the grant");
+        // The arsenal is a flat [token, qty, token, qty, ...]; token 7 must appear with qty >= 1.
+        let arsenal = a["arsenal"].as_array().expect("arsenal array");
+        let has_weapon_7 = arsenal.chunks(2).any(|c| c[0].as_i64() == Some(7) && c[1].as_i64().unwrap_or(0) >= 1);
+        assert!(has_weapon_7, "side A's authoritative arsenal gained weapon 7 (Rise Up): {arsenal:?}");
+
+        drop(control_tx);
         let _ = tokio::time::timeout(Duration::from_millis(300), handle).await;
     }
 

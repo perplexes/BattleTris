@@ -273,6 +273,27 @@ impl Bout {
         true
     }
 
+    /// Out-of-band ADMIN grant (the `POST /admin/grant` dev tool): add one weapon
+    /// and/or some funds to `side`'s authoritative game. This is NOT a client input —
+    /// it is never recorded into the replay `frames` and never touches `ack`, so it
+    /// cannot perturb input ordering or the deterministic input stream. The bout's
+    /// normal snapshot path (a keyframe rides the next send, see `run_bout`'s
+    /// `want_keyframe`) syncs the client; replaying the recorded `frames` reproduces
+    /// the bout WITHOUT this grant, exactly as for any other un-recorded server action.
+    /// Returns `(weapon_granted, funds_applied)` for the HTTP summary.
+    pub fn debug_grant(&mut self, side: Side, weapon: Option<WeaponToken>, funds: Option<i64>) -> (bool, bool) {
+        let g = self.versus.game_mut(side);
+        let weapon_granted = weapon.map(|tok| g.grant_weapon(tok)).unwrap_or(false);
+        let funds_applied = match funds {
+            Some(amount) if amount != 0 => {
+                g.add_funds(amount);
+                true
+            }
+            _ => false,
+        };
+        (weapon_granted, funds_applied)
+    }
+
     /// Reset one side's input-sequence baseline. Called when a fresh client REATTACHES
     /// to this bout (a reconnect/refresh): the new client restarts its `seq` at 0, but
     /// our `ack` still holds the disconnected client's last value — so without this
@@ -340,6 +361,18 @@ impl Bout {
     /// This side's final funds — for the per-player `high_funds` stat at settlement.
     pub fn funds(&self, side: Side) -> i64 {
         self.versus.game(side).score().funds
+    }
+
+    /// Total count of `token` in `side`'s arsenal (summed across slots) — a read-only
+    /// view used to confirm an admin grant landed in the authoritative game. Test-only
+    /// (the live snapshot/spectator paths already serialize the arsenal for clients).
+    #[cfg(test)]
+    pub fn arsenal_count(&self, side: Side, token: WeaponToken) -> u16 {
+        let g = self.versus.game(side);
+        (0..10usize)
+            .filter(|&i| g.arsenal_token(i) == token.index() as i32)
+            .map(|i| g.arsenal_quantity(i))
+            .sum()
     }
 
     /// How many ticks the match has run — the unit for the per-player time stats
