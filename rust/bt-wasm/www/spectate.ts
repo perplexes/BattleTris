@@ -3,6 +3,7 @@
 // No prediction, no input — purely a viewer (the live counterpart to replay.js).
 import init, { weapon_name } from '../pkg/bt_wasm.js';
 import { CELL_SIZE, drawBoard } from './render.js';
+import { escapeHtml } from './dom-util.js';
 
 const $ = (id: string): HTMLElement => document.getElementById(id)!;
 const errBox = $('spectateError');
@@ -52,9 +53,6 @@ interface MatchSummary {
 }
 
 function showError(msg: string): void { errBox.textContent = msg; errBox.style.display = ''; }
-function escapeHtml(s: string): string {
-    return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
-}
 
 let boardW = 0, boardH = 0;
 function fitCanvases(): void {

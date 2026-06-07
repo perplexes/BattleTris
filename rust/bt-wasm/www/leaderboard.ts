@@ -1,5 +1,7 @@
 // Leaderboard page: ranks online players by Elo-styled TrueSkill (served by
 // GET /api/leaderboard). TrueSkill is the engine; the Elo figure is cosmetic.
+import { escapeHtml } from './dom-util.js';
+
 const listEl = document.getElementById('leaderboardList')!;
 const statusEl = document.getElementById('leaderboardStatus')!;
 
@@ -49,13 +51,6 @@ interface LeaderboardResponse {
         listEl.appendChild(row);
     });
 })();
-
-// Names are user-supplied - escape before injecting as HTML.
-function escapeHtml(s: string): string {
-    return String(s).replace(/[&<>"']/g, (c) => ({
-        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-    }[c]!));
-}
 
 // Loaded as <script type="module"> (leaderboard.html), so mark this a module —
 // isolates its top-level scope from the other page scripts under tsc's single-

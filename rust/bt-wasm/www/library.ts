@@ -1,5 +1,7 @@
 // Replay library browse page: lists stored games (newest first) with a link to
 // watch each via /replay/:id.
+import { escapeHtml } from './dom-util.js';
+
 const listEl = document.getElementById('libraryList')!;
 const statusEl = document.getElementById('libraryStatus')!;
 
@@ -46,13 +48,9 @@ interface ReplaysResponse {
     }
     statusEl.textContent = `${replays.length} replay${replays.length === 1 ? '' : 's'}`;
 
-    const esc = (s: unknown): string => String(s).replace(/[&<>"]/g, (c) => (
-        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' } as Record<string, string>)[c]
-    ));
-
     // A player name as a link to their profile (the lobby stats panel).
     const playerLink = (n: string | null | undefined): string => n
-        ? `<a class="library-player" href="/www/?player=${encodeURIComponent(n)}">${esc(n)}</a>`
+        ? `<a class="library-player" href="/www/?player=${encodeURIComponent(n)}">${escapeHtml(n)}</a>`
         : '';
 
     for (const r of replays) {
@@ -60,7 +58,7 @@ interface ReplaysResponse {
         item.className = 'library-item';
         item.style.cursor = 'pointer';
         const lvl = (r.ai_level !== null && r.ai_level !== undefined) ? ` (Ernie ${r.ai_level})` : '';
-        const title = r.title ? `<span class="library-title">${esc(r.title)}</span>` : '';
+        const title = r.title ? `<span class="library-title">${escapeHtml(r.title)}</span>` : '';
         // Online matches that recorded both names get a "Alice vs Bob" matchup of
         // profile links; everything else gets a plain-English match descriptor.
         const hasNames = !!(r.name_a || r.name_b);
