@@ -1817,3 +1817,135 @@ body.bazaar-open #touchControls { display: none !important; }
 /* Incoming-challenge modal reuses the bug-modal frame. */
 .challenge-panel { text-align: center; }
 .challenge-panel h2 { margin-bottom: 16px; }
+
+/* ═══ Motif "OK" message dialog (motif-dialog.ts) ════════════════════════════
+   Faithful to the original game's BTMessageDlog (usr/src/widget/BTMessageDlog.C),
+   an Xm/Motif XmCreateWarningDialog. Resources are the literal ones from
+   usr/src/share/BattleTris.ad:
+       BTMessageDlog*background             gray75  #BFBFBF  (the panel)
+       BTMessageDlog*foreground             red3    #CD0000  (the message text)
+       BTMessageDlog*XmPushButton*foreground blue    #0000FF  (the OK label)
+       BTMessageDlog*XmPushButton*background gray    #BEBEBE  (the OK button face)
+       BTMessageDlog*XmString*fontList      helvetica-bold-14 (the message font)
+   Hard 3D bevels (white/light top-left, black shadow bottom-right) — no rounded
+   corners, no gradients, crisp at native resolution. The title bar reuses the
+   project's emphasised-label look (blue text, white/black bevel — the
+   BTRoster*XmLabel escalation mirrored in motif.css). */
+.motif-dialog-overlay {
+    position: fixed;
+    inset: 0;
+    /* Full-application-modal: a dark scrim over the whole app. */
+    background-color: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 400;                  /* above the toast (300) and bug/challenge (200) */
+    padding: 16px;
+}
+
+.motif-dialog {
+    background-color: #bfbfbf;     /* gray75 (BTMessageDlog*background) */
+    border: 3px solid #808080;
+    border-top-color: #ffffff; border-left-color: #ffffff;
+    border-bottom-color: #000000; border-right-color: #000000;
+    box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.45);   /* a hard drop-shadow, not a blur */
+    min-width: 300px;
+    max-width: min(460px, 92vw);
+    padding: 0;
+    /* Crisp pixel feel — no sub-pixel smoothing of the chrome. */
+    font-family: Helvetica, Arial, sans-serif;
+}
+
+/* Title bar: emphasised blue label on a beveled gray66 band (BTRoster*XmLabel look). */
+.motif-dialog-titlebar {
+    background-color: #a8a8a8;     /* gray66 */
+    color: #0000ff;                /* blue */
+    font-weight: bold;
+    font-size: 14px;
+    padding: 4px 10px;
+    border: 2px solid #808080;
+    border-top-color: #ffffff; border-left-color: #ffffff;
+    border-bottom-color: #000000; border-right-color: #000000;
+    margin: 3px 3px 0;
+    user-select: none;
+}
+
+/* Message row: warning symbol (left) + body (right). */
+.motif-dialog-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    padding: 18px 18px 14px;
+}
+
+.motif-dialog-symbol {
+    flex: 0 0 auto;
+    line-height: 0;                /* no gap under the SVG */
+    margin-top: 2px;
+}
+.motif-dialog-symbol svg { display: block; }
+
+.motif-dialog-body {
+    flex: 1 1 auto;
+    min-width: 0;
+    align-self: center;
+    color: #cd0000;                /* red3 (BTMessageDlog*foreground) */
+    font-family: Helvetica, Arial, sans-serif;   /* helvetica-bold-14 */
+    font-weight: bold;
+    font-size: 14px;
+    line-height: 1.4;
+    /* Wrap whole words; long unbroken tokens still break rather than overflow. */
+    word-break: normal;
+    overflow-wrap: anywhere;
+}
+
+/* Engraved separator above the action area (a 1px dark line + 1px light line). */
+.motif-dialog-sep {
+    height: 0;
+    margin: 0 12px;
+    border-top: 1px solid #808080;
+    border-bottom: 1px solid #ffffff;
+}
+
+.motif-dialog-actions {
+    display: flex;
+    justify-content: center;
+    padding: 12px;
+}
+
+/* The single default OK button: blue label on gray, raised bevel, with the Motif
+   default-button ring (a beveled outline a few px out from the face) PLUS the classic
+   dotted focus rectangle drawn just inside the face when focused. */
+.motif-dialog-ok {
+    position: relative;
+    min-width: 88px;
+    padding: 7px 24px;
+    background-color: #bebebe;     /* "gray" (BTMessageDlog*XmPushButton*background) */
+    color: #0000ff;                /* blue (BTMessageDlog*XmPushButton*foreground) */
+    font-family: Helvetica, Arial, sans-serif;
+    font-weight: bold;
+    font-size: 14px;
+    border: 2px solid #808080;
+    border-top-color: #ffffff; border-left-color: #ffffff;
+    border-bottom-color: #000000; border-right-color: #000000;
+    cursor: pointer;
+    /* Motif's default-button "thick ring": a second beveled outline a couple pixels
+       out from the face, marking OK as the default action. */
+    outline: 2px solid #808080;
+    outline-offset: 3px;
+}
+.motif-dialog-ok::-moz-focus-inner { border: 0; }
+.motif-dialog-ok:hover { background-color: #cccccc; }
+.motif-dialog-ok:active {
+    border-top-color: #000000; border-left-color: #000000;
+    border-bottom-color: #ffffff; border-right-color: #ffffff;
+    background-color: #b0b0b0;
+}
+/* The classic dotted focus rectangle, drawn just inside the button face. */
+.motif-dialog-ok:focus::after {
+    content: '';
+    position: absolute;
+    inset: 3px;
+    border: 1px dotted #000000;
+    pointer-events: none;
+}

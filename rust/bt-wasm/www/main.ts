@@ -4,6 +4,7 @@ import { Sound } from './sound.js';
 import type { ServerMessage, ClientMessage, PlayerInfo, SideStatus, OppStatus, PlayerStats, ReplayMeta } from './protocol.js';
 import { escapeHtml } from './dom-util.js';
 import { nextGag, initialGagState, type GagState } from './update-gag.js';
+import { showMotifDialog } from './motif-dialog.js';
 
 // The `game` variable holds one of three wasm classes or null.
 type AnyGame = WasmGame | WasmVsComputer | WasmClient;
@@ -238,18 +239,21 @@ function selectPlayer(name: string) {
 // 1994 client needed it because it PULLED the roster; we don't. So instead it does a
 // bit. The escalating gag, the gag pool, and the (pure) sequencer live in
 // update-gag.ts (unit-tested in update-gag.test.ts); here we just hold the state,
-// feed it the clock + Math.random, render the toast, and persist the achievement.
+// feed it the clock + Math.random, show the gag in a faithful Motif OK dialog
+// (BTMessageDlog), and persist the achievement. The dialog body is the seam for the
+// planned DDR-style UPDATE minigame (swap the string for a widget).
 function updateAchUnlocked(): boolean {
     try { return localStorage.getItem('bt_ach_update') === '1'; } catch (_) { return false; }
 }
 let gagState: GagState = initialGagState(updateAchUnlocked());
+function showUpdateGag(msg: string) { void showMotifDialog(msg, { title: 'UPDATE' }); }
 function pressUpdate() {
     const r = nextGag(gagState, { now: Date.now(), rng: Math.random });
     gagState = r.state;
     if (r.unlockedAchievement) {
         try { localStorage.setItem('bt_ach_update', '1'); } catch (_) {}
     }
-    showToast(r.text, r.ms);
+    showUpdateGag(r.text);
 }
 
 // Challenge the selected player (directed). Needs a signed identity first.
