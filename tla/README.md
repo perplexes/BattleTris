@@ -49,13 +49,48 @@ The buggy counterexample is the real bug in 3 steps:
 | 2 | `ClientSendGameplay` | `clientSeq=1`, input `G#1` in flight, client still thinks it's playing |
 | 3 | `ServerDeliverInput` | barrier-rejects `G#1`; **buggy: `serverAck` stays 0** ⇒ `ack(0) < sent(1)`, nothing in flight = stuck forever |
 
-## Roadmap
+## `Netcode.tla` — the full protocol (bazaar × reconnect × weapons × timing)
 
-Layers to add (the rest of the complexity that motivated modelling):
+`Bazaar.tla` is the teaching model. `Netcode.tla` layers on the rest of the
+complexity that motivated formalising this at all, as **toggleable fixes** and
+matching invariants:
 
-- **Reload-rejoin / reattach** — socket drop, `REJOIN_GRACE` freeze, `reset_ack`,
-  resume; check no state loss / no deadlock across a reconnect.
-- **Weapon relay** — `receive_weapon` + fire; check every launched weapon is
-  eventually delivered exactly once.
-- **Weapon timing effects** — effects that speed up / slow down drops; check they
-  don't interact with the bazaar/ack machinery to violate liveness.
+| Layer | Toggle (TRUE = the shipped fix) | Invariant it guards |
+|---|---|---|
+| Bazaar barrier × network delay | `AckOnBarrierReject` | `NoDeadlock` — the absorbing ack-gap freeze is unreachable |
+| Reload-rejoin / reattach | `ResetAckOnReattach` | `AckBounds` — `serverAck ≤ clientSeq` (a reconnect that resets seq but not ack = the **snap-back**) |
+| Weapon firing | *(none — same barrier class as gameplay)* | `WeaponsAccounted` — `weaponsApplied ≤ weaponsFired` |
+| Weapon-timing local prediction | `LeaveNeedsAuth` | `LeaveOnlyWhenReal` — no `LeaveBazaar` wasted on a not-yet-bazaar server (the **predicted-leave** freeze) |
+
+Weapons aren't special: a launched weapon is a non-shopping input that crosses the
+**same** bazaar barrier as gameplay, so the same `AckOnBarrierReject` fix covers it.
+Weapon timing effects matter because they let the client's *local* bazaar prediction
+lead the authoritative server — which is exactly the original predicted-leave bug, so
+shopping must gate on the authoritative view (`LeaveNeedsAuth`).
+
+### Run it
+
+```sh
+cd tla
+
+# THE SHIPPED SYSTEM — every fix on; all four invariants hold (≈6.5 min, length 14):
+apalache-mc check --length=14 --config=Netcode.cfg Netcode.tla        # -> NoError
+
+# EACH FIX IS NECESSARY — flip one off, its invariant breaks (each ≈2 s, with a trace):
+apalache-mc check --length=10 --config=NetcodeBugAck.cfg   Netcode.tla # NoDeadlock        violated
+apalache-mc check --length=10 --config=NetcodeBugReset.cfg Netcode.tla # AckBounds         violated
+apalache-mc check --length=10 --config=NetcodeBugLeave.cfg Netcode.tla # LeaveOnlyWhenReal violated
+```
+
+### What the model taught us
+
+Modelling disciplined the spec. The first all-fixed run reported a `NoDeadlock`
+violation — but the trace showed a *false positive*: the client finishes a bazaar
+visit cleanly, the server re-enters the bazaar, and a too-broad `Stuck` predicate
+flagged the stale `clientBought`/`clientViewBazaar` as absorbing. It isn't — a
+`baz=FALSE` snapshot re-arms it. The real lesson is a **latent assumption in the
+client**: `bought` re-arms only on seeing a `baz=FALSE` snapshot between visits, which
+the **in-order channel + always-sent snapshots** guarantee in production but the
+abstraction did not. `Stuck` was tightened to the sound ack-gap predicate; the
+predicted-leave freeze is caught by the safety invariant `LeaveOnlyWhenReal` instead.
+That's the loop: the checker forces you to say exactly what you mean.
