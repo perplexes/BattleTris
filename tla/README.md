@@ -174,6 +174,14 @@ APALACHE_MC=/path/to/apalache-mc ./regen-traces.sh           # overwrite the fix
 APALACHE_MC=/path/to/apalache-mc ./regen-traces.sh --check   # CI: fail if any is stale
 ```
 
+`--check` compares the trace **schema** (the `vars` list, their ITF `varTypes`, and the
+config `params`) against a fresh regen, NOT the full state sequence. That is deliberate:
+Apalache's Z3 backend can return a *different but equally-short and equally-valid* trap
+trace across runs, so a whole-trace byte-diff would be flaky. The schema is what actually
+goes stale when the model changes (a renamed/retyped/added variable the harness can no
+longer map), and per-state conformance of the committed trace itself is checked — with
+teeth — by the Rust `apply_input_conforms_to_every_tla_trace`.
+
 ## CI
 
 Two checked-in scripts back the GitHub Actions `tla` job (see `.github/workflows/deploy.yml`):

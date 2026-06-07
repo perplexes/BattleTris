@@ -1061,11 +1061,21 @@ mod tests {
         }
     }
 
+    /// What a single replayed trace exercised — for the corpus-level non-vacuity checks.
+    #[derive(Default)]
+    struct TraceCoverage {
+        /// A barrier crossing (a G/W input the bazaar rejected) occurred.
+        saw_crossing: bool,
+        /// The max `weaponsApplied` the model reached (and the oracle matched) in this
+        /// trace — > 0 proves the weapons oracle was genuinely exercised, not vacuously 0.
+        max_weapons_applied: u64,
+    }
+
     /// Replay one Apalache trace against a real `Bout`, asserting conformance after every
-    /// state. Returns whether the trace exercised a barrier crossing (so the corpus-level
-    /// test can require the teeth are present somewhere). Panics loudly on any model
-    /// action it can't map — the harness never silently skips a step.
-    fn replay_itf_trace(name: &str, raw: &str) -> bool {
+    /// state. Returns what the trace exercised (so the corpus-level test can require the
+    /// teeth + a non-vacuous weapons oracle are present somewhere). Panics loudly on any
+    /// model action it can't map — the harness never silently skips a step.
+    fn replay_itf_trace(name: &str, raw: &str) -> TraceCoverage {
         let trace: serde_json::Value = serde_json::from_str(raw)
             .unwrap_or_else(|e| panic!("{name}: parse ITF JSON: {e}"));
         let states = trace["states"].as_array()
@@ -1171,7 +1181,9 @@ mod tests {
                  (action {:?})", action(name, cur)
             );
         }
-        saw_crossing
+        // `weapons_applied` only increments and equals the model at every state, so its
+        // final value is the max reached in this trace.
+        TraceCoverage { saw_crossing, max_weapons_applied: weapons_applied }
     }
 
     #[test]
@@ -1179,6 +1191,7 @@ mod tests {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/traces");
         let mut replayed = 0usize;
         let mut any_crossing = false;
+        let mut max_weapons = 0u64;
         let mut seen: Vec<String> = Vec::new();
         for entry in std::fs::read_dir(dir).expect("read the traces dir") {
             let path = entry.expect("dir entry").path();
@@ -1192,7 +1205,9 @@ mod tests {
             }
             let raw = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("read {name}: {e}"));
-            any_crossing |= replay_itf_trace(&name, &raw);
+            let cov = replay_itf_trace(&name, &raw);
+            any_crossing |= cov.saw_crossing;
+            max_weapons = max_weapons.max(cov.max_weapons_applied);
             replayed += 1;
             seen.push(name);
         }
@@ -1205,6 +1220,13 @@ mod tests {
         // the ack-on-barrier-reject fix makes a per-state ack assertion fire.
         assert!(any_crossing,
             "no trace in the corpus exercised a bazaar crossing — the conformance teeth are gone");
+        // Non-vacuity for the weapons-applied oracle: at least one trace must actually
+        // deliver a weapon in normal play (weaponsApplied > 0), so the per-state
+        // weapons-applied conformance assert (and its arsenal-decrement witness) is
+        // genuinely exercised — not vacuously 0 across the whole corpus (which would let
+        // the weapons oracle rot without anyone noticing).
+        assert!(max_weapons > 0,
+            "no trace delivered a weapon in normal play — the weapons-applied oracle is vacuous");
     }
 
     // -----------------------------------------------------------------------
