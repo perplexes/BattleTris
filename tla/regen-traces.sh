@@ -65,20 +65,32 @@ for entry in "${SCENARIOS[@]}"; do
     # STALENESS, robustly. Apalache's trace SELECTION is not deterministic — the Z3
     # backend may return a DIFFERENT (equally-short, equally-valid) trap trace across
     # runs, so a byte-diff of the whole trace would be FLAKY. What actually goes stale
-    # when the model changes is the trace SHAPE: the variable set, their ITF types, and
-    # the config params. We compare those (the schema), which catches the realistic
-    # staleness — a renamed/retyped/added model variable the harness then can't map —
-    # without false-flagging a mere re-pick of an alternative valid trace. (Per-state
-    # CONFORMANCE of the actual committed trace is checked separately, and with teeth, by
-    # the Rust `apply_input_conforms_to_every_tla_trace`.)
-    schema() { jq -S '{vars: (.vars|sort), varTypes: .["#meta"].varTypes, params: (.params|sort)}'; }
-    if ! diff -q <(printf '%s' "$fresh" | schema) \
-                 <(schema < "$TRACES/$scenario.itf.json") >/dev/null 2>&1; then
-      echo "STALE FIXTURE: $scenario.itf.json schema (vars/types/params) differs from the model." >&2
-      echo "  committed:" >&2; schema < "$TRACES/$scenario.itf.json" >&2
-      echo "  fresh:" >&2; printf '%s' "$fresh" | schema >&2
+    # when the model/cfg changes is the trace SHAPE: the variable set, their ITF types,
+    # AND the constant VALUES the trace was generated under. We compare those:
+    #   - vars + varTypes (a renamed/retyped/added model variable the harness can't map),
+    #   - the constant VALUES from states[0] (AckOnBarrierReject, ResetAckOnReattach,
+    #     MaxSeq, MaxChan, …) — in ITF the `.params` list holds only NAMES, so a cfg that
+    #     flipped a constant (e.g. AckOnBarrierReject TRUE->FALSE, generating the fixture
+    #     under the BUGGY policy) keeps the same names but different state[0] values; we
+    #     must catch that. The per-state trace content is deliberately ignored (that's the
+    #     nondeterministic part). Per-state CONFORMANCE of the committed trace is checked,
+    #     with teeth, by the Rust `apply_input_conforms_to_every_tla_trace`.
+    schema() {
+      jq -S '{
+        vars: (.vars | sort),
+        varTypes: .["#meta"].varTypes,
+        params: (.params | sort),
+        paramValues: (.params | sort | map({key: ., value: $s0[.]}) | from_entries)
+      }' --argjson s0 "$(jq '.states[0]' "$1")" < "$1"
+    }
+    fresh_file="$(mktemp)"; printf '%s\n' "$fresh" > "$fresh_file"
+    if ! diff -q <(schema "$fresh_file") <(schema "$TRACES/$scenario.itf.json") >/dev/null 2>&1; then
+      echo "STALE FIXTURE: $scenario.itf.json schema (vars/types/params/const-values) differs from the model." >&2
+      echo "  committed:" >&2; schema "$TRACES/$scenario.itf.json" >&2
+      echo "  fresh:" >&2; schema "$fresh_file" >&2
       stale=1
     fi
+    rm -f "$fresh_file"
   else
     # Regen mode: overwrite the committed fixture with the fresh (normalized) trace.
     printf '%s\n' "$fresh" > "$OUT_DIR/$scenario.itf.json"

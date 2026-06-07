@@ -1064,8 +1064,11 @@ mod tests {
     /// What a single replayed trace exercised — for the corpus-level non-vacuity checks.
     #[derive(Default)]
     struct TraceCoverage {
-        /// A barrier crossing (a G/W input the bazaar rejected) occurred.
+        /// A barrier crossing (a G/W input the bazaar rejected) occurred — the
+        /// ack-on-barrier-reject teeth.
         saw_crossing: bool,
+        /// A `Reconnect` (→ `reset_ack`) step occurred — the reset_ack / snap-back teeth.
+        saw_reconnect: bool,
         /// The max `weaponsApplied` the model reached (and the oracle matched) in this
         /// trace — > 0 proves the weapons oracle was genuinely exercised, not vacuously 0.
         max_weapons_applied: u64,
@@ -1104,6 +1107,7 @@ mod tests {
         // the model's cumulative counter at every state.
         let mut weapons_applied: u64 = 0;
         let mut saw_crossing = false;
+        let mut saw_reconnect = false;
 
         // State 0 must match the model's initial state.
         assert_eq!(b.snapshot_for(side, false).ack, ack(&states[0]), "{name}: ack @ state 0");
@@ -1120,7 +1124,10 @@ mod tests {
                 // the snap-back fix's conformance point — the model drops serverAck to 0
                 // here, so the real Bout must too (the per-state ack check below fires if
                 // reset_ack is reverted).
-                "Reconnect" => b.reset_ack(side),
+                "Reconnect" => {
+                    b.reset_ack(side);
+                    saw_reconnect = true;
+                }
                 // Process the next client input — feed the delivered HEAD of the PREVIOUS
                 // state's channel to the real apply_input (the model's ServerDeliverInput).
                 "ServerDeliverInput" => {
@@ -1183,7 +1190,7 @@ mod tests {
         }
         // `weapons_applied` only increments and equals the model at every state, so its
         // final value is the max reached in this trace.
-        TraceCoverage { saw_crossing, max_weapons_applied: weapons_applied }
+        TraceCoverage { saw_crossing, saw_reconnect, max_weapons_applied: weapons_applied }
     }
 
     #[test]
@@ -1191,6 +1198,7 @@ mod tests {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/traces");
         let mut replayed = 0usize;
         let mut any_crossing = false;
+        let mut any_reconnect = false;
         let mut max_weapons = 0u64;
         let mut seen: Vec<String> = Vec::new();
         for entry in std::fs::read_dir(dir).expect("read the traces dir") {
@@ -1207,6 +1215,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("read {name}: {e}"));
             let cov = replay_itf_trace(&name, &raw);
             any_crossing |= cov.saw_crossing;
+            any_reconnect |= cov.saw_reconnect;
             max_weapons = max_weapons.max(cov.max_weapons_applied);
             replayed += 1;
             seen.push(name);
@@ -1216,10 +1225,16 @@ mod tests {
         // checked). We commit several fixtures; require the harness actually ran them.
         assert!(replayed >= 4,
             "expected >= 4 trace fixtures in tests/traces, replayed {replayed}: {seen:?}");
-        // Teeth: SOMEWHERE in the corpus a barrier crossing must occur, where reverting
-        // the ack-on-barrier-reject fix makes a per-state ack assertion fire.
+        // Teeth (ack-on-barrier-reject): SOMEWHERE in the corpus a barrier crossing must
+        // occur, where reverting the ack fix makes a per-state ack assertion fire.
         assert!(any_crossing,
             "no trace in the corpus exercised a bazaar crossing — the conformance teeth are gone");
+        // Teeth (reset_ack / snap-back): SOMEWHERE in the corpus a Reconnect must occur,
+        // where reverting reset_ack makes a per-state ack assertion fire. Without this the
+        // reset_ack path could lose its only fixture (e.g. a regen overwrote it with a
+        // same-SCHEMA but reconnect-free trace) and silently go untested.
+        assert!(any_reconnect,
+            "no trace in the corpus exercised a Reconnect — the reset_ack teeth are gone");
         // Non-vacuity for the weapons-applied oracle: at least one trace must actually
         // deliver a weapon in normal play (weaponsApplied > 0), so the per-state
         // weapons-applied conformance assert (and its arsenal-decrement witness) is
