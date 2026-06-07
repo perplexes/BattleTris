@@ -828,6 +828,80 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // The BAZAAR DEADLOCK, reproduced with NO networking. Real ~Tokyo latency froze a
+    // match in the bazaar; this pins the same state-machine bug deterministically.
+    //
+    // The bug is an interaction between two state machines: the server's `apply_input`
+    // and the client's reconciliation gate. "Latency" is just "the client's inputs
+    // reach the server AFTER the bazaar barrier comes up" — the client predicts ahead
+    // and its in-flight gameplay inputs land late. We model exactly that, in-process:
+    //   1. The server has authoritatively entered this side's bazaar.
+    //   2. The client had K gameplay inputs in flight (sent before its snapshot showed
+    //      the barrier); they arrive now and the barrier rejects each.
+    //   3. The client runs the bot's gate (the essence of `bt-bot`'s `sync::decide`):
+    //        while ack < last_sent  -> WaitAck (hold — don't run ahead of the server)
+    //        else, in our bazaar    -> Shop: buy/sell + LeaveBazaar
+    // If a barrier-rejected input doesn't advance `ack`, `ack` stays behind `last_sent`
+    // forever, the gate holds forever, the client never sends LeaveBazaar, and the
+    // match hangs in the bazaar. The fix (apply_input acks a fresh input even when the
+    // barrier drops it) lets `ack` catch up, so the client shops and leaves.
+    //
+    // Drives the REAL `Bout::apply_input`; bounded so a regression FAILS, never hangs.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn inflight_gameplay_inputs_do_not_deadlock_the_bazaar() {
+        let mut b = Bout::new(1, 2);
+        let side = Side::A;
+
+        // (1) The server is authoritatively in this side's bazaar.
+        force_into_bazaar(&mut b, side);
+        assert!(b.versus.game(side).is_in_bazaar(), "precondition: side is in the bazaar");
+
+        // (2) K gameplay inputs the client sent BEFORE it knew about the barrier arrive
+        // now. The barrier rejects them (not applied) — but each must still advance ack.
+        const K: u64 = 6;
+        let mut last_sent = 0u64;
+        for _ in 0..K {
+            last_sent += 1;
+            let applied = b.apply_input(side, &Input::MoveLeft, last_sent);
+            assert!(!applied, "a gameplay input must not be applied inside the bazaar");
+        }
+
+        // (3) The client's reconciliation gate, run to a bounded fixpoint. Without the
+        // fix, `ack` is stuck at 0 < last_sent, so this never escapes (and the bound
+        // turns the real-world hang into a clean test failure).
+        let mut bought = false;
+        let mut escaped = false;
+        for _ in 0..1000 {
+            let ack = b.snapshot_for(side, false).ack;
+            if ack < last_sent {
+                continue; // WaitAck — the gate. Nothing new is sent; ack must catch up.
+            }
+            if !bought {
+                // Shop: a buy/sell is bazaar-legal; then LeaveBazaar clears our side.
+                bought = true;
+                last_sent += 1;
+                b.apply_input(side, &Input::SellWeapon(0), last_sent); // no-op sell, but acked
+                last_sent += 1;
+                b.apply_input(side, &Input::LeaveBazaar, last_sent);
+            }
+            if !b.versus.game(side).is_in_bazaar() {
+                escaped = true;
+                break;
+            }
+        }
+
+        assert!(
+            escaped,
+            "BAZAAR DEADLOCK: the client never left — a barrier-rejected in-flight input \
+             left ack ({}) behind last_sent ({}), so the WaitAck gate hung forever. \
+             Bout::apply_input must advance ack for a fresh input even when the barrier \
+             drops it.",
+            b.snapshot_for(side, false).ack, last_sent
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Property (c): INJECTION ORACLE. A non-economic legal input (move / rotate /
     //   drop / launch) must NEVER change a player's funds when applied — funds
     //   may only move later, inside the engine tick, from real line clears. So a
