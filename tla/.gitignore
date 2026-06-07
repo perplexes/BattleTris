@@ -1,0 +1,3 @@
+# Apalache run output (traces, logs, intermediate artifacts) — regenerated per run.
+_apalache-out/
+*.itf.json
