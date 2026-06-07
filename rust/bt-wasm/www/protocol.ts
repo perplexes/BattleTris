@@ -35,6 +35,47 @@ export interface OppStatus {
     in_bazaar?: boolean;
 }
 
+// ─── REST shapes (not websocket frames, but shared wire types) ───────────────
+
+/** The `GET /api/player/:name` JSON (bt-server `player_record_json`). All the
+ *  best/streak figures are nullable — a never-recorded stat comes back as null. */
+export interface PlayerStats {
+    name: string;
+    elo: number;
+    mu: number;
+    sigma: number;
+    games: number;
+    wins: number;
+    losses: number;
+    streak: number;
+    streak_type: string | null;
+    high_score: number | null;
+    high_lines: number | null;
+    high_funds: number | null;
+    fastest_kill: number | null;
+    quickest_death: number | null;
+    longest_game: number | null;
+}
+
+/** The subset of a stored replay's JSON the client reads (the recording struct in
+ *  bt-replay, plus `name_a`/`name_b` the server threads in, plus `seed_a` which
+ *  marks a two-board Versus recording). Every field is optional because the same
+ *  shape covers single-board (`seed`/`mode`/`ai_level`/…) and Versus (`seed_a`/…)
+ *  recordings, and older rows omit `name_a`/`name_b`/`title`. */
+export interface ReplayMeta {
+    mode?: string;
+    ai_level?: number | null;
+    engine_sha?: string;
+    seed?: number;
+    tick_count?: number;
+    frames?: unknown[];
+    title?: string | null;
+    /** Present only on a two-board online (Versus) recording. */
+    seed_a?: unknown;
+    name_a?: string;
+    name_b?: string;
+}
+
 // ─── Server → client frames ──────────────────────────────────────────────────
 
 export interface StatsMsg { type: 'stats'; players?: number; hits?: number; }
@@ -50,9 +91,14 @@ export interface RejoinFailedMsg { type: 'rejoinFailed'; }
 export interface MatchStartMsg {
     type: 'matchStart';
     seed: number;
-    match_id: number;
+    /** Tagged-UUID match id (`match-<uuid>`), parked in the URL for rejoin-on-refresh. */
+    match_id: string;
     opponent?: string;
     opp_elo?: number;
+    /** Which side this client plays; the client doesn't branch on it, modelled for completeness. */
+    side?: 'A' | 'B';
+    /** Matchmaking quality figure (auto-pairs only; absent for a directed challenge). */
+    quality?: number;
 }
 
 export interface SnapshotMsg {
@@ -60,8 +106,8 @@ export interface SnapshotMsg {
     ack: number;
     you: SideStatus;
     opp: OppStatus;
-    /** 0 = ongoing, 1 = you won, 2 = you lost. */
-    result?: number;
+    /** 0 = ongoing, 1 = you won, 2 = you lost. Always present (bout.rs `result: i32`). */
+    result: number;
     /** Full authoritative state (Game::snapshot_bytes); present only on keyframes. */
     keyframe?: number[];
     /** A spy of ours is active this frame. */
@@ -73,6 +119,8 @@ export interface SnapshotMsg {
 export interface RatingMsg { type: 'rating'; mu: number; sigma: number; won: boolean; }
 export interface MatchReplayMsg { type: 'matchReplay'; id: string; }
 export interface OpponentLeftMsg { type: 'opponentLeft'; }
+/** A liveness probe the server emits ~2 Hz (bout.rs); the client treats it as a no-op. */
+export interface HeartbeatMsg { type: 'heartbeat'; }
 
 /** Every frame the server can send on the lobby/match socket. */
 export type ServerMessage =
@@ -89,7 +137,8 @@ export type ServerMessage =
     | SnapshotMsg
     | RatingMsg
     | MatchReplayMsg
-    | OpponentLeftMsg;
+    | OpponentLeftMsg
+    | HeartbeatMsg;
 
 /** Discriminant strings, for narrowing helpers/tests. */
 export type ServerMessageType = ServerMessage['type'];
@@ -101,7 +150,8 @@ export type ClientMessage =
     | { type: 'queue'; name: string; token: string; authoritative: true }
     | { type: 'challenge'; target: string }
     | { type: 'challengeAccept'; from: string }
-    | { type: 'rejoin'; match_id: number; token: string; name: string }
+    | { type: 'challengeDecline'; from: string }
+    | { type: 'rejoin'; match_id: string; token: string; name: string }
     | { type: 'leaveMatch' }
     | { type: 'watch'; target: string }
     | { type: 'active' };
