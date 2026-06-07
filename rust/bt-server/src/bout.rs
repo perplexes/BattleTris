@@ -902,6 +902,109 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // A LIVENESS SPEC FROM FIRST PRINCIPLES for the bazaar barrier — the generalized
+    // form of the hard-coded repro above. Rather than encode one freeze, we model the
+    // protocol and check an invariant over a GENERATED space of adversarial schedules,
+    // against the REAL Bout::apply_input:
+    //
+    //   State:    the server (a real Bout) + a client { last_sent, bought }.
+    //   Schedule: on an in-order channel the only adversarial freedom that matters is
+    //             WHERE the server's bazaar entry falls in the client's input stream —
+    //             `pre` gameplay inputs land before it (applied), `crossing` were
+    //             already in flight and land after it (barrier-rejected). Network delay
+    //             chooses that split, so we generate it (+ the input variants + side).
+    //   ClientFSM the spec's client, mirroring bt-bot's `sync::decide`:
+    //               ack < last_sent          -> WaitAck (hold; send nothing new)
+    //               in our bazaar & !bought   -> Shop (sell + LeaveBazaar)
+    //               not in our bazaar         -> escaped
+    //   LIVENESS: from every reachable state the client EVENTUALLY escapes the bazaar,
+    //             checked to a bounded fixpoint (a permanent stuck state is absorbing,
+    //             so the bound turns a real hang into a test FAILURE, never a hang).
+    //   SAFETY:   ack is monotonic and stays within (.., last_sent]; a barrier-crossing
+    //             input is never applied.
+    //
+    // The apply_input fix is exactly what makes liveness hold: without it, any schedule
+    // with `crossing >= 1` leaves ack behind last_sent forever and the client can never
+    // shop — so SOME generated schedule violates the invariant (revert the fix → fail).
+    // (Inputs are restricted to non-line-clearing actions so the ONLY bazaar trigger is
+    // the modeled entry, not an incidental clear from a generated BeginDrop.)
+    // -----------------------------------------------------------------------
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(300))]
+
+        #[test]
+        fn the_client_always_escapes_the_bazaar(
+            side_a in any::<bool>(),
+            pre in 0u64..12,
+            crossing in 0u64..12,
+            gen_inputs in prop::collection::vec(
+                prop_oneof![
+                    Just(Input::MoveLeft),
+                    Just(Input::MoveRight),
+                    Just(Input::Rotate),
+                    (0u32..10u32).prop_map(Input::LaunchWeapon),
+                ],
+                0..24,
+            ),
+        ) {
+            let mut b = Bout::new(0xA11CE, 0xB0B);
+            let side = if side_a { Side::A } else { Side::B };
+            // Exactly `pre + crossing` non-clearing gameplay inputs (pad if short).
+            let need = (pre + crossing) as usize;
+            let stream: Vec<Input> = gen_inputs.into_iter()
+                .chain(std::iter::repeat(Input::MoveLeft))
+                .take(need)
+                .collect();
+
+            let mut last_sent = 0u64;
+            let mut prev_ack = 0u64;
+
+            // Phase 1 — `pre` inputs reach the server BEFORE the bazaar: applied, ack++.
+            for inp in stream.iter().take(pre as usize) {
+                last_sent += 1;
+                prop_assert!(b.apply_input(side, inp, last_sent), "pre-bazaar input must apply");
+                let ack = b.snapshot_for(side, false).ack;
+                prop_assert!(ack >= prev_ack && ack <= last_sent, "ack monotonic & bounded");
+                prev_ack = ack;
+            }
+
+            // Event — the server's combined lines cross: it enters this side's bazaar.
+            force_into_bazaar(&mut b, side);
+            prop_assert!(b.versus.game(side).is_in_bazaar(), "server entered the bazaar");
+
+            // Phase 2 — the `crossing` inputs were already in flight (stale client view)
+            // and arrive now: barrier-rejected (not applied), but each MUST advance ack.
+            for inp in stream.iter().skip(pre as usize).take(crossing as usize) {
+                last_sent += 1;
+                prop_assert!(!b.apply_input(side, inp, last_sent), "crossing input must not apply");
+                let ack = b.snapshot_for(side, false).ack;
+                prop_assert!(ack >= prev_ack && ack <= last_sent, "ack monotonic & bounded");
+                prev_ack = ack;
+            }
+
+            // LIVENESS — run the client FSM to a bounded fixpoint; it MUST escape.
+            let mut bought = false;
+            let mut escaped = false;
+            for _ in 0..need + 8 {
+                if !b.versus.game(side).is_in_bazaar() { escaped = true; break; }
+                if b.snapshot_for(side, false).ack < last_sent {
+                    continue; // WaitAck — nothing new sent; ack must catch up on its own.
+                }
+                if !bought {
+                    bought = true;
+                    last_sent += 1; b.apply_input(side, &Input::SellWeapon(0), last_sent);
+                    last_sent += 1; b.apply_input(side, &Input::LeaveBazaar, last_sent);
+                }
+            }
+            prop_assert!(escaped,
+                "LIVENESS VIOLATION (pre={}, crossing={}): client stuck in the bazaar — ack {} \
+                 never caught last_sent {}, so the WaitAck gate hung. A barrier-rejected in-flight \
+                 input must still advance ack.",
+                pre, crossing, b.snapshot_for(side, false).ack, last_sent);
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Property (c): INJECTION ORACLE. A non-economic legal input (move / rotate /
     //   drop / launch) must NEVER change a player's funds when applied — funds
     //   may only move later, inside the engine tick, from real line clears. So a
