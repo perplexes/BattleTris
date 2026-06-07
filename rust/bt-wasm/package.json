@@ -8,6 +8,7 @@
     "build:ts": "tsc -p tsconfig.json",
     "build": "npm run build:wasm && npm run build:ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:unit": "node --test --experimental-strip-types www/*.test.ts",
     "test:e2e": "playwright test",
     "test": "npm run build && playwright test"
   },

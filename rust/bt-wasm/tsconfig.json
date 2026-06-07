@@ -15,6 +15,12 @@
     "strict": true,
     "noImplicitOverride": true,
     "noUncheckedIndexedAccess": false,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "exactOptionalPropertyTypes": true,
+    "noPropertyAccessFromIndexSignature": true,
     "sourceMap": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
@@ -23,5 +29,9 @@
     // which would leak Node globals into the client surface.
     "types": []
   },
-  "include": ["www/**/*.ts"]
+  // The unit tests (www/*.test.ts) import node:test and run via Node's type-stripping
+  // (`npm run test:unit`), NOT through this browser-targeted build — `types: []` has no
+  // node:test types, so exclude them here to keep the client typecheck clean.
+  "include": ["www/**/*.ts"],
+  "exclude": ["www/**/*.test.ts"]
 }

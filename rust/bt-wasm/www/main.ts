@@ -1,7 +1,9 @@
-import init, { WasmGame, WasmVsComputer, WasmClient, fixed_dt, max_weapons, weapon_name, weapon_description, weapon_price, weapon_duration } from '../pkg/bt_wasm.js';
+import init, { WasmGame, WasmVsComputer, WasmClient, fixed_dt, max_weapons, weapon_name, weapon_description, weapon_duration } from '../pkg/bt_wasm.js';
 import { CELL_SIZE, drawBoard } from './render.js';
 import { Sound } from './sound.js';
-import type { ServerMessage, PlayerInfo } from './protocol.js';
+import type { ServerMessage, PlayerInfo, SideStatus, OppStatus, PlayerStats, ReplayMeta } from './protocol.js';
+import { escapeHtml } from './dom-util.js';
+import { nextGag, initialGagState, type GagState } from './update-gag.js';
 
 // The `game` variable holds one of three wasm classes or null.
 type AnyGame = WasmGame | WasmVsComputer | WasmClient;
@@ -36,10 +38,10 @@ let searching = false;    // background matchmaking in progress (queued, not yet
 // `game` is a `WasmClient` during an online match (and a `WasmGame` /
 // `WasmVsComputer` otherwise; all three expose the same read API for rendering).
 let authoritative = false; // true during a server-authoritative online match
-let currentMatchId: number | string | null = null; // the live bout's id; parked in the URL for rejoin-on-refresh
+let currentMatchId: string | null = null; // the live bout's id (`match-<uuid>`); parked in the URL for rejoin-on-refresh
 let currentSeed: number | null = null;    // the game's RNG seed (shown in the debug overlay)
-let authSelf: { funds: number; in_bazaar: boolean; lines_til_bazaar: number } | null = null;       // latest authoritative own-status {funds,in_bazaar,lines_til_bazaar}
-let authOpp: { score: number; lines: number; game_over: boolean; in_bazaar?: boolean } | null = null;        // latest authoritative opponent view {score,lines,game_over}
+let authSelf: SideStatus | null = null;       // latest authoritative own-status {funds,in_bazaar,lines_til_bazaar}
+let authOpp: OppStatus | null = null;        // latest authoritative opponent view {score,lines,game_over,in_bazaar?}
 let authSpying = false;    // is a spy of ours active (server-authorized)?
 let authSpyBoard: Int32Array | null = null;   // latest server-DEGRADED opponent board (from a keyframe), or null
 let playerName: string | null = null;    // remembered after the first prompt
@@ -129,7 +131,7 @@ function showLobby() {
 // accidental browser refresh reconnects straight back into it (the server froze
 // the bout for a grace window and reattaches us). Cleared the moment the match is
 // no longer live, so a later refresh lands cleanly in the lobby.
-function setMatchUrl(id: number | string | null | undefined) {
+function setMatchUrl(id: string | null | undefined) {
     if (id === undefined || id === null) return;
     currentMatchId = id;
     try { history.replaceState(null, '', '?match=' + encodeURIComponent(id)); } catch (_) {}
@@ -231,159 +233,20 @@ function selectPlayer(name: string) {
 // The `players` roster is PUSHED live over the websocket on every change (see the
 // `players` handler in onSignalMessage), so the UPDATE button has no work to do — the
 // 1994 client needed it because it PULLED the roster; we don't. So instead it does a
-// bit. The original escalating gag is a one-shot SEQUENCE that leads (you can't drop
-// into its middle); after it, a random draw from the pool. Sequences (the intro, the
-// infomercial) play whole, in order, and only ONCE. A few entries are dynamic — the
-// live press count, a running "speedrun" timer, a self-referential index. Past one
-// threshold it gets concerned about you; past a higher one it grants a saved achievement.
-const UPDATE_CONCERNED_AFTER = 25; // the "we are concerned" line only after this many
-const UPDATE_ACHIEVEMENT_AT = 50;  // press count that unlocks the achievement (once, persisted)
-function gagOrdinal(n: number) { const s = ['th', 'st', 'nd', 'rd'], v = n % 100; return n + (s[(v - 20) % 10] || s[v] || s[0]); }
-function gagElapsed(ms: number) { const t = Math.max(0, Math.floor(ms / 1000)); return Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0'); }
-
-// Context passed to a dynamic gag.
-interface GagCtx { n: number; elapsed: number; idx: number; }
-// A gag entry: a plain string, a dynamic function, a threshold-gated function, or a
-// one-shot sequence.
-type GagEntry =
-    | string
-    | ((c: GagCtx) => string)
-    | { after: number; fn: (c: GagCtx) => string }
-    | { seq: string[] };
-
-// The opening sequence (the original escalating bit). Plays once, in order, the moment
-// you first press; it's NOT in the random pool, so it can never surface mid-way.
-const UPDATE_INTRO: GagEntry[] = [
-    'You press UPDATE. Nothing happens.',
-    'You press UPDATE again. Still nothing happens.',
-    'You press UPDATE yet again and meditate on the nature of nothing.',
-    'You press UPDATE and sneeze. Bless you.',
-    'UPDATE presses YOU.',
-    'If only there was a technology that sent updates to the client automatically.',
-    'Some sort of socket.',
-    'Some sort of socket for the web.',
-    'XMLHttpRequest rolls off the tongue.',
-];
-
-// The pool drawn from after the intro. Standalone entries repeat; a `{seq}` is a
-// one-shot sequence (plays whole, in order, then never again — and since only the
-// unit sits in the pool, you can never land on a sequence's middle).
-const UPDATE_GAGS: GagEntry[] = [
-    'You press UPDATE harder. The nothing intensifies.',
-    'Nothing happened. But you grew, a little, as a person.',
-    'You press UPDATE. There is no undo without a do.',
-    'You press UPDATE and achieve a brief, perfect emptiness.',
-    'The button thanks you for the attention.',
-    'You press UPDATE. The absence of news continues to develop.',
-    'You poll. The server already pushed. You poll anyway.',
-    'The data arrived 30 times a second. You pressed once. Bold.',
-    '> EXAMINE UPDATE. A button, convinced it has a job.',
-    '> PICK UP UPDATE. Taken. Inventory: one (1) button that does nothing.',
-    '> TALK TO UPDATE. "I remember when people needed me," it says.',
-    'Please insert Disk 2.',
-    'A grizzled NPC blocks the path: "Ye cannot refresh what is already fresh."',
-    '> OPEN UPDATE. It is already Open To Matches. So, it seems, are you.',
-    'Thank you for your update. It has been carefully ignored.',
-    'The button would like you to know it is trying its best.',
-    'We kept this button for emotional reasons.',
-    'Please rate your nothing: ☆☆☆☆☆',
-    (c) => `The Count counts your presses: ${c.n}. The Count is delighted.`,
-    "The button is empty, and so are you, and that's alright.",
-    'To press is human; to do nothing, divine.',
-    'There is no refresh. There is only the eternal now of the open socket.',
-    { after: UPDATE_CONCERNED_AFTER, fn: (c) => `You press UPDATE for the ${gagOrdinal(c.n)} time. We are a little concerned.` },
-    'You press UPDATE. It has started a journal. You are in it.',
-    'You press UPDATE. Okay. We get it. You like the button.',
-    (c) => `UPDATE any% WR: ${gagElapsed(c.elapsed)}`,
-    'We value your press. Please continue to hold for nothing.',
-    'In a rare display, the user presses again. The button does not flee.',
-    'Mercury is in retrograde. The websocket is fine.',
-    () => 'Best viewed in ' + (Math.random() < 0.5 ? 'Netscape Navigator' : 'NCSA Mosaic') + '.',
-    'This button is under construction.',
-    'The button no longer dreams of working. The button is free.',
-    'You could be playing a game right now. Just saying.',
-    'Anyway.',
-    "Cool. Cool cool cool. Nothing's happening, but cool.",
-    // A sequence: once entered, all of it plays in order (the bit only lands as a set
-    // — "a SECOND nothing" needs a first). See `seq` handling in pressUpdate.
-    { seq: [
-        "But WAIT — there's still nothing! Press again for even less!",
-        'For three easy payments of nothing, this button is yours.',
-        'Order now and receive a SECOND nothing, free.',
-    ] },
-    "You can't refresh what's already whole.",
-    "Today's affirmation: I am already up to date.",
-    "Chef's note: this button is purely garnish.",
-    'Somewhere, a different button does something. Not this one. Be at peace.',
-    "Entropy increased very slightly. You're welcome, universe.",
-    'You contain multitudes. The button contains a single event listener.',
-    'The heat death of the universe is now marginally closer. Worth it?',
-    'Someone wrote this message instead of removing the button.',
-    (c) => `This is the ${gagOrdinal(c.idx + 1)} thing the button can say and zero things it can do.`,
-    'A developer is watching you press this. They are not okay.',
-    "That's a lot of presses.",
-    'We admire the commitment. We worry about the commitment.',
-];
-
-let updatePresses = 0, updateFirstMs = 0;
-let updateSeq: { list: GagEntry[]; pos: number } | null = null;                // { list, pos } while a sequence is playing
-let updateIntroDone = false;         // the opening sequence is one-shot
-const updatePlayedSeq = new Set<number>();   // pool indices of one-shot sequences already run
-function updateAchUnlocked() { try { return localStorage.getItem('bt_ach_update') === '1'; } catch (_) { return false; } }
-function resolveGag(e: GagEntry, ctx: GagCtx): string { return typeof e === 'function' ? e(ctx) : ((e as any) && (e as any).fn ? (e as any).fn(ctx) : e as string); }
+// bit. The escalating gag, the gag pool, and the (pure) sequencer live in
+// update-gag.ts (unit-tested in update-gag.test.ts); here we just hold the state,
+// feed it the clock + Math.random, render the toast, and persist the achievement.
+function updateAchUnlocked(): boolean {
+    try { return localStorage.getItem('bt_ach_update') === '1'; } catch (_) { return false; }
+}
+let gagState: GagState = initialGagState(updateAchUnlocked());
 function pressUpdate() {
-    updatePresses++;
-    if (!updateFirstMs) updateFirstMs = Date.now();
-    const ctx: GagCtx = { n: updatePresses, elapsed: Date.now() - updateFirstMs, idx: 0 };
-
-    // A sequence in progress runs to its end — never interrupted, never re-entered.
-    if (updateSeq) {
-        const e = updateSeq.list[updateSeq.pos++];
-        if (updateSeq.pos >= updateSeq.list.length) updateSeq = null;
-        showToast(resolveGag(e, ctx), 4500);
-        return;
-    }
-
-    // The intro is a one-shot sequence that leads.
-    if (!updateIntroDone) {
-        updateIntroDone = true;
-        if (UPDATE_INTRO.length > 1) updateSeq = { list: UPDATE_INTRO, pos: 1 };
-        showToast(resolveGag(UPDATE_INTRO[0], ctx), 4500);
-        return;
-    }
-
-    // A real, saved achievement the first time you cross the threshold (>= so a
-    // sequence that straddled the mark can't make it miss).
-    if (updatePresses >= UPDATE_ACHIEVEMENT_AT && !updateAchUnlocked()) {
+    const r = nextGag(gagState, { now: Date.now(), rng: Math.random });
+    gagState = r.state;
+    if (r.unlockedAchievement) {
         try { localStorage.setItem('bt_ach_update', '1'); } catch (_) {}
-        showToast('🏆 Achievement Unlocked — "Pressed UPDATE more than anyone reasonably should"', 6000);
-        return;
     }
-
-    // Random draw from the pool, skipping threshold-gated entries and any one-shot
-    // sequence that has already run.
-    let i = -1;
-    for (let tries = 0; tries < 30; tries++) {
-        const j = Math.floor(Math.random() * UPDATE_GAGS.length);
-        const e = UPDATE_GAGS[j];
-        if ((e as any) && (e as any).after && updatePresses < (e as any).after) continue;
-        if ((e as any) && (e as any).seq && updatePlayedSeq.has(j)) continue;
-        i = j; break;
-    }
-    if (i < 0) { // everything eligible was gated/spent — fall back to a plain entry
-        i = UPDATE_GAGS.findIndex((e) => !((e as any) && ((e as any).seq || (e as any).after)));
-        if (i < 0) i = 0;
-    }
-    ctx.idx = i;
-    const e = UPDATE_GAGS[i];
-    // Start a one-shot sequence: play its first message now, the rest on later presses.
-    if ((e as any) && (e as any).seq) {
-        updatePlayedSeq.add(i);
-        updateSeq = { list: (e as any).seq, pos: 1 };
-        showToast(resolveGag((e as any).seq[0], ctx), 4500);
-        return;
-    }
-    showToast(resolveGag(e, ctx), 4500);
+    showToast(r.text, r.ms);
 }
 
 // Challenge the selected player (directed). Needs a signed identity first.
@@ -462,7 +325,7 @@ async function loadPlayerStats(name: string) {
 
 // Render the stats panel in the original's right-aligned-label monospace style
 // (BTPlayer::formatInfo).
-function formatPlayerStats(p: any) {
+function formatPlayerStats(p: PlayerStats) {
     const row = (label: string, val: unknown) => label.padStart(14) + ': ' + val;
     return [
         row('Name', p.name ?? '—'),
@@ -481,9 +344,6 @@ function formatPlayerStats(p: any) {
     ].join('\n');
 }
 
-function escapeHtml(s: string) {
-    return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
-}
 
 // ─── Board display scale ──────────────────────────────────────────────────
 // On the playfield the board dominates the window height — in the original the
@@ -575,7 +435,7 @@ function setOnlineStatus(msg: string) {
 // challenge accepted in the lobby flows straight into a match on the same socket.
 let lobbyReconnectTimer: number | null = null;
 let pendingQueue = false;   // queue for a match as soon as the socket (re)opens
-let pendingRejoin: number | string | null = null;   // match_id to reattach to as soon as the socket (re)opens
+let pendingRejoin: string | null = null;   // match_id to reattach to as soon as the socket (re)opens
 
 function connectLobby() {
     // Never open a second socket on top of a live one.
@@ -753,7 +613,14 @@ function cleanupOnline() {
 // send); the server-side seq/unacked/replay bookkeeping all lives in there. In local
 // modes (practice / vs-computer) it just mutates the local engine — nothing is sent.
 // Returns the buy/sell success for the bazaar UI.
-function predict(kind: string, arg?: any): boolean | void {
+// The action names accepted by predict() — exactly the cases handled in both
+// switches below, so tsc checks the switches stay exhaustive and rejects a typo'd
+// action string at the call sites.
+type PredictKind =
+    | 'MoveLeft' | 'MoveRight' | 'Rotate' | 'BeginDrop' | 'SoftDrop'
+    | 'LaunchWeapon' | 'LeaveBazaar' | 'BuyWeapon' | 'SellWeapon' | 'SetPaused';
+
+function predict(kind: PredictKind, arg?: any): boolean | void {
     if (authoritative) {
         if (gameEnded) return;
         // The Predictor gates internally (a non-shopping input under a bazaar barrier,
@@ -882,14 +749,6 @@ function enterAuthoritativeGame(msg: Extract<ServerMessage, { type: 'matchStart'
     tickAccumulator = 0;
 }
 
-function showWin() {
-    gameEnded = true;
-    gameOverText.textContent = 'YOU WIN!';
-    gameOverOverlay.style.display = 'flex';
-}
-
-
-
 // Auto-queue for a match over the persistent lobby socket. Requires a signed
 // identity first (so the server knows who you are). `enterAuthoritativeGame`
 // drops you into the playfield when matched.
@@ -930,6 +789,12 @@ function cancelSearch() {
 // the background search and the live authoritative match.
 async function onSignalMessage(ev: MessageEvent) {
     const msg = JSON.parse(ev.data) as ServerMessage;
+
+    // ── Liveness probe ──────────────────────────────────────────────────────
+    // The server emits {"type":"heartbeat"} ~2 Hz to detect a dropped socket while a
+    // bout is frozen; the client has nothing to do with it. Handled EXPLICITLY (not a
+    // silent fall-through) so it's part of the modelled contract.
+    if (msg.type === 'heartbeat') { return; }
 
     // ── Lobby channel (live on the same socket) ──────────────────────────────
     if (msg.type === 'stats') { updateLiveStats(msg); return; }
@@ -1337,7 +1202,7 @@ function selectBazaarToken(token: number) {
     // Highlight the selected row
     const rows = bazaarWeaponList.querySelectorAll('.bazaar-weapon-row');
     rows.forEach((r) => {
-        if (parseInt((r as HTMLElement).dataset.token!, 10) === token) {
+        if (parseInt((r as HTMLElement).dataset['token']!, 10) === token) {
             r.classList.add('selected');
         } else {
             r.classList.remove('selected');
@@ -1371,7 +1236,7 @@ function populateBazaar() {
         const name = weapon_name(t);
         const row = document.createElement('div');
         row.className = 'bazaar-weapon-row';
-        row.dataset.token = t as unknown as string;
+        row.dataset['token'] = t as unknown as string;
         row.textContent = name;
         row.addEventListener('click', () => {
             selectBazaarToken(t);
@@ -1463,10 +1328,9 @@ function processEvents() {
     const events = game!.drain_events();
 
     for (let i = 0; i < events.length; i += 4) {
+        // Events are packed [tag, a, b, c]; only tag + a are consumed here.
         const tag = events[i];
         const a = events[i + 1];
-        const b = events[i + 2];
-        const c = events[i + 3];
 
         // Audio for the local player's events (synthesized in sound.js).
         if (tag === 0) {
@@ -1753,7 +1617,7 @@ canvas.addEventListener('touchend', (e) => {
     touchState = null;
 }, { passive: false });
 
-canvas.addEventListener('touchcancel', (e) => {
+canvas.addEventListener('touchcancel', (_e) => {
     touchState = null;
 }, { passive: false });
 
@@ -1811,11 +1675,11 @@ function setupTouchButton(btnId: string, action: () => void, repeatInterval: num
         stopRepeat();
     });
 
-    btn.addEventListener('pointercancel', (e) => {
+    btn.addEventListener('pointercancel', (_e) => {
         stopRepeat();
     });
 
-    btn.addEventListener('pointerleave', (e) => {
+    btn.addEventListener('pointerleave', (_e) => {
         stopRepeat();
     });
 }
@@ -2077,7 +1941,21 @@ function downloadReplay(json: string) {
     URL.revokeObjectURL(a.href);
 }
 
-function buildIssueBody(expected: string, actual: string, replayUrl: string | null, meta: any) {
+// The replay metadata rendered into a bug report — derived from the recording's
+// ReplayMeta (frames collapsed to a count).
+interface BugMeta {
+    // `| undefined` (not just `?`) because the object is built by spreading optional
+    // ReplayMeta fields straight through — under exactOptionalPropertyTypes an
+    // explicit `undefined` value must be allowed by the type.
+    mode?: string | undefined;
+    ai_level?: number | null | undefined;
+    engine_sha?: string | undefined;
+    seed?: number | undefined;
+    tick_count?: number | undefined;
+    inputs: number;
+}
+
+function buildIssueBody(expected: string, actual: string, replayUrl: string | null, meta: BugMeta | null) {
     let b = '';
     b += '**Expected**\n' + (expected.trim() || '_(not provided)_') + '\n\n';
     b += '**Actual**\n' + (actual.trim() || '_(not provided)_') + '\n\n';
@@ -2096,10 +1974,10 @@ function buildIssueBody(expected: string, actual: string, replayUrl: string | nu
 async function submitBug() {
     bugSubmit.disabled = true;
     let replayUrl: string | null = null;
-    let meta: any = null;
+    let meta: BugMeta | null = null;
     if (bugReplayJson) {
         try {
-            const r = JSON.parse(bugReplayJson);
+            const r = JSON.parse(bugReplayJson) as ReplayMeta;
             meta = { mode: r.mode, ai_level: r.ai_level, engine_sha: r.engine_sha, seed: r.seed, tick_count: r.tick_count, inputs: (r.frames || []).length };
         } catch (e) { /* metadata is best-effort */ }
         try {

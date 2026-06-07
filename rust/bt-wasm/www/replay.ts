@@ -3,6 +3,8 @@
 // plays it back at the original fixed timestep with play/pause/seek/speed.
 import init, { WasmReplayPlayer, WasmVersusReplayPlayer, fixed_dt, weapon_name } from '../pkg/bt_wasm.js';
 import { CELL_SIZE, drawBoard } from './render.js';
+import { escapeHtml } from './dom-util.js';
+import type { ReplayMeta } from './protocol.js';
 
 // Per-side HUD object the page renders. Returned by `hud(sideA)`; null for the
 // AI side of a single-board replay (no funds/arsenal recorded for Ernie).
@@ -40,18 +42,18 @@ interface PlayerAdapter {
     hud(a: boolean): Hud | null;
 }
 
-// Real player names threaded into the Versus replay JSON by the server.
+// Real player names threaded into the Versus replay JSON by the server. The names
+// can be absent (older rows), so `| undefined` is explicit — the object is built
+// straight from `parsed.name_a`/`name_b` (both `string | undefined`), which
+// exactOptionalPropertyTypes requires the type to accept.
 interface VersusNames {
-    a?: string;
-    b?: string;
+    a?: string | undefined;
+    b?: string | undefined;
 }
 
-// The small subset of the fetched replay JSON the page reads to pick an adapter.
-interface ReplayMeta {
-    seed_a?: unknown;
-    name_a?: string;
-    name_b?: string;
-}
+// The page reads the small subset of the fetched replay JSON it needs to pick an
+// adapter (`seed_a` to detect a two-board recording, `name_a`/`name_b` for the
+// labels) from the shared `ReplayMeta` wire shape (protocol.ts).
 
 // Both adapters below expose the SAME interface the page drives:
 //   render_grid/render_ai_grid, has_ai, width/height, tick_*, step/seek/result,
@@ -177,6 +179,10 @@ function showError(msg: string): void {
 function idFromUrl(): string | null {
     const q = new URLSearchParams(location.search).get('id');
     if (q) return q;
+    // Replay ids are a 16-char hex content hash (bt-server `replay_id` =
+    // `format!("{:016x}", …)`, enforced hex-only by `valid_replay_id`), so the
+    // hex-only capture is exact — no hyphens/UUIDs to truncate. Confirmed against
+    // bt-server/src/main.rs.
     const m = location.pathname.match(/\/replay\/([0-9a-fA-F]+)/);
     return m ? m[1] : null;
 }
@@ -245,10 +251,6 @@ function renderHud(el: HTMLElement, h: Hud | null): void {
         `</div>` +
         (effects.length ? `<div class="rh-list rh-effects"><div class="rh-h">Effects</div>${effects.join('')}</div>` : '') +
         `<div class="rh-list rh-arsenal"><div class="rh-h">Arsenal</div>${slots.join('')}</div>`;
-}
-
-function escapeHtml(s: string): string {
-    return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!));
 }
 
 // Append the weapon launches from the latest step() to the scrolling log. Called
