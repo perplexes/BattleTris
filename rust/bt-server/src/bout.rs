@@ -512,7 +512,7 @@ mod tests {
     }
 
     /// Strategy: EVERY legal client input variant (the exact set
-    /// `is_legal_client_input` admits). Used to prove each one is ACCEPTED — so
+    /// `is_legal_client_input` admits). Used to prove each one is accepted, so
     /// dropping any single arm from the allow-list (e.g. removing `Rotate`) is
     /// caught.
     fn legal_client_input() -> impl Strategy<Value = Input> {
@@ -529,8 +529,8 @@ mod tests {
         ]
     }
 
-    /// Strategy: a non-shopping legal client input — legal in general, but illegal
-    /// WHILE in the bazaar (the match is frozen; only buy/sell/leave shop actions
+    /// Strategy: a non-shopping legal client input. Legal in general, but illegal
+    /// while in the bazaar (the match is frozen; only buy/sell/leave shop actions
     /// are allowed there). The bazaar gate must reject every one of these.
     fn non_bazaar_legal_input() -> impl Strategy<Value = Input> {
         prop_oneof![
@@ -544,7 +544,7 @@ mod tests {
     }
 
     // Reattach: a reconnecting client restarts its input `seq` at 0, so the bout must
-    // drop that side's ack baseline — otherwise every fresh input is `seq <= ack`, gets
+    // drop that side's ack baseline; otherwise every fresh input is `seq <= ack`, gets
     // rejected, and the player's piece snaps back for the rest of the match (the bug a
     // mid-match server redeploy triggered). Pin the contract: after `reset_ack`, the
     // side's ack is 0 and `seq` 1 is accepted again, while the OTHER side is untouched.
@@ -561,7 +561,7 @@ mod tests {
         assert_eq!(b.snapshot_for(Side::A, false).ack, 3);
         assert_eq!(b.snapshot_for(Side::B, false).ack, 2);
 
-        // Before reset, a reconnected client's fresh seq 1 is rejected (1 <= ack 3) —
+        // Before reset, a reconnected client's fresh seq 1 is rejected (1 <= ack 3):
         // this is exactly the stuck state.
         assert!(!b.apply_input(Side::A, &Input::MoveLeft, 1), "stale: seq 1 must be rejected pre-reset");
 
@@ -575,9 +575,9 @@ mod tests {
     }
 
     /// Force `side` into the bazaar deterministically by crossing the NEXT 20-line bazaar
-    /// boundary via the score mirror — and do it MONOTONICALLY in the opponent's line
+    /// boundary via the score mirror, and do it monotonically in the opponent's line
     /// count, so repeated calls (a multi-visit trace) model successive real entries (20,
-    /// 40, 60, …) instead of rewinding `op_lines` (which can't happen in a real match —
+    /// 40, 60, ...) instead of rewinding `op_lines` (which can't happen in a real match:
     /// the opponent's cleared-line count only grows). We read the current combined lines,
     /// pick the next multiple of `BT_LINES_TIL_BAZ` strictly above it, and raise `op_lines`
     /// to just-below then at that boundary (`update_bazaar` then sees `new_til` jump up and
@@ -633,7 +633,7 @@ mod tests {
             let mut b = Bout::new(seed_a, seed_b);
             let side = if side_idx == 0 { Side::A } else { Side::B };
 
-            // Snapshot the FULL latent state before the attempt — BOTH the per-side
+            // Snapshot the full latent state before the attempt: both the per-side
             // game serialization (board + pending-weapon queue + arsenal + funds +
             // remaining-effect counters; see Game::snapshot_bytes) AND every
             // Bout-only field (both acks, the frame log's CONTENTS, both spy slots,
@@ -654,7 +654,7 @@ mod tests {
             // Must be rejected.
             prop_assert!(!accepted, "relay-internal input {:?} was accepted (should be rejected)", input);
 
-            // Nothing — game OR Bout-only — moved.
+            // Nothing (game or Bout-only) moved.
             prop_assert_eq!(&b.versus.game(Side::A).snapshot_bytes(), &snap_a,
                 "Side A game state changed after rejected relay-internal input {:?}", input);
             prop_assert_eq!(&b.versus.game(Side::B).snapshot_bytes(), &snap_b,
@@ -719,8 +719,8 @@ mod tests {
 
                 // BICONDITIONAL: a legal non-bazaar input is accepted IFF its seq
                 // is fresh (strictly greater than the last ack). This requires
-                // the server to ACCEPT fresh inputs — a server that rejected
-                // everything (or accepted stale seqs) now fails.
+                // the server to accept fresh inputs (a server that rejected
+                // everything, or accepted stale seqs, now fails).
                 prop_assert_eq!(accepted, seq > ack_before,
                     "MoveLeft seq {} (ack {}): accepted={} (expected {})",
                     seq, ack_before, accepted, seq > ack_before);
@@ -739,7 +739,7 @@ mod tests {
     // Property (b'): EVERY legal client input variant is ACCEPTED outside the
     //   bazaar and advances `ack`. The existing acceptance test only ever feeds
     //   `MoveLeft`, so removing any OTHER arm from `is_legal_client_input` (e.g.
-    //   `Rotate`, `SoftDrop`, `LaunchWeapon`, `LeaveBazaar`) still passed — the
+    //   `Rotate`, `SoftDrop`, `LaunchWeapon`, `LeaveBazaar`) still passed: the
     //   accepted path for those variants was unproven. A fresh Bout (no ticks ->
     //   never in the bazaar) with a fresh seq must accept each variant and move
     //   that side's ack to the applied seq.
@@ -781,8 +781,8 @@ mod tests {
     // -----------------------------------------------------------------------
     // Property (b''): the BAZAAR INPUT GATE. While a side is shopping the match is
     //   frozen; only buy/sell/leave are legal. A non-shopping input (move / rotate
-    //   / drop / launch) must be NOT APPLIED — no recorded frame, no game movement —
-    //   BUT it must STILL advance `ack` (a fresh seq is acked even when the barrier
+    //   / drop / launch) must not be applied (no recorded frame, no game movement),
+    //   but it must still advance `ack` (a fresh seq is acked even when the barrier
     //   drops it). That ack is essential: under latency a client sends gameplay inputs
     //   that cross the bazaar boundary before its snapshot shows the barrier; if those
     //   never got acked, a client waiting for ack to catch up (the bot's WaitAck gate)
@@ -810,8 +810,8 @@ mod tests {
                 "precondition: the side must actually be in the bazaar");
 
             // Baseline: a SHOPPING input (SellWeapon of an empty slot) is bazaar-legal
-            // and accepted, advancing ack to 1 — a nonzero starting point, so "ack
-            // advanced to seq" below is a real advance from 1, not a 0==0 coincidence.
+            // and accepted, advancing ack to 1 (a nonzero starting point, so "ack
+            // advanced to seq" below is a real advance from 1, not a 0==0 coincidence).
             prop_assert!(b.apply_input(side, &Input::SellWeapon(0), 1),
                 "a shopping input must be accepted while in the bazaar");
             prop_assert_eq!(b.snapshot_for(side, false).ack, 1, "shopping input advanced ack to 1");
@@ -819,8 +819,8 @@ mod tests {
             let frames_before = b.frames.clone();
             let game_before = b.versus.game(side).snapshot_bytes();
 
-            // The non-shopping input must NOT be APPLIED while in the bazaar — but it's
-            // still a fresh legal input, so it MUST advance ack (else a client waiting
+            // The non-shopping input must not be applied while in the bazaar, but it is
+            // still a fresh legal input, so it must advance ack (else a client waiting
             // on ack deadlocks; see the property comment above).
             let accepted = b.apply_input(side, &input, seq);
             prop_assert!(!accepted,
@@ -836,8 +836,8 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // Property (b'): the bazaar is a BARRIER, not a per-side gate. While ONE side is
-    //   shopping the whole match is frozen, so the OTHER side — who left the bazaar
-    //   first (e.g. a bot makes its picks instantly) — must ALSO be frozen: its
+    //   shopping the whole match is frozen, so the other side (who left the bazaar
+    //   first, e.g. a bot makes its picks instantly) must also be frozen: its
     //   move/rotate/launch is rejected until the shopper is done. Without this the
     //   side that left kept nudging its piece for free while the opponent shopped.
     // -----------------------------------------------------------------------
@@ -867,7 +867,7 @@ mod tests {
             let game_before = b.versus.game(other).snapshot_bytes();
 
             // The OTHER side's non-shopping input must NOT be applied (the barrier
-            // freezes it) — but it's a fresh legal input, so it must STILL advance ack
+            // freezes it), but it is a fresh legal input so it must still advance ack
             // (this is the exact deadlock scenario: a side whose pre-bazaar gameplay
             // inputs are in flight when the barrier comes up must still see them acked,
             // or its WaitAck gate hangs the match in the bazaar).
@@ -889,13 +889,13 @@ mod tests {
     //
     // The bug is an interaction between two state machines: the server's `apply_input`
     // and the client's reconciliation gate. "Latency" is just "the client's inputs
-    // reach the server AFTER the bazaar barrier comes up" — the client predicts ahead
+    // reach the server AFTER the bazaar barrier comes up": the client predicts ahead
     // and its in-flight gameplay inputs land late. We model exactly that, in-process:
     //   1. The server has authoritatively entered this side's bazaar.
     //   2. The client had K gameplay inputs in flight (sent before its snapshot showed
     //      the barrier); they arrive now and the barrier rejects each.
     //   3. The client runs the bot's gate (the essence of `bt-bot`'s `sync::decide`):
-    //        while ack < last_sent  -> WaitAck (hold — don't run ahead of the server)
+    //        while ack < last_sent  -> WaitAck (hold; don't run ahead of the server)
     //        else, in our bazaar    -> Shop: buy/sell + LeaveBazaar
     // If a barrier-rejected input doesn't advance `ack`, `ack` stays behind `last_sent`
     // forever, the gate holds forever, the client never sends LeaveBazaar, and the
@@ -914,7 +914,7 @@ mod tests {
         assert!(b.versus.game(side).is_in_bazaar(), "precondition: side is in the bazaar");
 
         // (2) K gameplay inputs the client sent BEFORE it knew about the barrier arrive
-        // now. The barrier rejects them (not applied) — but each must still advance ack.
+        // now. The barrier rejects them (not applied), but each must still advance ack.
         const K: u64 = 6;
         let mut last_sent = 0u64;
         for _ in 0..K {
@@ -931,7 +931,7 @@ mod tests {
         for _ in 0..1000 {
             let ack = b.snapshot_for(side, false).ack;
             if ack < last_sent {
-                continue; // WaitAck — the gate. Nothing new is sent; ack must catch up.
+                continue; // WaitAck: the gate. Nothing new is sent; ack must catch up.
             }
             if !bought {
                 // Shop: a buy/sell is bazaar-legal; then LeaveBazaar clears our side.
@@ -949,7 +949,7 @@ mod tests {
 
         assert!(
             escaped,
-            "BAZAAR DEADLOCK: the client never left — a barrier-rejected in-flight input \
+            "BAZAAR DEADLOCK: the client never left; a barrier-rejected in-flight input \
              left ack ({}) behind last_sent ({}), so the WaitAck gate hung forever. \
              Bout::apply_input must advance ack for a fresh input even when the barrier \
              drops it.",
@@ -958,14 +958,14 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // A LIVENESS SPEC FROM FIRST PRINCIPLES for the bazaar barrier — the generalized
+    // A liveness spec from first principles for the bazaar barrier: the generalized
     // form of the hard-coded repro above. Rather than encode one freeze, we model the
     // protocol and check an invariant over a GENERATED space of adversarial schedules,
     // against the REAL Bout::apply_input:
     //
     //   State:    the server (a real Bout) + a client { last_sent, bought }.
     //   Schedule: on an in-order channel the only adversarial freedom that matters is
-    //             WHERE the server's bazaar entry falls in the client's input stream —
+    //             WHERE the server's bazaar entry falls in the client's input stream:
     //             `pre` gameplay inputs land before it (applied), `crossing` were
     //             already in flight and land after it (barrier-rejected). Network delay
     //             chooses that split, so we generate it (+ the input variants + side).
@@ -981,7 +981,7 @@ mod tests {
     //
     // The apply_input fix is exactly what makes liveness hold: without it, any schedule
     // with `crossing >= 1` leaves ack behind last_sent forever and the client can never
-    // shop — so SOME generated schedule violates the invariant (revert the fix → fail).
+    // shop, so some generated schedule violates the invariant (revert the fix -> fail).
     // (Inputs are restricted to non-line-clearing actions so the ONLY bazaar trigger is
     // the modeled entry, not an incidental clear from a generated BeginDrop.)
     // -----------------------------------------------------------------------
@@ -1015,7 +1015,7 @@ mod tests {
             let mut last_sent = 0u64;
             let mut prev_ack = 0u64;
 
-            // Phase 1 — `pre` inputs reach the server BEFORE the bazaar: applied, ack++.
+            // Phase 1: `pre` inputs reach the server before the bazaar: applied, ack++.
             for inp in stream.iter().take(pre as usize) {
                 last_sent += 1;
                 prop_assert!(b.apply_input(side, inp, last_sent), "pre-bazaar input must apply");
@@ -1024,12 +1024,12 @@ mod tests {
                 prev_ack = ack;
             }
 
-            // Event — the server's combined lines cross: it enters this side's bazaar.
+            // Event: the server's combined lines cross, entering this side's bazaar.
             force_into_bazaar(&mut b, side);
             prop_assert!(b.versus.game(side).is_in_bazaar(), "server entered the bazaar");
 
-            // Phase 2 — the `crossing` inputs were already in flight (stale client view)
-            // and arrive now: barrier-rejected (not applied), but each MUST advance ack.
+            // Phase 2: the `crossing` inputs were already in flight (stale client view)
+            // and arrive now: barrier-rejected (not applied), but each must advance ack.
             for inp in stream.iter().skip(pre as usize).take(crossing as usize) {
                 last_sent += 1;
                 prop_assert!(!b.apply_input(side, inp, last_sent), "crossing input must not apply");
@@ -1038,13 +1038,13 @@ mod tests {
                 prev_ack = ack;
             }
 
-            // LIVENESS — run the client FSM to a bounded fixpoint; it MUST escape.
+            // Liveness: run the client FSM to a bounded fixpoint; it must escape.
             let mut bought = false;
             let mut escaped = false;
             for _ in 0..need + 8 {
                 if !b.versus.game(side).is_in_bazaar() { escaped = true; break; }
                 if b.snapshot_for(side, false).ack < last_sent {
-                    continue; // WaitAck — nothing new sent; ack must catch up on its own.
+                    continue; // WaitAck: nothing new sent; ack must catch up on its own.
                 }
                 if !bought {
                     bought = true;
@@ -1053,7 +1053,7 @@ mod tests {
                 }
             }
             prop_assert!(escaped,
-                "LIVENESS VIOLATION (pre={}, crossing={}): client stuck in the bazaar — ack {} \
+                "LIVENESS VIOLATION (pre={}, crossing={}): client stuck in the bazaar; ack {} \
                  never caught last_sent {}, so the WaitAck gate hung. A barrier-rejected in-flight \
                  input must still advance ack.",
                 pre, crossing, b.snapshot_for(side, false).ack, last_sent);
@@ -1068,18 +1068,18 @@ mod tests {
     // (ack, in_bazaar, weapons-applied) tracks the MODEL's (serverAck, serverBazaar,
     // weaponsApplied) after EVERY state. The corpus covers the bazaar crossing (the
     // ack-on-barrier-reject step), weapon delivery + a later crossing, the
-    // reconnect/reset_ack snap-back, and multiple bazaar visits — so the model and the
+    // reconnect/reset_ack snap-back, and multiple bazaar visits, so the model and the
     // Rust share one source of truth across the whole feature space, not just one path.
     //
     // The mapping is driven by each state's EXPLICIT `lastAction` string (emitted by
-    // `Gen.tla`), NOT inferred by diffing consecutive states — so a step can never be
+    // `Gen.tla`), not inferred by diffing consecutive states, so a step can never be
     // silently mis-mapped or skipped. Any `lastAction` the harness doesn't know how to
     // drive against a `Bout` is a HARD FAILURE (`panic!`), never a silent pass.
     //
     // Teeth: the corpus is required to exercise a barrier crossing (a G/W input the
     // bazaar rejects, where the model advances ack); reverting the ack-on-barrier-reject
     // fix makes the per-state ack assertion fire at that step. (The reconnect fixture
-    // gives the reset_ack path its own teeth — see `reset_ack` below.)
+    // gives the reset_ack path its own teeth; see `reset_ack` below.)
     fn itf_int(v: &serde_json::Value) -> i64 {
         v.get("#bigint").and_then(|b| b.as_str()).map(|s| s.parse().unwrap())
             .unwrap_or_else(|| v.as_i64().expect("itf int"))
@@ -1091,7 +1091,7 @@ mod tests {
     }
     /// Map a model input KIND to the concrete `Input` whose barrier CLASS matches. "W"
     /// must be a real cross-player weapon so an applied "W" (normal play) actually
-    /// delivers — `LaunchWeapon(0)` against a stocked arsenal (see the harness setup).
+    /// delivers: `LaunchWeapon(0)` against a stocked arsenal (see the harness setup).
     fn itf_input(kind: &str) -> Input {
         match kind {
             "G" => Input::MoveLeft,        // gameplay (non-shopping; barrier-rejected in bazaar)
@@ -1101,23 +1101,23 @@ mod tests {
         }
     }
 
-    /// What a single replayed trace exercised — for the corpus-level non-vacuity checks.
+    /// What a single replayed trace exercised, for the corpus-level non-vacuity checks.
     #[derive(Default)]
     struct TraceCoverage {
-        /// A barrier crossing (a G/W input the bazaar rejected) occurred — the
+        /// A barrier crossing (a G/W input the bazaar rejected) occurred: the
         /// ack-on-barrier-reject teeth.
         saw_crossing: bool,
-        /// A `Reconnect` (→ `reset_ack`) step occurred — the reset_ack / snap-back teeth.
+        /// A `Reconnect` (-> `reset_ack`) step occurred: the reset_ack / snap-back teeth.
         saw_reconnect: bool,
         /// The max `weaponsApplied` the model reached (and the oracle matched) in this
-        /// trace — > 0 proves the weapons oracle was genuinely exercised, not vacuously 0.
+        /// trace; > 0 proves the weapons oracle was genuinely exercised, not vacuously 0.
         max_weapons_applied: u64,
     }
 
     /// Replay one Apalache trace against a real `Bout`, asserting conformance after every
     /// state. Returns what the trace exercised (so the corpus-level test can require the
     /// teeth + a non-vacuous weapons oracle are present somewhere). Panics loudly on any
-    /// model action it can't map — the harness never silently skips a step.
+    /// model action it can't map; the harness never silently skips a step.
     fn replay_itf_trace(name: &str, raw: &str) -> TraceCoverage {
         let trace: serde_json::Value = serde_json::from_str(raw)
             .unwrap_or_else(|e| panic!("{name}: parse ITF JSON: {e}"));
@@ -1137,7 +1137,7 @@ mod tests {
         let side = Side::A;
         let mut b = Bout::new(7, 11);
         // Stock the side's arsenal with a benign cross-player weapon in slot 0, so an
-        // APPLIED "W" (LaunchWeapon(0)) really fires and the bout records it — making the
+        // APPLIED "W" (LaunchWeapon(0)) really fires and the bout records it, making the
         // weapons-applied oracle below meaningful (an empty slot would no-op every "W").
         for _ in 0..8 {
             b.versus.game_mut(side).grant_weapon(bt_core::WeaponToken::RiseUp);
@@ -1161,14 +1161,14 @@ mod tests {
                 // The opponent's lines crossed: drive the real server into the bazaar.
                 "ServerEnterBazaar" => force_into_bazaar(&mut b, side),
                 // The client reloaded + reconnected: the server runs reset_ack. This is
-                // the snap-back fix's conformance point — the model drops serverAck to 0
+                // the snap-back fix's conformance point: the model drops serverAck to 0
                 // here, so the real Bout must too (the per-state ack check below fires if
                 // reset_ack is reverted).
                 "Reconnect" => {
                     b.reset_ack(side);
                     saw_reconnect = true;
                 }
-                // Process the next client input — feed the delivered HEAD of the PREVIOUS
+                // Process the next client input: feed the delivered HEAD of the previous
                 // state's channel to the real apply_input (the model's ServerDeliverInput).
                 "ServerDeliverInput" => {
                     let pchan = itf_chan(prev);
@@ -1179,7 +1179,7 @@ mod tests {
                     // Witness a REAL weapon launch (not merely "apply_input returned true"):
                     // a genuine LaunchWeapon decrements the fired arsenal slot. We snapshot
                     // slot-0's quantity before/after so the weapons-applied oracle counts an
-                    // actual launch — if the "W" mapping were ever changed to a non-weapon,
+                    // actual launch: if the "W" mapping were ever changed to a non-weapon,
                     // or launch became a no-op, the quantity wouldn't move and the assert
                     // below would catch the count mismatch. (The harness stocked slot 0 with
                     // 8 RiseUp, more than any fixture's W count, so the slot never empties.)
@@ -1194,18 +1194,18 @@ mod tests {
                     }
                     if applied && kind == "W" {
                         // A weapon delivered in normal play (matches the model's
-                        // weaponsApplied++). Require the launch ACTUALLY fired — the arsenal
-                        // slot must have decremented — so the oracle witnesses a real weapon,
+                        // weaponsApplied++). Require the launch actually fired: the arsenal
+                        // slot must have decremented, so the oracle witnesses a real weapon,
                         // not just an accepted input. (A barrier-rejected "W" is not applied,
                         // so it's never counted here.)
                         assert_eq!(qty_after + 1, qty_before,
                             "{name}@{i}: an applied \"W\" did not actually launch a weapon \
-                             (arsenal slot 0 went {qty_before} -> {qty_after}) — the weapons \
+                             (arsenal slot 0 went {qty_before} -> {qty_after}): the weapons \
                              oracle would be counting a non-launch");
                         weapons_applied += 1;
                     }
                 }
-                other => panic!("{name}@{i}: unmapped model action {other:?} — the harness \
+                other => panic!("{name}@{i}: unmapped model action {other:?}; the harness \
                     must drive every action against the Bout (no silent skips)"),
             }
 
@@ -1215,7 +1215,7 @@ mod tests {
             let _ = conn(cur);
             assert_eq!(
                 b.snapshot_for(side, false).ack, ack(cur),
-                "{name}@{i}: ACK DIVERGED from the model ({}) — the real apply_input/reset_ack \
+                "{name}@{i}: ACK DIVERGED from the model ({}); the real apply_input/reset_ack \
                  did not track the model (action {:?})", ack(cur), action(name, cur)
             );
             assert_eq!(
@@ -1268,25 +1268,25 @@ mod tests {
         // Teeth (ack-on-barrier-reject): SOMEWHERE in the corpus a barrier crossing must
         // occur, where reverting the ack fix makes a per-state ack assertion fire.
         assert!(any_crossing,
-            "no trace in the corpus exercised a bazaar crossing — the conformance teeth are gone");
+            "no trace in the corpus exercised a bazaar crossing; the conformance teeth are gone");
         // Teeth (reset_ack / snap-back): SOMEWHERE in the corpus a Reconnect must occur,
         // where reverting reset_ack makes a per-state ack assertion fire. Without this the
         // reset_ack path could lose its only fixture (e.g. a regen overwrote it with a
         // same-SCHEMA but reconnect-free trace) and silently go untested.
         assert!(any_reconnect,
-            "no trace in the corpus exercised a Reconnect — the reset_ack teeth are gone");
+            "no trace in the corpus exercised a Reconnect; the reset_ack teeth are gone");
         // Non-vacuity for the weapons-applied oracle: at least one trace must actually
         // deliver a weapon in normal play (weaponsApplied > 0), so the per-state
         // weapons-applied conformance assert (and its arsenal-decrement witness) is
-        // genuinely exercised — not vacuously 0 across the whole corpus (which would let
+        // genuinely exercised, not vacuously 0 across the whole corpus (which would let
         // the weapons oracle rot without anyone noticing).
         assert!(max_weapons > 0,
-            "no trace delivered a weapon in normal play — the weapons-applied oracle is vacuous");
+            "no trace delivered a weapon in normal play; the weapons-applied oracle is vacuous");
     }
 
     // -----------------------------------------------------------------------
     // Property (c): INJECTION ORACLE. A non-economic legal input (move / rotate /
-    //   drop / launch) must NEVER change a player's funds when applied — funds
+    //   drop / launch) must never change a player's funds when applied; funds
     //   may only move later, inside the engine tick, from real line clears. So a
     //   bug where e.g. `MoveLeft` granted +999 funds is caught directly (the
     //   apply call would move funds). We also keep the funds >= 0 invariant after
@@ -1346,15 +1346,15 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // Property (c'): the TICK credits funds ONLY when a line actually clears.
-    // The ">= 0" check above is too weak — a per-tick `add_funds(1)` at the top
-    // of Bout::tick keeps funds non-negative and slips through, before OR after
-    // the first lock. Here, in a fresh bout with NO inputs (so no launched
+    // The ">= 0" check above is too weak: a per-tick `add_funds(1)` at the top
+    // of Bout::tick keeps funds non-negative and slips through, before or after
+    // the first lock. Here, in a fresh bout with no inputs (so no launched
     // weapons -> no garbage-line insertions to confound the board count), the
     // ONLY legitimate funds source is this side clearing its own lines, and a
     // clear is the ONLY thing that DECREASES the locked-cell count (a lock adds
     // <=8 cells; a clear removes a multiple of 10 -> a lock+clear still nets a
     // decrease). So on any tick where a side's board fill did NOT strictly
-    // decrease, that side's funds MUST be unchanged — pre- and post-lock alike.
+    // decrease, that side's funds must be unchanged, pre- and post-lock alike.
     // -----------------------------------------------------------------------
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(128))]
@@ -1383,7 +1383,7 @@ mod tests {
                         prop_assert_eq!(
                             b.versus.game(side).score().funds, funds0,
                             "side {:?} funds changed on a tick with no line clear \
-                             (fill {} -> {}) — tick-path funds injection",
+                             (fill {} -> {}): tick-path funds injection",
                             side, fill0, fill1
                         );
                     }
@@ -1409,12 +1409,12 @@ mod tests {
     //   VersusReplay; a VersusReplayPlayer must reconstruct BOTH boards, the
     //   falling pieces, the FULL scores, AND the result exactly. We compare FULL
     //   side fingerprints (board + falling piece + score/lines/funds/op_*), NOT
-    //   just export_board — so a recorded-input substitution that keeps the locked
+    //   just export_board, so a recorded-input substitution that keeps the locked
     //   board identical but changes the piece pose or the score (e.g. recording
     //   `AiDrop` in place of `BeginDrop`: the flat AI score vs the human hard-drop
-    //   bonus) is caught. We mirror the server's match loop exactly — apply a
-    //   batch of inputs, THEN always tick — so a frame is never stamped at a tick
-    //   the replay won't reach (the real loop's `apply_input … ; bout.tick()`).
+    //   bonus) is caught. We mirror the server's match loop exactly: apply a
+    //   batch of inputs, then always tick, so a frame is never stamped at a tick
+    //   the replay won't reach (the real loop's `apply_input ...; bout.tick()`).
     // -----------------------------------------------------------------------
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(96))]
@@ -1424,7 +1424,7 @@ mod tests {
             seed_a in any::<u64>(),
             seed_b in any::<u64>(),
             // Per loop-iteration: a batch of (side, input) applied this tick, then
-            // exactly one tick — faithful to the server's `apply…; bout.tick()`.
+            // exactly one tick, faithful to the server's `apply...; bout.tick()`.
             iters in prop::collection::vec(
                 prop::collection::vec((0usize..2, legal_client_input()), 0..3),
                 0..400,
@@ -1432,8 +1432,8 @@ mod tests {
         ) {
             use bt_replay::VersusReplayPlayer;
 
-            // NOTE: no out-of-band arsenal grants — the replay reconstructs the
-            // match from the SEEDS + the recorded INPUT stream alone, so any state
+            // No out-of-band arsenal grants: the replay reconstructs the
+            // match from the seeds and the recorded input stream alone, so any state
             // change that didn't come through a recorded input (a direct
             // grant_weapon) would legitimately diverge. LaunchWeapon is therefore a
             // no-op here on both sides (its acceptance is covered separately); what
@@ -1445,8 +1445,8 @@ mod tests {
             // tick the bout was at. This is built in the TEST (not via the bout's
             // own frame-push), so comparing the export against it catches a
             // recording mutant that mangles a frame's payload (e.g. stamping every
-            // `LaunchWeapon(slot)` as `LaunchWeapon(0)`) — `to_replay().frames ==
-            // b.frames` would NOT, since both sides share the mutated push.
+            // `LaunchWeapon(slot)` as `LaunchWeapon(0)`); `to_replay().frames ==
+            // b.frames` would not catch this, since both sides share the mutated push.
             let mut expected_frames: Vec<bt_replay::VersusFrame> = Vec::new();
 
             for batch in iters {
@@ -1471,7 +1471,7 @@ mod tests {
             let live_result = b.result();
 
             // Export. The exported frames must EXACTLY equal what the test observed
-            // being ACCEPTED — same tick, side, AND input payload (slot/token).
+            // being accepted: same tick, side, and input payload (slot/token).
             // The bout ticks at TICK_MS internally, so to_replay must be given the
             // same dt for a faithful replay; we pass a DISTINCTIVE engine_sha so a
             // blank/dropped one is caught.
@@ -1479,7 +1479,7 @@ mod tests {
             let exported = b.to_replay(TICK_MS, engine_sha);
             prop_assert_eq!(&exported.frames, &expected_frames,
                 "to_replay must export every accepted input verbatim (tick/side/input)");
-            // The HEADER metadata must reflect the export args + match state — a
+            // The header metadata must reflect the export args + match state: a
             // `to_replay` with `version: 0`, blank `engine_sha`, a wrong `dt_ms`, or
             // a stale `tick_count` is caught here.
             prop_assert_eq!(exported.version, REPLAY_VERSION, "to_replay must stamp REPLAY_VERSION");
@@ -1489,7 +1489,7 @@ mod tests {
             prop_assert_eq!(exported.seed_a, seed_a as u32, "to_replay must record seed_a");
             prop_assert_eq!(exported.seed_b, seed_b as u32, "to_replay must record seed_b");
 
-            // Replay (through JSON too — the on-disk form).
+            // Replay (through JSON too, the on-disk form).
             let replay = bt_replay::VersusReplay::from_json(&exported.to_json())
                 .expect("to_replay JSON must parse");
             let mut player = VersusReplayPlayer::new(replay);
@@ -1504,7 +1504,7 @@ mod tests {
         }
     }
 
-    /// Count of occupied board cells (the locked stack — the falling piece is not
+    /// Count of occupied board cells (the locked stack; the falling piece is not
     /// part of the board until it locks).
     fn board_filled(g: &bt_core::Game) -> i64 {
         let b = g.board();
@@ -1615,7 +1615,7 @@ mod tests {
         fn a_spy_expires_after_the_opponents_duration_of_clears(
             seed_a in any::<u64>(),
             seed_b in any::<u64>(),
-            // 0=Ames(20), 1=Ace(30) — pick the shorter-duration spies to keep the
+            // 0=Ames(20), 1=Ace(30): pick the shorter-duration spies to keep the
             // forced-clear loop bounded.
             spy_idx in 0usize..2,
         ) {
@@ -1635,7 +1635,7 @@ mod tests {
             let got = force_side_clears(&mut b, Side::B, duration + 2);
             prop_assume!(got >= duration); // B cleared enough to exhaust the spy
 
-            // The spy must have EXPIRED — A is no longer spying, and a keyframe
+            // The spy must have expired: A is no longer spying, and a keyframe
             // frame carries no spy board.
             prop_assert!(!b.snapshot_for(Side::A, false).spying,
                 "the spy must expire after the opponent clears its {}-line duration", duration);
@@ -1735,7 +1735,7 @@ mod tests {
             prop_assume!(cleared > 0 && !b.is_over());
             b.versus.game_mut(clear_side).add_funds(extra_funds);
             // Force the OTHER side into the bazaar so `in_bazaar` / `lines_til_bazaar`
-            // are NON-trivial (else those assertions are vacuous — both default
+            // are non-trivial (else those assertions are vacuous: both default
             // to false/20 and a hardcoded mutant would slip through).
             force_into_bazaar(&mut b, clear_side.other());
             prop_assert!(b.versus.game(clear_side.other()).is_in_bazaar(),
@@ -1807,7 +1807,7 @@ mod tests {
             // Count non-empty cells (tag != 0 in each quad).
             let filled = board.chunks(4).filter(|q| q[0] != 0).count();
             if filled >= 9 {
-                return; // B received A's RiseUp row — resolved server-side
+                return; // B received A's RiseUp row, resolved server-side
             }
         }
         panic!("RiseUp was not delivered to B by the authoritative bout");
@@ -1817,11 +1817,11 @@ mod tests {
     // Property (f): SPY DEGRADATION privacy. Each spy reveals a DIFFERENT fraction
     //   of the opponent board, and the degradation is what stops a modified client
     //   from reading cells the spy didn't earn. The old test only asserted "some
-    //   cells visible", so `Ames => 0` (reveal EVERYTHING — a full info leak)
-    //   survived. Here, over a FULLY-filled board, we pin each token's reveal:
-    //     * Ames  must HIDE some AND REVEAL some (a partial, ~50% view).
-    //     * Ace   must hide FEWER than Ames (it's the more accurate spy).
-    //     * Condor must reveal ALL (perfect satellite — hides nothing).
+    //   cells visible", so `Ames => 0` (reveal everything, a full info leak)
+    //   survived. Here, over a fully-filled board, we pin each token's reveal:
+    //     * Ames must hide some and reveal some (a partial, ~50% view).
+    //     * Ace must hide fewer than Ames (it's the more accurate spy).
+    //     * Condor must reveal all (perfect satellite, hides nothing).
     //   `degrade_board` hides by turning a cell to -2 (empty); a revealed cell
     //   keeps its id. Empty cells (-2) are never "revealed", so we fill the board.
     // -----------------------------------------------------------------------
@@ -1849,13 +1849,13 @@ mod tests {
             // Ames hides ~50% (`spy_hide_pct(Ames)`). The hide is a DETERMINISTIC
             // hash, so over a full board the fraction is stable; pin it to a BAND
             // around the spec so a mutant that drifts the rate (e.g. `Ames => 2`,
-            // a near-full info leak, or `Ames => 95`, a near-blackout) FAILS — the
+            // a near-full info leak, or `Ames => 95`, a near-blackout) fails; the
             // old "hides some / reveals some" check let a 2% hider pass.
             prop_assert!((35.0..=65.0).contains(&pct(h_ames)),
                 "Ames must hide ~50% of cells (in [35,65]); hid {:.1}% ({}/{})",
                 pct(h_ames), h_ames, total);
 
-            // Ace hides ~15% — a band around its spec, and strictly fewer than Ames.
+            // Ace hides ~15%, a band around its spec, and strictly fewer than Ames.
             prop_assert!((5.0..=30.0).contains(&pct(h_ace)),
                 "Ace must hide ~15% of cells (in [5,30]); hid {:.1}% ({}/{})",
                 pct(h_ace), h_ace, total);
