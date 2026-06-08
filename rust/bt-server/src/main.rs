@@ -664,14 +664,22 @@ fn start_bout(app: &mut App, a: &str, b: &str, quality: Option<f64>) -> Option<P
         c.peer = Some(a.to_string());
     }
 
-    let (a_name, a_state) = match app.clients.get(a) {
-        Some(c) => (c.name.clone(), c.state),
+    let a_name = match app.clients.get(a) {
+        Some(c) => c.name.clone(),
         None => return None,
     };
-    let (b_name, b_state) = match app.clients.get(b) {
-        Some(c) => (c.name.clone(), c.state),
+    let b_name = match app.clients.get(b) {
+        Some(c) => c.name.clone(),
         None => return None,
     };
+    // Settle against each name's CURRENT stored rating, looked up here rather than
+    // read from the connection's cached `c.state`. The queue and available handlers
+    // refresh `c.state`, but a directed challenge sets only `c.name`, so reading
+    // `c.state` would settle a challenge initiator against the default rating and
+    // overwrite their real one. `rating_for` is the single source of truth and is a
+    // no-op for the queue/available paths, whose `c.state` already equals it.
+    let a_state = app.rating_for(&a_name);
+    let b_state = app.rating_for(&b_name);
 
     // Mint the match id BEFORE the matchStart sends so each side learns it up front
     // (the client parks it in its URL as `?match=<id>` for rejoin-on-refresh).
@@ -3394,6 +3402,33 @@ mod tests {
             "player972",
             "a fresh, verifiable token resolves the rated name"
         );
+    }
+
+    #[test]
+    fn challenge_initiator_settles_against_stored_rating_not_stale_default() {
+        // A directed challenge sets c.name but not c.state (the queue/available
+        // paths refresh c.state; the challenge path does not). If start_bout read
+        // the stale c.state, a rated player who only ever challenges would settle
+        // against the default rating and overwrite their real one. start_bout must
+        // look the rating up fresh by name.
+        let mut app = test_app();
+        app.ratings.insert("alice".to_string(), (33.0, 2.0, 40)); // alice is strongly rated
+        let _rb = add_client(&mut app, "B", "bob");
+        // alice's connection: name established via challenge (set directly), state
+        // left at the connection default (the bug's precondition).
+        let _ra = add_client(&mut app, "A", "");
+        if let Some(c) = app.clients.get_mut("A") {
+            c.name = "alice".to_string();
+        }
+        assert!(
+            (app.clients["A"].state.rating.mu - 33.0).abs() > 1.0,
+            "precondition: alice's cached c.state is the stale default, not her real rating"
+        );
+
+        let pb = start_bout(&mut app, "A", "B", None).expect("bout starts");
+        assert_eq!(pb.name_a, "alice");
+        assert_eq!(pb.state_a.rating.mu, 33.0, "settles against alice's stored rating, not the default");
+        assert_eq!(pb.state_a.experience, 40);
     }
 
     #[test]
