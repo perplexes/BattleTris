@@ -1,4 +1,4 @@
-//! A single occupied board square — the faithful analogue of `BTBox` and its
+//! A single occupied board square, the faithful analogue of `BTBox` and its
 //! subclasses in `usr/src/game/BTBox.H`.
 //!
 //! In the original, the board grid is `BTBox ***map_` where a `NULL` pointer
@@ -6,11 +6,11 @@
 //! `None` (the grid is `Vec<Option<Cell>>`).
 //!
 //! `BTBox` semantics we reproduce:
-//!    * `value()` — funds contribution when cleared (0 for normal boxes, die pip
+//!    * `value()`: funds contribution when cleared (0 for normal boxes, die pip
 //!      value, 150 for an un-landed happy face).
-//!    * `id()` — render id; returns -1 when `hidden_` (Twilight Zone).
-//!    * `isRemoveable()` — false for the bottle-neck structure boxes.
-//!    * `landed()` — a happy face that lands without clearing turns into a frown
+//!    * `id()`: render id; returns -1 when `hidden_` (Twilight Zone).
+//!    * `isRemoveable()`: false for the bottle-neck structure boxes.
+//!    * `landed()`: a happy face that lands without clearing turns into a frown
 //!      (`BTHappyBox::landed`), dropping its value to 0.
 
 use crate::constants::*;
@@ -36,7 +36,7 @@ pub enum CellKind {
 }
 
 impl CellKind {
-    /// Funds contribution — `BTBox::value()` and overrides.
+    /// Funds contribution (`BTBox::value()` and overrides).
     pub fn value(&self) -> i32 {
         match *self {
             CellKind::Die(v) => v as i32,
@@ -53,7 +53,7 @@ impl CellKind {
         }
     }
 
-    /// Render id ignoring the hidden flag — `BTBox::id()` without `hidden_`.
+    /// Render id ignoring the hidden flag (`BTBox::id()` without `hidden_`).
     pub fn raw_id(&self) -> i32 {
         match *self {
             CellKind::Color(c) => c,
@@ -71,7 +71,7 @@ impl CellKind {
         }
     }
 
-    /// `BTBox::isRemoveable()` — structure boxes resist line clears / weapons.
+    /// `BTBox::isRemoveable()`: structure boxes resist line clears / weapons.
     pub fn is_removable(&self) -> bool {
         !matches!(self, CellKind::Structure)
     }
@@ -81,7 +81,7 @@ impl CellKind {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Cell {
     pub kind: CellKind,
-    /// `hidden_` — set by the Twilight Zone weapon; makes `id()` return -1.
+    /// `hidden_`: set by the Twilight Zone weapon; makes `id()` return -1.
     pub hidden: bool,
 }
 
@@ -109,7 +109,7 @@ impl Cell {
     pub fn structure() -> Self {
         Cell::new(CellKind::Structure)
     }
-    /// A gimp box carrying an underlying funds `value` — the Gimp weapon skins a
+    /// A gimp box carrying an underlying funds `value`. The Gimp weapon skins a
     /// box as a distraction while preserving what it was worth.
     pub fn gimp(value: i32) -> Self {
         Cell::new(CellKind::Gimp(value))
@@ -120,7 +120,7 @@ impl Cell {
         self.kind.value()
     }
 
-    /// `BTBox::id()` — returns -1 when hidden.
+    /// `BTBox::id()`: returns -1 when hidden.
     pub fn id(&self) -> i32 {
         if self.hidden {
             -1
@@ -134,14 +134,14 @@ impl Cell {
         self.kind.is_removable()
     }
 
-    /// Cloak this square so it renders as nothing — the Twilight Zone effect.
+    /// Cloak this square so it renders as nothing (the Twilight Zone effect).
     /// The cell keeps its true kind and value; only its rendered id is suppressed
     /// ([`Cell::id`] returns -1), so clearing and funds are unaffected.
     pub fn hide(&mut self) {
         self.hidden = true;
     }
 
-    /// `BTHappyBox::landed()` — a happy face that lands becomes a frown.
+    /// `BTHappyBox::landed()`: a happy face that lands becomes a frown.
     pub fn landed(&mut self) {
         if let CellKind::Happy { landed } = &mut self.kind {
             *landed = true;

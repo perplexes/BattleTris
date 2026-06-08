@@ -1,11 +1,11 @@
-//! Weapon strategy for the networked bots (`bt-bot`): which weapons to BUY in the
-//! bazaar and which to LAUNCH given what we can see of the opponent.
+//! Weapon strategy for the networked bots (`bt-bot`): which weapons to buy in the
+//! bazaar and which to launch given what we can see of the opponent.
 //!
 //! The faithful single-player Ernie (`vs.rs`) buys five arbitrary weapons and fires
-//! the first non-empty slot every four seconds. This is a smarter policy the online
-//! bots use instead: stock a spy (for intel) plus good-value offensive weapons, then
-//! activate the spy and time launches — board-raisers when the opponent is stacked
-//! high, ongoing harassment / fund-drains otherwise.
+//! the first non-empty slot every four seconds. The online bots use a smarter policy
+//! instead: stock a spy (for intel) plus good-value offensive weapons, then activate
+//! the spy and time launches. Board-raisers fire when the opponent is stacked high;
+//! ongoing harassment and fund-drains fire otherwise.
 //!
 //! Tokens here are the protocol indices `Game::arsenal_token` exposes (positions in
 //! `WeaponToken::ALL`); `token_from_index` maps them back.
@@ -24,8 +24,8 @@ pub fn token_from_index(idx: i32) -> Option<WeaponToken> {
 /// Strategic class of a weapon from the attacker's point of view.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WClass {
-    /// Instantly garbages / raises the victim's board — best when they're already
-    /// stacked high (tips them over the top).
+    /// Instantly raises the victim's board. Most effective when the opponent is
+    /// already stacked high, as it tips them over the top.
     Garbage,
     /// Ongoing harassment: bad pieces, scrambled controls, extra speed.
     Harass,
@@ -33,9 +33,10 @@ pub enum WClass {
     Economy,
     /// A spy: LAUNCH it to activate intel (reveals the opponent's board to us).
     Spy,
-    /// Never launch — *helps* the victim (Meadow halves their gravity; NiceDay gives
-    /// beans; Missing removes a victim block), is double-edged (Swap/Susan trade
-    /// boards/arsenals), or is defensive/cosmetic (Mirror/Gimp).
+    /// Never launch. These weapons either help the victim (Meadow halves their
+    /// gravity; NiceDay gives beans; Missing removes a victim block), are
+    /// double-edged (Swap/Susan trade boards/arsenals), or are defensive/cosmetic
+    /// (Mirror/Gimp).
     Skip,
 }
 
@@ -53,29 +54,29 @@ pub fn class(t: WeaponToken) -> WClass {
     }
 }
 
-/// Buy-priority: good-value offensive + economy weapons, roughly best-first. The
+/// Buy-priority: good-value offensive and economy weapons, roughly best-first. The
 /// spy is handled separately (bought first when we hold none). `Skip`-class weapons
 /// never appear here.
 const BUY_PRIORITY: &[WeaponToken] = &[
-    WeaponToken::RiseUp,      // 75  — cheap instant raise
-    WeaponToken::Upbyside,    // 125 — flip screen + reverse controls (dur 10)
-    WeaponToken::Bottle,      // 150 — bottleneck walls (dur 10)
-    WeaponToken::Mondale,     // 150 — 30% tax over a long duration
-    WeaponToken::PieceIt,     // 100 — drops in a stray block
-    WeaponToken::SoLong,      // 100 — deprive of long pieces
-    WeaponToken::Speedy,      // 275 — double their speed
-    WeaponToken::Broken,      // 325 — same piece over and over
-    WeaponToken::Force,       // 325 — cleared rows don't collapse
-    WeaponToken::Bug,         // 320 — invisible stray block
-    WeaponToken::Lawyers,     // 350 — raise per line we clear (dur 5)
-    WeaponToken::Hatter,      // 375 — pieces never stop spinning
-    WeaponToken::Blind,       // 400 — bomb a region
-    WeaponToken::FearedWeird, // 400 — disjointed pieces
-    WeaponToken::FourByFour,  // 425 — 4x4 hollow box
-    WeaponToken::Keating,     // 425 — seize all their funds
-    WeaponToken::Twilight,    // 450 — their whole board goes invisible
-    WeaponToken::Slick,       // 650 — pieces slide endlessly
-    WeaponToken::NoDice,      // 600 — deprive of square pieces
+    WeaponToken::RiseUp,      // 75:  cheap instant raise
+    WeaponToken::Upbyside,    // 125: flip screen + reverse controls (dur 10)
+    WeaponToken::Bottle,      // 150: bottleneck walls (dur 10)
+    WeaponToken::Mondale,     // 150: 30% tax over a long duration
+    WeaponToken::PieceIt,     // 100: drops in a stray block
+    WeaponToken::SoLong,      // 100: deprive of long pieces
+    WeaponToken::Speedy,      // 275: double their speed
+    WeaponToken::Broken,      // 325: same piece over and over
+    WeaponToken::Force,       // 325: cleared rows don't collapse
+    WeaponToken::Bug,         // 320: invisible stray block
+    WeaponToken::Lawyers,     // 350: raise per line we clear (dur 5)
+    WeaponToken::Hatter,      // 375: pieces never stop spinning
+    WeaponToken::Blind,       // 400: bomb a region
+    WeaponToken::FearedWeird, // 400: disjointed pieces
+    WeaponToken::FourByFour,  // 425: 4x4 hollow box
+    WeaponToken::Keating,     // 425: seize all their funds
+    WeaponToken::Twilight,    // 450: their whole board goes invisible
+    WeaponToken::Slick,       // 650: pieces slide endlessly
+    WeaponToken::NoDice,      // 600: deprive of square pieces
 ];
 
 fn price_of(t: WeaponToken, carter: bool) -> i64 {
@@ -97,15 +98,15 @@ fn arsenal_has_spy(arsenal: &[i32]) -> bool {
 /// Decide what to buy this bazaar visit (in order), given current `funds`, the
 /// 10-slot `arsenal` (token indices, -1 = empty), and whether Carter is doubling
 /// prices. Buys a spy first (for intel) when we hold none, then greedily stocks the
-/// priority list — diversifying first, then duplicating cheap strong weapons — until
+/// priority list, diversifying first and then duplicating cheap strong weapons, until
 /// the arsenal is full or nothing else is affordable. The engine independently
-/// enforces affordability/capacity, so an over-eager plan can't overspend.
+/// enforces affordability and capacity, so an over-eager plan cannot overspend.
 pub fn buy_plan(funds: i64, arsenal: &[i32], carter: bool) -> Vec<WeaponToken> {
     let mut budget = funds;
     let mut slots = arsenal.iter().filter(|&&t| t < 0).count() as i32;
     let mut plan: Vec<WeaponToken> = Vec::new();
 
-    // 1. A spy for launch-timing intel — prefer Ace (good accuracy, mid price), then
+    // 1. A spy for launch-timing intel. Prefer Ace (good accuracy, mid price), then
     //    Ames (cheap), then Condor (priciest). Only if we don't already hold one.
     if !arsenal_has_spy(arsenal) {
         for spy in [WeaponToken::Ace, WeaponToken::Ames, WeaponToken::Condor] {
@@ -192,7 +193,7 @@ mod tests {
 
     #[test]
     fn every_token_is_classified_and_only_skips_help_the_victim() {
-        // Exhaustive (the match would fail to compile otherwise) — assert the
+        // Exhaustive (the match would fail to compile otherwise): assert the
         // known "helps the victim" weapons land in Skip.
         for t in [WeaponToken::Meadow, WeaponToken::NiceDay, WeaponToken::Missing] {
             assert_eq!(class(t), WClass::Skip, "{t:?} helps the victim");

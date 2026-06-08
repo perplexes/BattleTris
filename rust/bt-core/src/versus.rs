@@ -1,12 +1,12 @@
-//! Two-player match wiring — the cross-player weapon relay plus an authoritative
+//! Two-player match wiring: the cross-player weapon relay and an authoritative
 //! head-to-head match engine.
 //!
 //! Cross-player weapons (Mirror, Swap, Susan, the funds taxes) touch BOTH
 //! players, which a single [`Game`] cannot resolve on its own. So this module
 //! holds both boards in one place and ticks them in lockstep, giving one
 //! authority that resolves the relay deterministically. It is consumed two ways:
-//!   * `bt_ai::VsComputer` (player vs Ernie) — reuses [`deliver_weapon`].
-//!   * the server's authoritative online match — owns a [`Versus`], feeds each
+//!   * `bt_ai::VsComputer` (player vs Ernie), which reuses [`deliver_weapon`].
+//!   * the server's authoritative online match, which owns a [`Versus`], feeds each
 //!     client's inputs in, and ships authoritative snapshots back.
 //!
 //! It lives in `bt-core` (which stays dependency-free) so the netcode can relay
@@ -16,7 +16,7 @@ use crate::game::{Game, GameEvent};
 use crate::weapons::WeaponToken;
 
 /// Which side of a head-to-head match. Deliberately anonymous A/B rather than
-/// player/opponent — the relay is symmetric, and the player-vs-AI wrapper keeps
+/// player/opponent; the relay is symmetric, and the player-vs-AI wrapper keeps
 /// its own Player/Ai naming, mapping onto these only at the boundary.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Side {
@@ -25,7 +25,7 @@ pub enum Side {
 }
 
 impl Side {
-    /// The opposing side — the relay's "deliver to the other player".
+    /// The opposing side, for the relay's "deliver to the other player" routing.
     pub fn other(self) -> Side {
         match self {
             Side::A => Side::B,
@@ -66,7 +66,7 @@ pub fn mirror_nullifies(token: WeaponToken) -> bool {
 ///
 /// Launching Mirror is itself a normal attack that curses the opponent. The
 /// twist is what happens while a player IS mirror-cursed: their own curse
-/// catches every weapon they launch — [`mirror_nullifies`] ones fizzle, all
+/// catches every weapon they launch: [`mirror_nullifies`] ones fizzle, all
 /// others backfire onto the cursed launcher. An un-cursed launch (Mirror
 /// included) hits the opponent as normal.
 ///
@@ -87,7 +87,7 @@ pub fn deliver_weapon(attacker: &mut Game, victim: &mut Game, token: WeaponToken
 }
 
 /// Which player a (non-Swap/Susan) weapon's effect lands on once Mirror has been
-/// resolved — the victim normally, or back onto the attacker when a curse
+/// resolved: the victim normally, or back onto the attacker when a curse
 /// backfired it.
 #[derive(Clone, Copy)]
 enum Recipient {
@@ -102,8 +102,8 @@ enum Recipient {
 fn apply_weapon(attacker: &mut Game, victim: &mut Game, token: WeaponToken, to: Recipient) {
     match token {
         // Swap/Susan exchange between the two players, so they ignore `to`.
-        // (They never arrive here while the attacker is cursed — both are on the
-        // nullify list — so a backfired exchange can't occur.)
+        // (They never arrive here while the attacker is cursed, as both are on the
+        // nullify list, so a backfired exchange can't occur.)
         WeaponToken::Swap => attacker.swap_board_with(victim),
         WeaponToken::Susan => attacker.swap_arsenal_with(victim),
         _ => match to {
@@ -125,12 +125,12 @@ pub struct Versus {
     /// once set, so the first side to top out decides the match.
     result: i32,
     /// Set whenever this tick produced something a CLIENT can't predict from its
-    /// own inputs — a cross-player weapon delivery, a funds tax/steal, or a bazaar
+    /// own inputs: a cross-player weapon delivery, a funds tax/steal, or a bazaar
     /// entry. The host reads it via [`Versus::take_dirty`] to push a prompt
     /// reconciliation keyframe instead of waiting for the periodic heartbeat.
     dirty: bool,
     /// Spies launched THIS tick by each side (A = [0], B = [1]), for the host to
-    /// pick up (the spy reveal is a host concern, not a board effect). A Vec so
+    /// pick up (the spy reveal is a host-level concern handled outside the board). A Vec so
     /// several launches drained in one server tick all accumulate.
     spy_launch: [Vec<WeaponToken>; 2],
 }
@@ -148,7 +148,7 @@ impl Versus {
         }
     }
 
-    /// Take (and clear) the "client can't predict this" flag — set by the last
+    /// Take (and clear) the "client can't predict this" flag, set by the last
     /// tick's cross-player relay (weapon, funds, bazaar entry). The server uses
     /// it to send a prompt keyframe rather than wait for the periodic one.
     pub fn take_dirty(&mut self) -> bool {
@@ -173,7 +173,7 @@ impl Versus {
         }
     }
 
-    /// Mutable side access — the host drives a player's input through this
+    /// Mutable side access. The host drives a player's input through this
     /// (`move_left`, `rotate`, `launch_weapon`, `buy_weapon`, `leave_bazaar`, …).
     pub fn game_mut(&mut self, side: Side) -> &mut Game {
         match side {
@@ -193,7 +193,7 @@ impl Versus {
     }
 
     /// Advance the match by `dt_ms`. While EITHER side is shopping the whole
-    /// match freezes (the synchronized bazaar barrier — `BTGame` pauses all
+    /// match freezes (the synchronized bazaar barrier; `BTGame` pauses all
     /// timeouts until both players leave); each side clears its own bazaar with a
     /// `leave_bazaar` input, and play resumes only once both have.
     pub fn tick(&mut self, dt_ms: i32) {
@@ -219,7 +219,7 @@ impl Versus {
                 GameEvent::WeaponLaunched(t) => {
                     if is_spy(t) {
                         // A spy reveals the opponent to the LAUNCHER (a host
-                        // concern), never delivered to the opponent — unless the
+                        // concern), never delivered to the opponent, unless the
                         // launcher is mirror-cursed, in which case it fizzles
                         // like any reflected info weapon.
                         if !self.a.weapon_active(WeaponToken::Mirror) {
@@ -343,7 +343,7 @@ mod tests {
         let (a0, v0) = (cell_count(&atk), cell_count(&vic));
 
         deliver_weapon(&mut atk, &mut vic, WeaponToken::Swap); // Swap is nullified
-        assert_eq!(cell_count(&atk), a0, "cursed Swap fizzled — boards unchanged");
+        assert_eq!(cell_count(&atk), a0, "cursed Swap fizzled; boards unchanged");
         assert_eq!(cell_count(&vic), v0);
     }
 

@@ -3,19 +3,19 @@
 //! `POST /api/identity` with `{"name": "<str>"}` mints a token whose payload is
 //! `{"name": <name>, "iat": <unix>}`, signed HMAC-SHA256 with a server secret
 //! (`BT_JWT_SECRET`, else a per-process-random secret generated once at
-//! startup). The websocket then trusts the *signed* name on `queue`,
-//! `available`, and `challenge`, so a client can't impersonate another player by
+//! startup). The websocket then trusts the signed name on `queue`,
+//! `available`, and `challenge`, so a client cannot impersonate another player by
 //! sending a bare `name`.
 //!
-//! This is a session/lobby credential, not an account system: there is no
-//! password and the only identity claim is a display name (the `iat` timestamp
-//! is informational and unenforced). It exists purely to make the name on the
-//! wire unforgeable — anything heavier (real accounts, expiry, revocation) is
-//! deliberately out of scope, which is what lets it stay this small.
+//! The credential is a session/lobby token. There is no password; the only
+//! identity claim is a display name (the `iat` timestamp is informational and
+//! unenforced). Its purpose is to make the name on the wire unforgeable.
+//! Features such as real accounts, expiry, and revocation are out of scope,
+//! which keeps the implementation small.
 //!
-//! Hand-rolled rather than pulling in `jsonwebtoken`: HS256 is just
-//! `base64url(header).base64url(payload)` HMAC'd, and we only ever issue + verify
-//! our own tokens, so the surface is small and fully unit-tested here. Keeps the
+//! The JWT is hand-rolled rather than pulling in `jsonwebtoken`. HS256 is just
+//! `base64url(header).base64url(payload)` HMAC'd, and we only ever issue and verify
+//! our own tokens, so the surface is small and fully unit-tested here. This keeps the
 //! server's crypto deps to the RustCrypto primitives (`hmac` + `sha2`).
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -34,7 +34,7 @@ pub const MAX_NAME_LEN: usize = 32;
 
 /// The signing secret, resolved once and cached for the process. Prefers the
 /// `BT_JWT_SECRET` env var so a multi-machine deployment (lobby + region bots)
-/// can share one secret and verify each other's tokens — and so tokens survive a
+/// can share one secret and verify each other's tokens, and tokens survive a
 /// restart. Without it, falls back to 32 random bytes drawn once at startup, so
 /// tokens are then valid only for the life of this process; acceptable because
 /// they are merely lobby session credentials.
@@ -62,7 +62,7 @@ pub fn secret() -> Vec<u8> {
 
 /// Trim + bound a requested name. Returns `None` for an empty (post-trim) name;
 /// otherwise the name capped at [`MAX_NAME_LEN`] chars. Trims AGAIN after the
-/// cap so truncation can't strand trailing whitespace — this keeps `sanitize_name`
+/// cap so truncation cannot strand trailing whitespace. This keeps `sanitize_name`
 /// idempotent (verify re-sanitizes the signed name, so a non-idempotent cap could
 /// verify a boundary-length name to a different string than was issued).
 pub fn sanitize_name(raw: &str) -> Option<String> {
@@ -74,7 +74,7 @@ pub fn sanitize_name(raw: &str) -> Option<String> {
     Some(capped.to_string())
 }
 
-/// The base64url HMAC-SHA256 of `signing_input` — the JWT signature segment, for
+/// The base64url HMAC-SHA256 of `signing_input`, which is the JWT signature segment, for
 /// the issue path. (Verify recomputes the MAC inline so it can compare in
 /// constant time with `verify_slice`.)
 fn sign(secret: &[u8], signing_input: &str) -> String {
@@ -83,10 +83,9 @@ fn sign(secret: &[u8], signing_input: &str) -> String {
     URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
 }
 
-/// Mint a token for `name` using the process secret — the entry point the
+/// Mint a token for `name` using the process secret. This is the function the
 /// `/api/identity` handler calls. Callers pass a [`sanitize_name`]d name; verify
-/// re-sanitizes anyway, so an over-long name still round-trips to its capped form
-/// rather than being rejected.
+/// re-sanitizes anyway, so an over-long name still round-trips to its capped form.
 pub fn issue_token(name: &str) -> String {
     issue_token_with(&secret(), name, now_secs())
 }
@@ -115,7 +114,7 @@ pub fn verify_token(token: &str) -> Option<String> {
 pub fn verify_token_with(secret: &[u8], token: &str) -> Option<String> {
     // A JWT is three dot-separated segments. `splitn(3, '.')` stops splitting
     // after the first two dots, so a token with extra segments keeps its whole
-    // tail in `sig_b64` (e.g. "c.d") — which then fails the base64 decode below,
+    // tail in `sig_b64` (e.g. "c.d"), which then fails the base64 decode below,
     // since '.' isn't a base64url character. The `parts.next()` guard is a
     // defensive belt-and-suspenders; with `splitn(3)` it cannot actually fire.
     let mut parts = token.splitn(3, '.');
@@ -127,7 +126,7 @@ pub fn verify_token_with(secret: &[u8], token: &str) -> Option<String> {
     }
 
     // Recompute the MAC over header.payload and let `verify_slice` compare it to
-    // the presented signature in constant time — a byte-by-byte `==` would leak,
+    // the presented signature in constant time. A byte-by-byte `==` would leak,
     // via timing, how many leading bytes a forged signature got right.
     let signing_input = format!("{header}.{payload}");
     let sig = URL_SAFE_NO_PAD.decode(sig_b64).ok()?;
@@ -135,10 +134,10 @@ pub fn verify_token_with(secret: &[u8], token: &str) -> Option<String> {
     mac.update(signing_input.as_bytes());
     mac.verify_slice(&sig).ok()?;
 
-    // The MAC is valid — but also REQUIRE the declared algorithm/type to be the
+    // The MAC is valid, but we also require the declared algorithm/type to be the
     // ones we issue (HS256 / JWT). Without this, a token whose header says
     // `alg:"none"` (or any other algorithm) but happens to carry a valid HS256 MAC
-    // would be accepted — the classic JWT algorithm-confusion footgun. Since we
+    // would be accepted (the classic JWT algorithm-confusion footgun). Since we
     // only ever issue HS256, anything else is forged/invalid even if it MACs.
     let header_claims: Value =
         serde_json::from_slice(&URL_SAFE_NO_PAD.decode(header).ok()?).ok()?;
@@ -148,14 +147,14 @@ pub fn verify_token_with(secret: &[u8], token: &str) -> Option<String> {
         return None;
     }
 
-    // Signature + header check out — decode the claims and pull the name.
+    // Signature + header check out; decode the claims and pull the name.
     let claims: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).ok()?).ok()?;
     let name = claims.get("name")?.as_str()?;
     sanitize_name(name)
 }
 
 /// Current Unix time in seconds, for the token's `iat` claim. Clamps a
-/// pre-epoch clock to 0 rather than erroring — `iat` is informational here, not
+/// pre-epoch clock to 0 rather than erroring. The `iat` field is informational here, not
 /// enforced on verify, so a bad value can't break authentication.
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
@@ -225,7 +224,7 @@ mod tests {
 
     #[test]
     fn secret_is_stable_within_a_process() {
-        // Two reads of the (random) secret agree — the OnceLock holds it fixed.
+        // Two reads of the (random) secret agree; the OnceLock holds it fixed.
         assert_eq!(secret(), secret());
     }
 }

@@ -1,8 +1,8 @@
 //! Diagnostic tool: replay a stored versus `VersusReplay` and either dump both
 //! boards at a tick, or scan every tick for an engine invariant violation. The
-//! scan checks the game-vs-piece position-sync invariant — the engine's
+//! scan checks the game-vs-piece position-sync invariant: the engine's
 //! collision/lock position must equal the falling piece's own render position at
-//! all times — and reports any divergence as a desync frame.
+//! all times. Any divergence is reported as a desync frame.
 //!
 //! Get a stored replay's JSON:
 //!   curl https://battletris.fly.dev/api/replays/<id> -o /tmp/r.json

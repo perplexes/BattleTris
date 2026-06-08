@@ -1,62 +1,62 @@
-//! The bot's client/server synchronization state machine — extracted as a pure
+//! The bot's client/server synchronization state machine, extracted as a pure
 //! decision function so the netcode invariants can be property-tested.
 //!
-//! Why this exists: the bot keeps a LOCAL predicted `Game` and reconciles it to
+//! Why this exists: the bot keeps a local predicted `Game` and reconciles it to
 //! the server's authoritative keyframes. The hazard is acting on local prediction
-//! that has run AHEAD of the authoritative sim. The sharpest instance is the
-//! bazaar: if the bot PREDICTS entering the bazaar and sends a `LeaveBazaar`
+//! that has run ahead of the authoritative sim. The sharpest instance is the
+//! bazaar: if the bot predicts entering the bazaar and sends a `LeaveBazaar`
 //! before the server has authoritatively entered, the server acks that leave but
-//! applies it as a no-op (it isn't in the bazaar yet) — so when it DOES enter,
+//! applies it as a no-op (it isn't in the bazaar yet). When it does enter,
 //! no leave is pending, the bot never re-sends, and the whole match freezes.
-//! Concentrating the policy in one total function over the observable sync state
-//! — rather than a handful of booleans scattered through the driver loop — is
-//! what lets the safety invariants be pinned by proptest below (P1–P3 + a
+//! Concentrating the policy in one total function over the observable sync state,
+//! rather than a handful of booleans scattered through the driver loop, is
+//! what lets the safety invariants be pinned by proptest below (P1–P3 and a
 //! model-based no-freeze liveness property, P5). The driver ([`crate::drive_tick`])
-//! just interprets the result.
+//! interprets the result.
 
 /// Everything `decide` needs, read once per tick from the live [`crate::MatchState`].
-/// All fields are OBSERVABLE — no hidden coupling, so the function is trivially testable.
-/// Their sources: `acked`/`auth_baz`/`opp_baz` come straight from the authoritative
-/// snapshot; `local_baz` is our local predicted sim's bazaar flag; `last_sent` is the
-/// `Predictor`'s per-bout input seq; `done`/`idle_timed_out`/`bought` are bookkeeping
-/// the driver maintains.
+/// All fields are observable with no hidden coupling, so the function is trivially
+/// testable. Their sources: `acked`/`auth_baz`/`opp_baz` come straight from the
+/// authoritative snapshot; `local_baz` is the local predicted sim's bazaar flag;
+/// `last_sent` is the `Predictor`'s per-bout input seq; `done`/`idle_timed_out`/`bought`
+/// are bookkeeping the driver maintains.
 #[derive(Clone, Copy, Debug)]
 pub struct SyncState {
     /// The match has ended (a result arrived).
     pub done: bool,
-    /// No authoritative frame for too long — the opponent went silent.
+    /// No authoritative frame for too long; the opponent went silent.
     pub idle_timed_out: bool,
     /// The last input seq the SERVER has acknowledged processing for us (snapshot
-    /// `ack`) — "seen through seq N", not necessarily applied (a barrier may drop it).
+    /// `ack`): "seen through seq N", not necessarily applied (a barrier may drop it).
     pub acked: u64,
     /// The seq of our most recently SENT input this bout. `acked < last_sent` ⇒ we
-    /// have inputs in flight and MUST NOT act (that would run ahead of the server).
+    /// have inputs in flight and must not act (that would run ahead of the server).
     pub last_sent: u64,
-    /// The server says WE are in our bazaar (authoritative — the only reliable read).
+    /// The server says we are in our bazaar (authoritative; the only reliable read).
     pub auth_baz: bool,
     /// The server says the OPPONENT is shopping (their bazaar freezes us too).
     pub opp_baz: bool,
     /// Our LOCAL predicted sim thinks it's in the bazaar. On its own this is flaky
     /// (the bazaar is a combined-lines mechanic a standalone `Game` can't predict);
     /// it only becomes trustworthy once a keyframe restores it, which is exactly why
-    /// we require it AND `auth_baz` before buying — so the buys land in sync.
+    /// we require it and `auth_baz` before buying, so the buys land in sync.
     pub local_baz: bool,
     /// We've already bought + sent the leave for THIS bazaar visit (re-armed when the
     /// server confirms we left, i.e. when `auth_baz` goes false again).
     pub bought: bool,
 }
 
-/// What the driver should do this tick. Exactly one applies — the function is total.
+/// What the driver should do this tick. Exactly one applies; the function is total.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BotAction {
-    /// The bout is over (result or opponent-silent) — stop driving.
+    /// The bout is over (result or opponent-silent); stop driving.
     End,
     /// Inputs are still in flight; hold until the server catches up. THE gate.
     WaitAck,
     /// A bazaar barrier is up but it isn't ours to clear (opponent shopping, or our
-    /// local sim hasn't synced into our bazaar yet) — just wait it out.
+    /// local sim hasn't synced into our bazaar yet); wait it out.
     WaitBazaar,
-    /// We're authoritatively AND locally in our bazaar and haven't bought yet — buy a
+    /// We're authoritatively and locally in our bazaar and haven't bought yet: buy a
     /// loadout and leave (the only way to un-freeze our side), exactly once.
     Shop,
     /// Clear to advance the local sim and (subject to cooldowns) launch + place.
@@ -69,9 +69,9 @@ pub enum BotAction {
 /// Invariants (proptested below):
 /// - **P1 never-ahead:** `acked < last_sent` ⇒ `WaitAck` (no action emits inputs
 ///   while any are unacked, so the bot never runs ahead of the authoritative sim).
-/// - **P2 leave-only-when-real:** `Shop` ⇒ `auth_baz && local_baz` — a `LeaveBazaar`
-///   can only be emitted when the server REALLY has us in the bazaar (never on a
-///   merely predicted entry, which the server would apply as a no-op → the freeze).
+/// - **P2 leave-only-when-real:** `Shop` ⇒ `auth_baz && local_baz`. A `LeaveBazaar`
+///   is only emitted when the server has us authoritatively in the bazaar; a merely
+///   predicted entry would cause the server to apply it as a no-op, causing the freeze.
 /// - **P3 barrier:** any bazaar flag set ⇒ never `Play` (we don't place/launch into
 ///   a frozen sim).
 pub fn decide(s: &SyncState) -> BotAction {
@@ -123,7 +123,7 @@ mod tests {
     }
 
     proptest! {
-        /// P1 — never act with inputs in flight. The ONLY decisions that emit inputs
+        /// P1: never act with inputs in flight. The only decisions that emit inputs
         /// are `Shop` and `Play`; neither may be chosen while `acked < last_sent`
         /// (unless the bout is already ending, which emits nothing).
         #[test]
@@ -138,9 +138,9 @@ mod tests {
             }
         }
 
-        /// P2 — a bazaar leave (`Shop`) only when the server REALLY has us shopping
-        /// AND our local sim has synced into it. This is the direct guard against the
-        /// freeze (a leave on a merely predicted entry, applied as a no-op server-side).
+        /// P2: a bazaar leave (`Shop`) only when the server has us authoritatively
+        /// shopping and the local sim has synced into it. This is the direct guard
+        /// against the freeze (a leave on a merely predicted entry is a no-op server-side).
         #[test]
         fn p2_leaves_bazaar_only_when_authoritatively_and_locally_in_it(s in any_sync()) {
             if decide(&s) == BotAction::Shop {
@@ -151,8 +151,8 @@ mod tests {
             }
         }
 
-        /// P3 — never place/launch (`Play`) while ANY bazaar flag is up: the sim is
-        /// frozen, so the server would just reject the inputs.
+        /// P3: never place/launch (`Play`) while any bazaar flag is up. The sim is
+        /// frozen, so the server rejects those inputs.
         #[test]
         fn p3_never_plays_into_a_bazaar_barrier(s in any_sync()) {
             if s.auth_baz || s.opp_baz || s.local_baz {
@@ -165,7 +165,7 @@ mod tests {
             }
         }
 
-        /// `decide` is total — it always returns, for every input. (Trivially true by
+        /// `decide` is total: it always returns for every input. (Trivially true by
         /// construction; this pins it so a future refactor that adds a fallible path
         /// has to keep it total.)
         #[test]
@@ -174,18 +174,18 @@ mod tests {
         }
     }
 
-    /// P5 — the gold property: LIVENESS / no-freeze. We model a full bazaar visit with
-    /// the real hazards baked in, and assert the bot always escapes back to `Play`:
+    /// P5: liveness / no-freeze. Models a full bazaar visit with the real hazards baked
+    /// in, and asserts the bot always escapes back to `Play`:
     ///
-    /// - **Local prediction LEADS the server.** Our local sim predicts entering the
+    /// - Local prediction leads the server. The local sim predicts entering the
     ///   bazaar `lead` ticks before the server authoritatively does (the bazaar is a
-    ///   combined-lines mechanic we can't predict exactly). So there's a window with
-    ///   `local_baz = true`, `auth_baz = false` — the exact window the freeze hazard
-    ///   lives in.
-    /// - **A leave sent before entry is EATEN.** The server only actually leaves if it
-    ///   processes a `LeaveBazaar` while it considers itself in the bazaar; a leave
-    ///   sent during the lead window is a no-op the server discards.
-    /// - **Latency.** Acks arrive `ack_latency` ticks after we send; keyframes that
+    ///   combined-lines mechanic that cannot be predicted exactly). This creates a
+    ///   window with `local_baz = true` and `auth_baz = false`, which is the window
+    ///   the freeze hazard lives in.
+    /// - A leave sent before entry is eaten. The server only acts on a `LeaveBazaar`
+    ///   while it considers itself in the bazaar; a leave sent during the lead window
+    ///   is a no-op the server discards.
+    /// - Latency. Acks arrive `ack_latency` ticks after we send; keyframes that
     ///   reconcile `local_baz` to the authoritative state arrive `kf_latency` ticks
     ///   after entry.
     ///
@@ -210,7 +210,7 @@ mod tests {
         let mut server_entered = false;
         let mut server_left = false; // entered, then a leave actually took effect
         // A pending LeaveBazaar: (seq it rode, whether it was sent while the SERVER was
-        // genuinely in the bazaar — only then is it effective rather than eaten).
+        // genuinely in the bazaar; only then is it effective rather than eaten).
         let mut pending_leave: Option<(u64, bool)> = None;
         let mut last_send_tick: u64 = 0;
 
@@ -257,19 +257,19 @@ mod tests {
                 bought,
             });
             match action {
-                // A genuine escape: the server completed its bazaar visit (entered AND
-                // left) and we're back to clean play. A `Play` BEFORE the server has
-                // entered is just normal pre-bazaar placement — keep simulating.
+                // A genuine escape: the server completed its bazaar visit (entered and
+                // left) and we're back to clean play. A `Play` before the server has
+                // entered is just normal pre-bazaar placement; keep simulating.
                 BotAction::Play if server_entered && server_left => return Ok(()),
                 BotAction::Play => { /* pre-entry play, or a buggy play mid-barrier */ }
                 BotAction::Shop => {
-                    // THE hazard guard: leaving while the server isn't authoritatively
-                    // in the bazaar means the leave is eaten before entry — exactly the
-                    // freeze condition. The correct policy (P2) never does this.
+                    // Hazard guard: leaving while the server isn't authoritatively
+                    // in the bazaar means the leave is eaten before entry, which is
+                    // the freeze condition. The correct policy (P2) never does this.
                     if !auth_baz {
                         return Err(format!(
                             "HAZARD at tick {tick}: leave sent before the server entered \
-                             the bazaar (auth_baz=false) — it will be eaten"
+                             the bazaar (auth_baz=false); it will be eaten"
                         ));
                     }
                     // Buy + leave: 4 inputs. Applying the leave locally drops our
@@ -323,32 +323,32 @@ mod tests {
 
     /// Teeth check: the buggy local-leave policy trips the harness's hazard guard
     /// (it leaves on local prediction during the lead window, before the server has
-    /// entered — the no-op leave that freezes the match) whenever local leads the
-    /// server (`lead > 0`). This proves p5 above is a real constraint, not a vacuous
-    /// one. (With `lead == 0` there's no pre-entry window, so even the buggy policy is
-    /// safe; we require a lead here.)
+    /// entered, which is the no-op leave that freezes the match) whenever local leads
+    /// the server (`lead > 0`). This proves p5 above is a real constraint. With
+    /// `lead == 0` there's no pre-entry window, so even the buggy policy is safe;
+    /// we require a lead here.
     #[test]
     fn p5_harness_has_teeth_buggy_policy_trips_hazard() {
         let r = run_bazaar_visit(decide_buggy_local_leave, 8, 4, 4);
         assert!(
             r.is_err(),
-            "buggy local-leave policy slipped past the hazard guard — the model has no teeth"
+            "buggy local-leave policy slipped past the hazard guard; the model has no teeth"
         );
     }
 
-    /// The cross-bout deadlock guard: the `WaitAck` gate compares two PER-BOUT counters
-    /// that both reset to 0 at bout start — the server's `ack` and the `Predictor`'s
-    /// `last_sent` (`input_seq`). Gating on those (never on a connection-wide seq, which
+    /// The cross-bout deadlock guard: the `WaitAck` gate compares two per-bout counters
+    /// that both reset to 0 at bout start, the server's `ack` and the `Predictor`'s
+    /// `last_sent` (`input_seq`). Gating on those (not on a connection-wide seq, which
     /// is monotonic across the whole socket and would still be high) is what frees a
-    /// fresh bout to act. Pin it: at bout start, with nothing sent yet, the bot must not
-    /// be stuck waiting for an ack that can never arrive.
+    /// fresh bout to act. At bout start, with nothing sent yet, the bot must not be
+    /// stuck waiting for an ack that can never arrive.
     #[test]
     fn fresh_bout_with_high_seq_is_not_deadlocked() {
         let s = SyncState {
             done: false,
             idle_timed_out: false,
             acked: 0,        // server's per-bout ack starts at 0
-            last_sent: 0,    // ...and so does our per-bout last_sent (NOT the raw seq)
+            last_sent: 0,    // ...and so does our per-bout last_sent (not the raw seq)
             auth_baz: false,
             opp_baz: false,
             local_baz: false,

@@ -1,20 +1,20 @@
 //! WebAssembly bindings exposing the BattleTris engine to the browser.
 //!
-//! This crate is the *only* boundary between the Rust engine and the TypeScript
-//! front-end, so every type here is shaped for that crossing rather than for
-//! Rust ergonomics: methods take and return wasm-bindgen-friendly primitives
-//! (`i32`, `bool`, `String`, `Vec<i32>`/`Vec<u8>`), weapons are addressed by
-//! their protocol index instead of the [`WeaponToken`] enum, and the board comes
-//! back as a flat id grid the Canvas can blit directly. The engine logic itself
-//! lives in `bt-core` / `bt-ai` / `bt-netcode` / `bt-replay` and is tested
-//! there; the wrappers here are intentionally thin glue.
+//! This crate is the boundary between the Rust engine and the TypeScript
+//! front-end. Every type here is shaped for that crossing: methods take and
+//! return wasm-bindgen-friendly primitives (`i32`, `bool`, `String`,
+//! `Vec<i32>`/`Vec<u8>`), weapons are addressed by their protocol index rather
+//! than the [`WeaponToken`] enum, and the board comes back as a flat id grid
+//! the Canvas can blit directly. The engine logic itself lives in `bt-core` /
+//! `bt-ai` / `bt-netcode` / `bt-replay` and is tested there; the wrappers here
+//! are intentionally thin glue.
 //!
 //! Four game surfaces, all driven by the front-end with the same fixed-step
 //! loop and overlapping read methods so one set of draw code serves them all:
-//!   * [`WasmGame`] — local practice / one side of a relayed 2-player match.
-//!   * [`WasmVsComputer`] — a single tab playing the AI opponent (Ernie).
-//!   * [`WasmClient`] — the browser end of a server-authoritative online match.
-//!   * [`WasmReplayPlayer`] / [`WasmVersusReplayPlayer`] — deterministic playback
+//!   * [`WasmGame`]: local practice / one side of a relayed 2-player match.
+//!   * [`WasmVsComputer`]: a single tab playing the AI opponent (Ernie).
+//!   * [`WasmClient`]: the browser end of a server-authoritative online match.
+//!   * [`WasmReplayPlayer`] / [`WasmVersusReplayPlayer`]: deterministic playback
 //!     of recorded single- and two-board games.
 
 use bt_ai::VsComputer;
@@ -35,14 +35,14 @@ pub const EMPTY: i32 = -2;
 /// jitter. Recordings replay bit-exact only when stepped at this same rate.
 pub const FIXED_DT_MS: i32 = 16;
 
-/// The engine build recordings are stamped with — the `git` short SHA passed in
+/// The engine build that recordings are stamped with. It is the `git` short SHA passed in
 /// at compile time (`BT_GIT_SHA`), or "dev" for local builds.
 const ENGINE_SHA: &str = match option_env!("BT_GIT_SHA") {
     Some(s) => s,
     None => "dev",
 };
 
-/// The canonical fixed timestep (ms) the host must tick at — exposes
+/// The canonical fixed timestep (ms) the host must tick at. Exposes
 /// [`FIXED_DT_MS`] to JS, which can't read the Rust const directly.
 #[wasm_bindgen]
 pub fn fixed_dt() -> i32 {
@@ -60,7 +60,7 @@ const TAG_ENTER_BAZAAR: i32 = 3; // [0, 0, 0]
 const TAG_AIRSLIDE: i32 = 4; // [0, 0, 0]
 const TAG_GAME_OVER: i32 = 5; // [0, 0, 0]
 const TAG_IDIOT: i32 = 6; // [reason, 0, 0]
-const TAG_FUNDS_STOLEN: i32 = 7; // [amount, 0, 0] — credit the attacker (online relay)
+const TAG_FUNDS_STOLEN: i32 = 7; // [amount, 0, 0]; credit the attacker (online relay)
 
 /// A single local board: practice play, or one side of a relayed 2-player match.
 ///
@@ -69,13 +69,13 @@ const TAG_FUNDS_STOLEN: i32 = 7; // [amount, 0, 0] — credit the attacker (onli
 /// launches, and the relay deliveries
 /// [`receive_weapon`](WasmGame::receive_weapon) /
 /// [`receive_op_score`](WasmGame::receive_op_score) / [`add_funds`](WasmGame::add_funds))
-/// for replay/bug-report export — recording those relay inputs is what lets a
+/// for replay/bug-report export. Recording those relay inputs is what lets a
 /// recording of one side of a 2-player game stand on its own. The reconciliation
 /// helpers (keyframe restore, raw board/arsenal import) are out-of-band and not
 /// recorded.
 #[wasm_bindgen]
 pub struct WasmGame {
-    /// The wrapped engine — the single source of truth for board, score, arsenal.
+    /// The wrapped engine, authoritative for board, score, and arsenal state.
     inner: Game,
     /// Captures inputs/ticks so [`export_replay`](WasmGame::export_replay) can
     /// emit a deterministic trace.
@@ -96,11 +96,11 @@ impl WasmGame {
         }
     }
 
-    /// Board width in cells — the front-end sizes the Canvas grid from this.
+    /// Board width in cells. The front-end sizes the Canvas grid from this.
     pub fn width(&self) -> i32 {
         self.inner.board().width
     }
-    /// Board height in cells — paired with [`width`](WasmGame::width) to size the
+    /// Board height in cells. Paired with [`width`](WasmGame::width) to size the
     /// Canvas grid and to index [`render_grid`](WasmGame::render_grid).
     pub fn height(&self) -> i32 {
         self.inner.board().height
@@ -198,7 +198,7 @@ impl WasmGame {
     pub fn is_in_bazaar(&self) -> bool {
         self.inner.is_in_bazaar()
     }
-    /// Lines still to clear before the next bazaar opens — drives the HUD's
+    /// Lines still to clear before the next bazaar opens. Drives the HUD's
     /// countdown.
     pub fn lines_til_bazaar(&self) -> i32 {
         self.inner.lines_til_bazaar()
@@ -216,7 +216,7 @@ impl WasmGame {
     pub fn restore_keyframe(&mut self, bytes: Vec<u8>) -> bool {
         self.inner.restore_bytes(&bytes)
     }
-    /// The full game state as a keyframe (byte form) — for debugging / parity
+    /// The full game state as a keyframe (byte form), for debugging / parity
     /// checks against the server's authoritative snapshot.
     pub fn snapshot_keyframe(&self) -> Vec<u8> {
         self.inner.snapshot_bytes()
@@ -237,7 +237,7 @@ impl WasmGame {
             self.inner.force_weapon_off(t);
         }
     }
-    /// Serialize/restore a whole board or arsenal — the primitives a peer-to-peer
+    /// Serialize/restore a whole board or arsenal. These are the primitives a peer-to-peer
     /// relay needs to move state between the two sides for weapons like Swap and
     /// Lazy Susan (and to hand a display-only copy of a board to a spy reveal).
     /// `export_*` is the source, `import_*` the sink.
@@ -284,7 +284,7 @@ impl WasmGame {
     pub fn arsenal_token(&self, i: u32) -> i32 {
         self.inner.arsenal_token(i as usize)
     }
-    /// How many of slot `i`'s weapon are stocked — the count badge on the slot.
+    /// How many of slot `i`'s weapon are stocked. This is the count badge on the slot.
     pub fn arsenal_quantity(&self, i: u32) -> i32 {
         self.inner.arsenal_quantity(i as usize) as i32
     }
@@ -336,7 +336,7 @@ impl WasmGame {
         }
     }
 
-    /// The recording of this game so far, as JSON — the trace for a bug report
+    /// The recording of this game so far, as JSON. This is the trace for a bug report
     /// or a saved replay. Re-running it on the same engine build reproduces the
     /// game exactly.
     pub fn export_replay(&self) -> String {
@@ -347,13 +347,13 @@ impl WasmGame {
 // --- online (server-authoritative) client -------------------------------
 
 /// The browser's client for a server-authoritative online match: a thin wasm-facing
-/// wrapper over [`bt_netcode::Predictor`], the SAME prediction/reconciliation core the
+/// wrapper over [`bt_netcode::Predictor`], the same prediction/reconciliation core the
 /// bot (`bt-bot`) runs. The front-end drives this exactly like a [`WasmGame`] for
-/// rendering/HUD (the read methods mirror it, as [`WasmVsComputer`] does), but inputs
-/// go through `predict_*` (which queue + return the ready-to-send wire frame) and
-/// server frames through [`on_snapshot`](WasmClient::on_snapshot) — so the seq/ack/
-/// keyframe-replay invariants are the proptested ones in `bt-netcode`, not hand-rolled
-/// JS. There's no `Recorder`: online matches are recorded authoritatively server-side.
+/// rendering/HUD (the read methods mirror it, as [`WasmVsComputer`] does). Inputs
+/// go through `predict_*` (which queue and return the ready-to-send wire frame) and
+/// server frames through [`on_snapshot`](WasmClient::on_snapshot), so the seq/ack/
+/// keyframe-replay invariants are the proptested ones in `bt-netcode`. There is no
+/// `Recorder`: online matches are recorded authoritatively server-side.
 #[wasm_bindgen]
 pub struct WasmClient {
     inner: Predictor,
@@ -367,7 +367,7 @@ impl WasmClient {
     }
 
     /// Advance the local prediction one fixed step. The host must NOT call this while a
-    /// bazaar barrier is up ([`barrier`](Self::barrier)) — the server freezes then.
+    /// bazaar barrier is up ([`barrier`](Self::barrier)); the server freezes then.
     pub fn tick(&mut self, dt_ms: i32) {
         self.inner.tick(dt_ms);
     }
@@ -395,7 +395,7 @@ impl WasmClient {
         self.send(Input::LaunchWeapon(slot))
     }
     /// Predict a buy; returns the wire frame, or "" if the engine rejected it (so the
-    /// caller refreshes the bazaar UI iff non-empty — empty ⇒ nothing changed/sent).
+    /// caller refreshes the bazaar UI iff non-empty; an empty return means nothing changed/sent).
     pub fn predict_buy(&mut self, token: i32) -> String {
         self.send(Input::BuyWeapon(token))
     }
@@ -403,8 +403,8 @@ impl WasmClient {
     pub fn predict_sell(&mut self, token: i32) -> String {
         self.send(Input::SellWeapon(token))
     }
-    /// Tell the server we're done shopping. Forwarded but NOT applied locally — the
-    /// barrier clears via the next keyframe once BOTH sides leave.
+    /// Tell the server we're done shopping. Forwarded but not applied locally; the
+    /// barrier clears via the next keyframe once both sides leave.
     pub fn predict_leave_bazaar(&mut self) -> String {
         self.send(Input::LeaveBazaar)
     }
@@ -412,7 +412,7 @@ impl WasmClient {
     /// Reconcile against an authoritative snapshot. `ack` is the last input seq the
     /// server applied for us; `you_bazaar`/`opp_bazaar` are the authoritative bazaar
     /// flags; `keyframe` is the full authoritative state (an EMPTY array means the
-    /// snapshot carried no keyframe — reconcile acks only, don't restore).
+    /// snapshot carried no keyframe; in that case only acks are reconciled, not state).
     pub fn on_snapshot(&mut self, ack: u32, you_bazaar: bool, opp_bazaar: bool, keyframe: Vec<u8>) {
         let kf = if keyframe.is_empty() { None } else { Some(keyframe.as_slice()) };
         self.inner.on_snapshot(ack as u64, you_bazaar, opp_bazaar, kf);
@@ -426,7 +426,7 @@ impl WasmClient {
     pub fn input_seq(&self) -> u32 {
         self.inner.input_seq() as u32
     }
-    /// Inputs still in flight (sent, not yet acked) — debug overlay.
+    /// Inputs still in flight (sent, not yet acked), for the debug overlay.
     pub fn unacked_len(&self) -> usize {
         self.inner.unacked_len()
     }
@@ -508,12 +508,12 @@ impl WasmClient {
 
 // --- weapon catalog (for the bazaar UI) ---------------------------------
 //
-// Free functions rather than methods because the catalog is static engine data,
-// not per-game state: the bazaar UI builds its shelf once from these. Each looks
-// a weapon up by protocol index and returns an empty/zero default for an
-// out-of-range token, so a stray index can't panic the front-end.
+// Free functions because the catalog is static engine data. The bazaar UI
+// builds its shelf once from these. Each looks a weapon up by protocol index
+// and returns an empty/zero default for an out-of-range token, so a stray
+// index cannot panic the front-end.
 
-/// Number of weapons — the front-end iterates `0..max_weapons()` to list them.
+/// Number of weapons. The front-end iterates `0..max_weapons()` to list them.
 #[wasm_bindgen]
 pub fn max_weapons() -> i32 {
     BT_MAX_WEAPONS as i32
@@ -626,7 +626,7 @@ impl WasmVsComputer {
     pub fn new(seed: u32, level: u32) -> WasmVsComputer {
         WasmVsComputer {
             inner: VsComputer::new(seed as u64, level as usize),
-            // Only the human's inputs are recorded — Ernie is regenerated from
+            // Only the human's inputs are recorded; Ernie is regenerated from
             // the seed + level on replay.
             rec: Recorder::new(seed, Mode::VsComputer, Some(level), FIXED_DT_MS, ENGINE_SHA),
         }
@@ -680,7 +680,7 @@ impl WasmVsComputer {
         self.inner.player_mut().set_paused(paused);
         self.rec.record(Input::SetPaused(paused));
     }
-    /// Over when the player tops out OR the match has been decided — so a win by
+    /// Over when the player tops out or the match has been decided. A win by
     /// outlasting Ernie (the player's board still alive) also ends the screen.
     pub fn is_game_over(&self) -> bool {
         self.inner.player().is_game_over() || self.inner.result() != 0
@@ -722,7 +722,7 @@ impl WasmVsComputer {
             None => false,
         }
     }
-    /// Test/debug: set the player's arsenal directly — used by the e2e test to
+    /// Test/debug: set the player's arsenal directly, used by the e2e test to
     /// pre-stock weapons against Ernie without playing to the bazaar.
     pub fn import_arsenal(&mut self, data: Vec<i32>) {
         self.inner.player_mut().import_arsenal(&data);
@@ -787,7 +787,7 @@ impl WasmVsComputer {
 
 // --- replay playback ----------------------------------------------------
 
-/// Plays back a recorded [`Replay`] in the browser — the engine behind the
+/// Plays back a recorded [`Replay`] in the browser. This is the engine behind the
 /// replay library's `/replay/:id` page. Deterministic: it reconstructs the game
 /// from the seed and re-applies the recorded inputs, so playback is bit-for-bit
 /// identical to the original game (Ernie is regenerated for vs-computer).
@@ -818,7 +818,7 @@ impl WasmReplayPlayer {
     pub fn tick_index(&self) -> u32 {
         self.inner.tick_index()
     }
-    /// Total ticks in the recording — the seek bar's length.
+    /// Total ticks in the recording. This is the seek bar's length.
     pub fn tick_count(&self) -> u32 {
         self.inner.replay().tick_count
     }
@@ -830,7 +830,7 @@ impl WasmReplayPlayer {
     pub fn mode(&self) -> String {
         format!("{:?}", self.inner.replay().mode)
     }
-    /// The seed the game ran on — shown in the replay metadata.
+    /// The seed the game ran on, shown in the replay metadata.
     pub fn seed(&self) -> u32 {
         self.inner.replay().seed
     }
@@ -892,7 +892,7 @@ impl WasmReplayPlayer {
 
 // --- online (server-authoritative) match playback -----------------------
 
-/// Plays back a recorded online match — the deterministic two-board
+/// Plays back a recorded online match. The deterministic two-board
 /// [`VersusReplay`] the server stores. Re-runs a `bt_core::Versus` from the two
 /// seeds + the recorded input stream, so the whole match (both boards, every
 /// weapon / tax / bazaar / spy) reproduces exactly.
@@ -916,8 +916,8 @@ impl WasmVersusReplayPlayer {
     }
 
     /// Advance one tick; returns false once the recording is exhausted. Before
-    /// stepping, snapshots this tick's launches for [`recent_launches`](Self::recent_launches)
-    /// — the slot must be read NOW, because applying the launch consumes it.
+    /// stepping, snapshots this tick's launches for [`recent_launches`](Self::recent_launches).
+    /// The slot must be read before the launch is applied, because launching consumes it.
     pub fn step(&mut self) -> bool {
         // Capture this tick's weapon launches before they apply: resolve each
         // launched slot to its weapon token from the side's CURRENT arsenal (the
@@ -957,7 +957,7 @@ impl WasmVersusReplayPlayer {
     }
 
     /// The raw input frames recorded AT `tick`, each as "A: <Input>" / "B: <Input>"
-    /// (Debug-formatted). Drives the replay debug "input stream" panel — what each
+    /// (Debug-formatted). Drives the replay debug "input stream" panel, showing what each
     /// side actually did on that tick.
     pub fn inputs_at_tick(&self, tick: u32) -> Vec<String> {
         self.inner

@@ -1,27 +1,27 @@
 //! TrueSkill 2 additions that apply to a 1v1, single-mode game.
 //!
-//! From Minka, Cleven, Zaykov (2018). Squad-offset and mode-correlation don't
-//! apply (1v1, one mode). The three that do:
+//! From Minka, Cleven, Zaykov (2018). Squad-offset and mode-correlation do not
+//! apply here (1v1, one mode). The three additions that do apply:
 //!
-//!   * **Individual statistics (eq 9).** Kill/death counts correlate with
-//!     performance; the BattleTris analogue is **lines cleared**. The paper
+//!   * Individual statistics (eq 9). Kill/death counts correlate with
+//!     performance; the BattleTris analogue is lines cleared. The paper
 //!     infers this via EP over a factor graph (no reference code released). For
-//!     1v1 we implement the EP-consistent special case: treat the *line margin*
+//!     1v1 we implement the EP-consistent special case: treat the line margin
 //!     `z = winner_lines - loser_lines` as a Gaussian measurement of the latent
 //!     performance margin `d = perf_w - perf_l ~ N(mu_w - mu_l, sw2+sl2+2β²)`,
 //!     `z | d ~ N(λ d, R)`. We do the Gaussian measurement update first, then
-//!     impose the win condition `d > ε`. This updates both mean *and* variance
-//!     and reduces *exactly* to the classic update as `R → ∞` (or `λ = 0`).
+//!     impose the win condition `d > ε`. This updates both mean and variance
+//!     and reduces to the classic update as `R → ∞` (or `λ = 0`).
 //!     (Closed form courtesy of a second-opinion derivation.)
-//!   * **Experience offset (eq 8).** A small, outcome-independent upward `mu`
+//!   * Experience offset (eq 8). A small, outcome-independent upward `mu`
 //!     bump each match that decays with experience: `bump * exp(-n / k)`.
-//!     Default-tiny; set `experience_bump = 0` to disable. The paper's
-//!     200-parameter table needs lots of data to learn — we use a simple shape.
-//!   * **Quit penalty (eq 12-13).** A quit is a surrender (loss); the quitter
+//!     Set `experience_bump = 0` to disable. The paper's 200-parameter table
+//!     needs lots of data to learn; this crate uses a simpler shape instead.
+//!   * Quit penalty (eq 12-13). A quit is a surrender (loss); the quitter
 //!     also gets a small extra under-performance nudge.
 //!
 //! Caveat (per the paper & review): raw line counts partly measure match
-//! *duration*, so `λ`/`R` here are uncalibrated defaults — tune against real
+//! duration, so `λ`/`R` here are uncalibrated defaults. Tune against real
 //! data, or prefer a duration-normalized line margin.
 
 use crate::math::{v_win, w_win};
@@ -34,7 +34,7 @@ pub enum Winner {
     A,
     /// Player B won outright.
     B,
-    /// Neither side won (a tie, or — once quits are resolved — both quit).
+    /// Neither side won. This covers a tie, or the case where both players quit (resolved before rating).
     Draw,
 }
 
@@ -44,7 +44,7 @@ pub enum Winner {
 pub struct MatchOutcome {
     /// The reported winner. A quit overrides this when the match is rated.
     pub winner: Winner,
-    /// Lines cleared by A and B — the TS2 individual-statistic signal. A wide
+    /// Lines cleared by A and B. This is the TS2 individual-statistic signal. A wide
     /// line margin is extra evidence of a skill gap beyond the bare win bit.
     pub a_lines: u32,
     pub b_lines: u32,
@@ -56,7 +56,7 @@ pub struct MatchOutcome {
 }
 
 impl MatchOutcome {
-    /// An A win with the given line counts and no quits — the common case.
+    /// An A win with the given line counts and no quits, the common case.
     pub fn a_wins(a_lines: u32, b_lines: u32) -> Self {
         MatchOutcome { winner: Winner::A, a_lines, b_lines, a_quit: false, b_quit: false }
     }
@@ -70,17 +70,17 @@ impl MatchOutcome {
 ///
 /// Experience is carried alongside the rating because the TS2 experience offset
 /// (eq 8) gives newer players a small upward nudge that decays with games
-/// played — so the count, not just the rating, must persist between matches.
+/// played, so the count must persist between matches alongside the rating.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PlayerState {
     /// The Gaussian skill belief.
     pub rating: Rating,
-    /// Number of rated matches played — drives the decaying experience offset.
+    /// Number of rated matches played. This drives the decaying experience offset.
     pub experience: u32,
 }
 
 impl PlayerState {
-    /// A zero-experience state around `rating` — pass [`Params::new_rating`] for
+    /// A zero-experience state around `rating`. Pass [`Params::new_rating`] for
     /// a brand-new player at the prior.
     pub fn new(rating: Rating) -> Self {
         PlayerState { rating, experience: 0 }
@@ -200,7 +200,7 @@ fn rate_decisive(winner: Rating, loser: Rating, z: f64, p: &Ts2Params) -> (Ratin
     )
 }
 
-/// Rate a 1v1 match with the TS2 model — the public entry point. Applies, in
+/// Rate a 1v1 match with the TS2 model. Applies, in
 /// order: the rating update (a decisive result folds in the line-margin signal;
 /// a draw uses the classic draw update and ignores lines), then the quit penalty
 /// and the experience offset; returns the updated states with `experience`
@@ -246,7 +246,7 @@ pub fn rate_match(
     )
 }
 
-/// Match quality (a `[0, 1]` balance score) for matchmaking two players — the
+/// Match quality (a `[0, 1]` balance score) for matchmaking two players. This is the
 /// TS2 wrapper over [`quality_1v1`] that takes [`PlayerState`]s. Higher means a
 /// more balanced, more interesting pairing.
 pub fn match_quality(a: &PlayerState, b: &PlayerState, p: &Ts2Params) -> f64 {
@@ -302,7 +302,7 @@ mod tests {
         // NB: we deliberately do NOT assert a sigma ordering here. The line
         // measurement's variance reduction is margin-independent, while the
         // binary win-bit contributes *less* variance reduction when the outcome
-        // is unsurprising (a blowout) — so sigma ordering is model-subtle.
+        // is unsurprising (a blowout), so sigma ordering is model-subtle.
     }
 
     #[test]

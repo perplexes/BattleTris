@@ -1,18 +1,17 @@
 //! Deterministic, seedable RNG that backs the game's `rand()`, `drand48()`, and
 //! `lrand48()` call sites.
 //!
-//! Determinism is the whole point: the engine is replayed and re-simulated
-//! (replays, property tests, and server-authoritative reconciliation all rerun
-//! the same seed and must land on the same state), so randomness has to be a
-//! pure function of the seed and the exact sequence of draws — never the host
-//! platform's libc. To get that, all three of the original generators are routed
-//! through ONE deterministic 48-bit LCG (the POSIX `drand48` recurrence): `rand`
-//! and `lrand48` return its high bits, `drand48` returns its full-width fraction.
-//! Folding them onto a single state — rather than a faithful libc `rand` — is
-//! what makes the whole stream reproducible from the seed alone.
+//! The engine is replayed and re-simulated: replays, property tests, and
+//! server-authoritative reconciliation all rerun the same seed and must reach
+//! the same state. Randomness is therefore a pure function of the seed and the
+//! exact sequence of draws, and never calls into the host platform's libc. All
+//! three of the original generators are routed through one deterministic 48-bit
+//! LCG (the POSIX `drand48` recurrence): `rand` and `lrand48` return its high
+//! bits, `drand48` returns its full-width fraction. Folding them onto a single
+//! state makes the whole stream reproducible from the seed alone.
 //!
-//! The order and KIND of draw matters as much as the values, because the engine
-//! consumes them in a fixed order that any faithful re-run must match:
+//! The engine consumes draws in a fixed order that any faithful re-run must
+//! match:
 //!   * piece selection (default): the rejection loop rolls `rand()` for the id,
 //!     then `drand48()` against the keep probability, repeating until accepted.
 //!   * piece selection under Broken Record: an `lrand48()` gate is drawn FIRST
@@ -22,10 +21,10 @@
 //!   * board weapon effects draw `rand()` for positions and coin flips.
 //!
 //! Each generator pulls from the same shared 48-bit state, so the methods are
-//! not interchangeable — calling the wrong one would desync every later draw.
+//! not interchangeable. Calling the wrong one would desync every later draw.
 
-/// Upper bound of [`Rng::rand`], inclusive — the 31-bit range the game's modulo
-/// idioms (`rand() % n`) assume.
+/// Upper bound of [`Rng::rand`], inclusive. It is the 31-bit range the game's
+/// modulo idioms (`rand() % n`) assume.
 pub const RAND_MAX: i32 = 0x7fff_ffff;
 
 /// A deterministic POSIX-style RNG. All three generators share one 48-bit LCG
@@ -48,7 +47,7 @@ impl Rng {
         Rng { state }
     }
 
-    /// The raw 48-bit LCG state — for full-game keyframe serialization (the
+    /// The raw 48-bit LCG state, for full-game keyframe serialization (the
     /// client-server reconciliation snapshot). Pair with [`Rng::from_raw`].
     pub fn raw(&self) -> u64 {
         self.state
@@ -70,7 +69,7 @@ impl Rng {
         self.state
     }
 
-    /// `rand()` — uniform in `0..=RAND_MAX`. Takes the top 31 bits of the 48-bit
+    /// `rand()`: uniform in `0..=RAND_MAX`. Takes the top 31 bits of the 48-bit
     /// state, the high bits being the well-distributed ones in an LCG.
     pub fn rand(&mut self) -> i32 {
         let x = self.next_state();
@@ -83,7 +82,7 @@ impl Rng {
         self.rand() % n
     }
 
-    /// `drand48()` — uniform double in `[0.0, 1.0)`, the full 48-bit state scaled
+    /// `drand48()`: uniform double in `[0.0, 1.0)`, the full 48-bit state scaled
     /// to a fraction. Used for the keep-probability comparison in piece
     /// selection.
     pub fn drand48(&mut self) -> f64 {
@@ -91,7 +90,7 @@ impl Rng {
         x as f64 / ((1u64 << 48) as f64)
     }
 
-    /// `lrand48()` — uniform non-negative long in `0..2^31` (same top-31-bit
+    /// `lrand48()`: uniform non-negative long in `0..2^31` (same top-31-bit
     /// extraction as [`Rng::rand`], returned wide). Used for the Broken Record
     /// reroll.
     pub fn lrand48(&mut self) -> i64 {
@@ -171,7 +170,7 @@ mod tests {
             let val = rng.rand();
             // Widen to i64 for the upper bound: RAND_MAX == i32::MAX, so `val <= RAND_MAX`
             // as i32 is vacuously true (clippy::absurd_extreme_comparisons). The i64 form
-            // still documents rand()'s `0..=RAND_MAX` contract — matching test_lrand48_range.
+            // still documents rand()'s `0..=RAND_MAX` contract, matching test_lrand48_range.
             assert!(val >= 0 && val as i64 <= RAND_MAX as i64, "rand() value {} out of range", val);
         }
     }

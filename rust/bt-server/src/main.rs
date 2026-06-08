@@ -1,10 +1,9 @@
-//! BattleTris server: one binary that serves the web client (static files) AND
-//! the online backend on the SAME port —
+//! BattleTris server: one binary that serves the web client (static files) and
+//! the online backend on the same port.
 //!    * `GET /ws`        WebSocket: matchmaking (paired by TrueSkill match
-//!      quality) and the SERVER-AUTHORITATIVE match itself — the
-//!      server runs the deterministic engine (a [`bout::Bout`]),
-//!      clients send inputs and reconcile against snapshots —
-//!      plus result -> rating updates persisted to a JSON file.
+//!      quality) and the server-authoritative match itself. The server runs the
+//!      deterministic engine (a [`bout::Bout`]); clients send inputs and
+//!      reconcile against snapshots; results are persisted as rating updates.
 //!    * everything else  static files from `STATIC_DIR` (default `bt-wasm`,
 //!      which holds `www/` and `pkg/`); `/` redirects to `/www/`.
 //!
@@ -22,10 +21,10 @@
 //!     {"type":"available","value":true,"token":"<jwt>"}   (open to matches)
 //!     {"type":"challenge","target":"bob"}   (directed challenge)
 //!     {"type":"input","seq":N,"input":<bt_replay::Input>}   (a gameplay action)
-//!     {"type":"rejoin","match_id":N,"token":"<jwt>"}   (reattach after a refresh)
+//!     {"type":"rejoin","match_id":"<match-id>","token":"<jwt>"}   (reattach after a refresh)
 //!     {"type":"leaveMatch"}                 (intentional leave -> immediate forfeit)
 //!   server -> client:
-//!     {"type":"matchStart","side":"A|B","seed":N,"opponent":"bob","match_id":N,...}
+//!     {"type":"matchStart","side":"A|B","seed":N,"opponent":"bob","match_id":"<match-id>",...}
 //!     {"type":"snapshot","tick":N,"ack":N,"result":...,"you":...,"opp":...,"keyframe"?:[..]}
 //!     {"type":"rating","mu":...,"sigma":...,"conservative":...,"won":true}
 //!     {"type":"players","players":[{"name":..,"status":"available|searching|ingame"}]}
@@ -35,9 +34,9 @@
 //!     {"type":"rejoinFailed"}               (no such live bout for this identity)
 //! ```
 //!
-//! Every connected client speaks the server-authoritative protocol (sends
-//! `input`, renders `snapshot`); the server runs the only simulation, so a client
-//! can never inject board state or cross-player effects — only legal inputs.
+//! In a bout, clients send legal inputs and reconcile against server-authoritative
+//! snapshots. The server runs the only simulation, so a client cannot inject board
+//! state or cross-player effects.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -65,8 +64,9 @@ mod bout;
 mod metrics;
 use bout::Bout;
 
-/// Player identity (HS256 JWT) — now a shared crate so the bots can mint the
-/// same tokens. Aliased to `identity` so existing `identity::…` call sites stand.
+/// Player identity (HS256 JWT). Factored into a shared crate so the bots can
+/// mint the same tokens. Aliased to `identity` so existing `identity::...` call
+/// sites stand.
 use bt_identity as identity;
 
 /// One queued input headed for an authoritative [`Bout`]: (side, action, seq).
@@ -79,7 +79,7 @@ const ENGINE_SHA: &str = match option_env!("BT_GIT_SHA") {
     None => "dev",
 };
 
-/// Matchmaking/relay state (tokio mutex — held across `.await`).
+/// Matchmaking/relay state (tokio mutex, held across `.await`).
 type Shared = Arc<Mutex<App>>;
 /// The replay index/store. `rusqlite::Connection` is `Send` but not `Sync`, so a
 /// std mutex guards it; replay queries are sub-millisecond and never `.await`
@@ -87,7 +87,7 @@ type Shared = Arc<Mutex<App>>;
 type Db = Arc<std::sync::Mutex<Connection>>;
 
 /// Combined router state. `FromRef` lets each handler extract just the piece it
-/// needs — `State<Shared>` for the websocket, `State<Db>` for replay endpoints.
+/// needs: `State<Shared>` for the websocket, `State<Db>` for replay endpoints.
 #[derive(Clone)]
 struct AppState {
     app: Shared,
@@ -110,12 +110,12 @@ impl FromRef<AppState> for Db {
 /// never appears in the `players` roster (the implicit 4th "anonymous" state).
 ///
 /// A client is *Available* iff it's both challengeable (a directed challenge can
-/// reach it) AND eligible for auto-pairing — "open to matches" is one switch.
+/// reach it) and eligible for auto-pairing: "open to matches" is one switch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Status {
     /// Open to matches: challengeable and auto-pairable.
     Available,
-    /// Pressed "Find Match" — actively looking (still pairable + challengeable).
+    /// Pressed "Find Match", actively looking (still pairable and challengeable).
     Searching,
     /// In an authoritative bout.
     InGame,
@@ -151,11 +151,13 @@ struct Client {
     /// Writer side of this connection's outbound channel. Every send to the client
     /// (direct or broadcast) enqueues here; the per-socket writer task drains it.
     tx: mpsc::UnboundedSender<Message>,
-    /// The opponent connection while in a match — used to send `opponentLeft` if
+    /// The opponent connection while in a match, used to send `opponentLeft` if
     /// this client disconnects mid-bout. Set in [`start_bout`], cleared at end.
     peer: Option<String>,
-    /// This connection's current rating, loaded for `name` at queue/available time
-    /// and refreshed in place when a bout it played settles.
+    /// This connection's current rating, loaded for `name` at queue/available time.
+    /// Refreshed in place when a settled bout returns a new rating. The `challenge`
+    /// path updates `name` without reloading `state`; `state` is therefore only
+    /// guaranteed current after `queue` or `available`.
     state: PlayerState,
     /// While in a match: the channel to the match's tick loop and which side this
     /// client plays. `input` messages are forwarded here.
@@ -172,7 +174,7 @@ struct Client {
     geo: Option<String>,
     /// True for a headless practice bot (announced via `available`'s `bot` flag).
     /// A bot is human-challengeable and human-auto-pairable, but two bots never
-    /// auto-pair with EACH OTHER — otherwise they'd drain the lobby playing
+    /// auto-pair with each other; if they did they'd drain the lobby playing
     /// themselves and leave nobody for a visitor to challenge.
     is_bot: bool,
     /// Lobby presence captured at the start of the current bout, restored when it
@@ -181,7 +183,7 @@ struct Client {
     /// When the last ws Ping was sent to this client (to measure round-trip time on
     /// the matching Pong). `None` between a Pong and the next Ping.
     ping_sent_at: Option<Instant>,
-    /// Last measured round-trip time, in ms — shown next to the name in the lobby
+    /// Last measured round-trip time in ms, shown next to the name in the lobby
     /// roster. `None` until the first Pong comes back.
     ping_ms: Option<u32>,
 }
@@ -189,9 +191,10 @@ struct Client {
 /// Presence to restore when a bout ends. A player who had ANY lobby presence
 /// before the match (Available/Searching) returns to Available; a one-off
 /// directed CHALLENGER (no prior presence) leaves the roster instead of being
-/// forced Available — otherwise the moment the match ends they'd be auto-paired
-/// straight back into another one (challenge a bot, top out, get re-matched with
-/// a bot forever), which reads as the board "resetting" mid-session.
+/// forced back to Available; if they were, the moment the match ended they'd be
+/// auto-paired straight back into another one (challenge a bot, top out, get
+/// re-matched with a bot forever), which reads as the board "resetting"
+/// mid-session.
 fn post_bout_status(prev: Option<Status>) -> Option<Status> {
     prev.map(|_| Status::Available)
 }
@@ -203,8 +206,10 @@ struct App {
     /// Every live connection, keyed by its tagged-UUID `client-…` id. A single
     /// player may hold several (multiple tabs); the roster de-dupes by name.
     clients: HashMap<String, Client>,
-    /// Connections that pressed Find Match and have no opponent yet — the
-    /// explicit auto-pair queue, scanned alongside lobby-Available clients.
+    /// Connections waiting for an auto-paired opponent. Fed by both Find Match
+    /// (`queue`) and the Available presence path (`available` calls `try_match` and
+    /// may enqueue here when no match is found immediately). Scanned alongside
+    /// lobby-Available clients.
     waiting: Vec<String>,
     /// Last time each connection pressed a gameplay button. "Players online" is
     /// the count of these within `ACTIVE_WINDOW` (set on `active`, pruned on
@@ -221,7 +226,7 @@ struct App {
     /// TrueSkill tuning shared by matchmaking quality, rating updates, and the
     /// new-player base rating.
     params: Ts2Params,
-    /// Replay/counters DB (shared with the HTTP handlers) — backs the hit counter
+    /// Replay/counters DB (shared with the HTTP handlers). Backs the hit counter
     /// and the per-player stats (`players`) table.
     db: Db,
     /// Outstanding directed challenges: challenger id -> (target id, expires_at).
@@ -236,10 +241,10 @@ struct App {
     /// removed when [`run_bout`] ends. See [`BoutHandle`].
     bouts: HashMap<String, BoutHandle>,
     /// Quiesce-in-place drain: once set (via `POST /admin/drain` at the start of a
-    /// deploy) this machine accepts NO new matches — lobby clients stay connected but
-    /// "matches paused" — while its in-flight bouts finish. The deploy script waits for
-    /// the active-bout count to reach zero, then replaces the machine in place (so no
-    /// live game is ever killed); the fresh boot clears this flag. See [`admin_drain`].
+    /// deploy) this machine accepts no new matches while its in-flight bouts finish.
+    /// Lobby clients stay connected and see "matches paused". The deploy script waits
+    /// for the active-bout count to reach zero, then replaces the machine in place so
+    /// no live game is killed; the fresh boot clears this flag. See [`admin_drain`].
     draining: bool,
 }
 
@@ -273,7 +278,7 @@ impl App {
         }
     }
 
-    /// The rating state to play `name` at — their persisted `(mu, sigma,
+    /// The rating state to play `name` at: their persisted `(mu, sigma,
     /// experience)` if known, otherwise the configured new-player rating. An
     /// empty name (an un-named connection) also falls through to a new rating.
     fn rating_for(&self, name: &str) -> PlayerState {
@@ -327,7 +332,7 @@ fn active_count(app: &App, now: Instant) -> usize {
 }
 
 /// The current persistent visit total (the "you are visitor #N" counter) read
-/// from the DB — the figure that rides every `stats` broadcast.
+/// from the DB, the figure that rides every `stats` broadcast.
 fn current_hits(app: &App) -> i64 {
     let conn = app.db.lock().unwrap();
     db_hits(&conn)
@@ -385,7 +390,7 @@ fn roster(app: &App) -> Vec<RosterEntry> {
 }
 
 /// The `players` presence frame the lobby renders. Each entry carries an optional
-/// `ping` (round-trip latency in ms — shown next to the name) and, for bots, a
+/// `ping` (round-trip latency in ms, shown next to the name) and, for bots, a
 /// `bot:true` flag (the lobby ignores it; the roaming Count uses it to prefer
 /// challenging humans).
 fn players_msg(roster: &[RosterEntry]) -> Value {
@@ -417,7 +422,7 @@ fn maybe_broadcast_players(app: &mut App) {
 }
 
 /// Load persisted ratings from `ratings.json` (name -> `(mu, sigma,
-/// experience)`). A missing or malformed file yields an empty map — a fresh
+/// experience)`). A missing or malformed file yields an empty map; a fresh
 /// server simply starts everyone at the new-player rating. A field absent from a
 /// row falls back to the new-player default rather than dropping the player.
 fn load_ratings() -> HashMap<String, (f64, f64, u32)> {
@@ -436,7 +441,7 @@ fn load_ratings() -> HashMap<String, (f64, f64, u32)> {
 }
 
 /// Persist the whole ratings map back to `ratings.json` (pretty-printed).
-/// Best-effort — a write error is swallowed rather than failing a settled match;
+/// Best-effort: a write error is swallowed rather than failing a settled match;
 /// the in-memory map stays authoritative until the next successful write.
 fn save_ratings(ratings: &HashMap<String, (f64, f64, u32)>) {
     let obj: Value = ratings
@@ -459,7 +464,7 @@ const BOUT_INPUT_CAP: usize = 256;
 /// How long a bout stays FROZEN after a human side's socket drops, waiting for that
 /// player to reconnect (an accidental browser refresh) before the match is
 /// forfeited. Long enough for a page reload (wasm re-init + ws reconnect), short
-/// enough not to over-stall a genuine quit. A *bot* drop never waits — it forfeits
+/// enough not to over-stall a genuine quit. A bot drop never waits; it forfeits
 /// at once (bots don't refresh).
 const REJOIN_GRACE: Duration = Duration::from_secs(12);
 
@@ -471,8 +476,8 @@ enum BoutControl {
     /// adopt its new connection `id` (the disconnected one was already removed from
     /// `app.clients`, so the loop must retarget settle/status by the live id).
     Reattach { side: Side, new_id: String, tx: mpsc::UnboundedSender<Message> },
-    /// `side` intentionally left the match (the in-app "Leave game" button) — end
-    /// the bout NOW, no reconnect grace, with the other side winning by forfeit.
+    /// `side` intentionally left the match (the in-app "Leave game" button). End
+    /// the bout immediately, with no reconnect grace, and the other side winning by forfeit.
     Forfeit { side: Side },
     /// A read-only spectator wants the live two-board stream (the debug live-match
     /// view). The loop adds `tx` to its spectator list; the spectator sends no
@@ -480,9 +485,9 @@ enum BoutControl {
     AddSpectator { tx: mpsc::UnboundedSender<Message> },
     /// An out-of-band ADMIN grant (the gated `POST /admin/grant` dev tool): add one
     /// weapon and/or some funds to `side`'s authoritative game, applied INSIDE the
-    /// bout task so it never races the tick loop. It is NOT a recorded `Input` — the
+    /// bout task so it never races the tick loop. It is not a recorded `Input`; the
     /// loop mutates the game directly and never appends to the replay frame stream,
-    /// so it can't perturb input ordering or determinism (see `Bout::debug_grant`).
+    /// so it cannot perturb input ordering or determinism (see `Bout::debug_grant`).
     DebugGrant { side: Side, weapon: Option<WeaponToken>, funds: Option<i64> },
 }
 
@@ -508,7 +513,7 @@ struct BoutHandle {
 /// if a client has disconnected (and been removed from `app.clients`) by the
 /// time the match ends.
 struct PendingBout {
-    /// Tagged-UUID match id (`match-<uuid>`) — unguessable + unique across restarts.
+    /// Tagged-UUID match id (`match-<uuid>`), unguessable and unique across restarts.
     /// Keys this match's settlement and [`App::bouts`].
     match_id: String,
     id_a: String,
@@ -529,10 +534,10 @@ struct PendingBout {
     human: [bool; 2],
 }
 
-/// A per-match seed from a connection id — distinct per connection (ids are random
+/// A per-match seed from a connection id. Distinct per connection (ids are random
 /// uuids) without an rng dependency, and masked to 32 bits so it round-trips through
-/// the JS client's `WasmGame::new(seed: u32)` exactly (same RNG stream on both sides
-/// → client prediction agrees with the authoritative sim).
+/// the JS client's `WasmGame::new(seed: u32)` exactly; the same RNG stream on both
+/// sides keeps client prediction consistent with the authoritative sim.
 fn derive_seed(id: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -565,16 +570,16 @@ fn clear_challenge(app: &mut App, challenger: &str) -> Option<String> {
 }
 
 /// Is `cid` a candidate the matcher may pair `id` with right now? Not `id`
-/// itself, not already in a bout, and "open to matches" — either explicitly
-/// queued (in `waiting`, the Find-Match path) OR lobby-Available / -Searching
-/// (the unified presence switch: Available = challengeable AND auto-pairable).
+/// itself, not already in a bout, and "open to matches": either explicitly
+/// queued (in `waiting`, the Find-Match path) or lobby-Available/Searching
+/// (the unified presence switch; Available means challengeable and auto-pairable).
 fn is_match_candidate(app: &App, id: &str, cid: &str) -> bool {
     if cid == id {
         return false;
     }
-    // The auto-matcher pairs only two HUMANS who are both open to play. Bots are
-    // passive: a human reaches a regional bot by CHALLENGING it, and The Count
-    // reaches humans via its own roaming challenges — neither side auto-pairs INTO a
+    // The auto-matcher pairs only two humans who are both open to play. Bots are
+    // passive: a human reaches a regional bot by challenging it, and The Count
+    // reaches humans via its own roaming challenges. Neither side auto-pairs into a
     // bot. (So an open human stays available for The Count to challenge instead of
     // being instantly thrown into a regional bot.)
     if app.clients.get(id).is_some_and(|c| c.is_bot)
@@ -594,8 +599,8 @@ fn is_match_candidate(app: &App, id: &str, cid: &str) -> bool {
 
 /// Match `id` against the best-quality open opponent; otherwise leave it queued.
 ///
-/// The candidate pool is everyone "open to matches" — explicitly queued
-/// (`waiting`) AND lobby-Available clients — so going Available auto-pairs you
+/// The candidate pool is everyone "open to matches": explicitly queued
+/// (`waiting`) and lobby-Available clients. Going Available auto-pairs a client
 /// just like pressing Find Match. Returns `Some(PendingBout)` (which the async
 /// caller spawns) when it finds an opponent.
 fn try_match(app: &mut App, id: &str) -> Option<PendingBout> {
@@ -641,14 +646,14 @@ fn try_match(app: &mut App, id: &str) -> Option<PendingBout> {
 /// matchmaking quality if known (auto-match) else `None` (a hand-picked challenge
 /// has no quality figure). Returns `None` only if a client vanished.
 fn start_bout(app: &mut App, a: &str, b: &str, quality: Option<f64>) -> Option<PendingBout> {
-    // Blue/green drain: this machine starts no new bouts once draining — it's only
-    // finishing the ones already in flight. The single chokepoint for BOTH the
-    // auto-matcher and the challenge-accept path, so nothing slips through.
+    // Blue/green drain: this machine starts no new bouts once draining, only
+    // finishing the ones already in flight. This is the single chokepoint for both
+    // the auto-matcher and the challenge-accept path, so nothing slips through.
     if app.draining {
         return None;
     }
     app.waiting.retain(|w| w != a && w != b);
-    // Drop any pending challenges involving either player — they're now in a
+    // Drop any pending challenges involving either player; they're now in a
     // match, so a stale accept must not later kick off a second, unwanted bout.
     app.challenges
         .retain(|cid, (tid, _)| cid != a && cid != b && tid != a && tid != b);
@@ -712,7 +717,7 @@ fn start_bout(app: &mut App, a: &str, b: &str, quality: Option<f64>) -> Option<P
         Some(q) => println!("authoritative match {a} <-> {b} (quality {q:.3})"),
         None => println!("authoritative challenge match {a} <-> {b}"),
     }
-    // Roster changed (both went InGame) — let the lobby reflect it.
+    // Roster changed (both went InGame); let the lobby reflect it.
     maybe_broadcast_players(app);
     Some(PendingBout {
         match_id,
@@ -829,14 +834,13 @@ fn sidx(s: Side) -> usize {
 /// the server's clock, broadcasts a snapshot to each client (~30Hz), and settles
 /// on the natural end.
 ///
-/// **Reconnect grace (pause-both).** When a *human* side's socket drops, the
-/// whole bout FREEZES (sim + inputs halt) for up to
-/// [`REJOIN_GRACE`] while we wait for that player to reconnect (an accidental
-/// refresh) and reattach via [`BoutControl::Reattach`] (the `rejoin` handler). The
-/// still-connected side is told `opponentReconnecting`; on reattach both get a
-/// keyframe + `opponentResumed` and play resumes from the exact frozen state. If
-/// the grace expires the absent side forfeits. A *bot* side dropping still
-/// forfeits at once (bots don't refresh).
+/// Reconnect grace (pause-both): when a human side's socket drops, the whole
+/// bout freezes (sim and inputs halt) for up to [`REJOIN_GRACE`] while waiting
+/// for that player to reconnect and reattach via [`BoutControl::Reattach`] (the
+/// `rejoin` handler). The still-connected side is told `opponentReconnecting`; on
+/// reattach both get a keyframe and `opponentResumed`, and play resumes from the
+/// exact frozen state. If the grace expires the absent side forfeits. A bot side
+/// dropping forfeits at once (bots don't refresh).
 async fn run_bout(state: Shared, pb: PendingBout) {
     let PendingBout {
         match_id, mut id_a, mut id_b, seed_a, seed_b, name_a, name_b, state_a, state_b,
@@ -868,9 +872,9 @@ async fn run_bout(state: Shared, pb: PendingBout) {
                     connected[sidx(side)] = true;
                     // The reconnected client restarts its input `seq` at 0 (the resent
                     // matchStart below rebuilds its local game), so drop our ack baseline
-                    // for this side to match — otherwise every fresh input would be
+                    // for this side to match; otherwise every fresh input would satisfy
                     // `seq <= ack`, get rejected, and the player's piece would snap back
-                    // all match. Done BEFORE the snapshot so the client sees `ack:0`.
+                    // all match. Done before the snapshot so the client sees `ack:0`.
                     bout.reset_ack(side);
                     // The fresh client needs the match handoff, THEN a keyframe to resync.
                     let (opp, seed, side_str) = match side {
@@ -903,7 +907,7 @@ async fn run_bout(state: Shared, pb: PendingBout) {
                 BoutControl::DebugGrant { side, weapon, funds } => {
                     // Out-of-band admin grant: mutate the authoritative game for `side`
                     // right here in the bout task (so it never races the tick loop). It
-                    // is NOT a recorded input, so the replay/input stream is untouched —
+                    // is not a recorded input, so the replay/input stream is untouched;
                     // determinism for normal gameplay is preserved. Force a keyframe so
                     // the next snapshot resyncs the client with the granted arsenal/funds.
                     let (w, f) = bout.debug_grant(side, weapon, funds);
@@ -949,7 +953,7 @@ async fn run_bout(state: Shared, pb: PendingBout) {
         }
         bout.tick(bout::TICK_MS);
         // A cross-player effect this tick (weapon/funds/bazaar) is something the
-        // clients couldn't predict — push a prompt keyframe on the next send.
+        // clients couldn't predict; push a prompt keyframe on the next send.
         if bout.take_dirty() {
             want_keyframe = true;
         }
@@ -960,7 +964,7 @@ async fn run_bout(state: Shared, pb: PendingBout) {
             let _ = tx_b.send(Message::Text(bout.snapshot_message(Side::B, true)));
             break Some(bout.result() == 1); // 1 = A won
         }
-        // Snapshots go out at ~30Hz (every other 16ms tick) — this is also where a
+        // Snapshots go out at ~30Hz (every other 16ms tick); this is also where a
         // client disconnect is detected (the send fails). A reconciliation keyframe
         // rides the first frame, the ~2Hz heartbeat, and any frame after an
         // unpredictable cross-player event, so corrections are prompt.
@@ -977,7 +981,7 @@ async fn run_bout(state: Shared, pb: PendingBout) {
                 // dropping starts the freeze and waits for a reconnect.
                 let human_down = (!a_ok && human[0]) || (!b_ok && human[1]);
                 if !human_down {
-                    // No human is down — only a bot dropped (incl. a bot-vs-bot match,
+                    // No human is down; only a bot dropped (incl. a bot-vs-bot match,
                     // e.g. The Count vs a regional bot). Forfeit immediately; the side
                     // still attached wins. (If A is down, a_ok=false -> Some(false)=B won.)
                     break Some(a_ok);
@@ -999,7 +1003,7 @@ async fn run_bout(state: Shared, pb: PendingBout) {
             }
         }
         // Stream the read-only two-board view to spectators (~15Hz). A failed send
-        // means the watcher closed the tab — drop them. No effect on the players.
+        // means the watcher closed the tab; drop them. No effect on the players.
         if frame.is_multiple_of(4) && !spectators.is_empty() {
             let msg = bout.spectator_message(&name_a, &name_b);
             spectators.retain(|tx| tx.send(Message::Text(msg.clone())).is_ok());
@@ -1008,11 +1012,11 @@ async fn run_bout(state: Shared, pb: PendingBout) {
     };
 
     let mut app = state.lock().await;
-    // The bout is over — drop its reattach registry entry so a late `rejoin` for
+    // The bout is over; drop its reattach registry entry so a late `rejoin` for
     // this match cleanly fails (`rejoinFailed`) instead of finding a dead loop.
     app.bouts.remove(&match_id);
-    // Match over: both sides leave the bout and return to their PRE-match
-    // presence (see [`post_bout_status`]) — a player who was "open to matches"
+    // Match over: both sides leave the bout and return to their pre-match
+    // presence (see [`post_bout_status`]). A player who was "open to matches"
     // goes back to Available; a one-off directed challenger leaves the roster
     // rather than being force-Available and instantly auto-rematched.
     for cid in [&id_a, &id_b] {
@@ -1027,11 +1031,11 @@ async fn run_bout(state: Shared, pb: PendingBout) {
         }
     }
     if let Some(a_won) = outcome {
-        // A forfeit (an intentional leave OR a grace-window expiry — anything that
-        // ISN'T a natural top-out) doesn't latch a game-over on the winner's client
+        // A forfeit (an intentional leave or a grace-window expiry, anything that
+        // is not a natural top-out) doesn't latch a game-over on the winner's client
         // by itself, and the winner may be sitting on the "opponent reconnecting"
         // freeze. Tell whoever's still attached the opponent left. (The loser's tx
-        // is dead on a disconnect → a harmless no-op; on an intentional leave the
+        // is dead on a disconnect, a harmless no-op; on an intentional leave the
         // leaver already went to the lobby and ignores it.)
         if !bout.is_over() {
             let left = json!({ "type": "opponentLeft" }).to_string();
@@ -1042,19 +1046,19 @@ async fn run_bout(state: Shared, pb: PendingBout) {
             &mut app, &match_id, &id_a, &name_a, state_a, &id_b, &name_b, state_b,
             a_won, bout.lines(Side::A), bout.lines(Side::B),
         );
-        // Real per-player stats (the `players` table) — record/streak/bests/time.
+        // Real per-player stats (the `players` table): record/streak/bests/time.
         // settle_bout has updated app.ratings; read each side's post-match rating.
         record_bout_player_stats(
             &app, &name_a, &name_b, a_won,
             (bout.score(Side::A), bout.lines(Side::A) as i64, bout.funds(Side::A)),
             (bout.score(Side::B), bout.lines(Side::B) as i64, bout.funds(Side::B)),
             bout.tick_count(),
-            bout.is_over(), // natural finish only — a forfeit isn't a real top-out
+            bout.is_over(), // natural finish only; a forfeit isn't a real top-out
         );
-        // Persist the match as a deterministic, replayable VersusReplay — but ONLY
-        // for a natural finish (a real top-out the board reaches). A forfeit (a
-        // client disconnected) isn't in the seed+input stream, so its playback would
-        // never latch a winner; we don't store those.
+        // Persist the match as a VersusReplay for natural finishes only (a real
+        // top-out the board reaches). A forfeit (a client disconnected) is not in
+        // the seed+input stream, so its playback would never latch a winner; we
+        // don't store those.
         if bout.is_over() {
             let replay = bout.to_replay(bout::TICK_MS, ENGINE_SHA);
             let json = replay.to_json();
@@ -1072,21 +1076,21 @@ async fn run_bout(state: Shared, pb: PendingBout) {
                 println!("stored online replay {id} ({} ticks)", replay.tick_count);
             }
             // Tell both clients the replay id so the game-over screen can offer a
-            // "Watch replay" button (best-effort — a disconnected client ignores it).
+            // "Watch replay" button (best-effort; a disconnected client ignores it).
             let msg = json!({ "type": "matchReplay", "id": id }).to_string();
             let _ = tx_a.send(Message::Text(msg.clone()));
             let _ = tx_b.send(Message::Text(msg));
         }
     }
-    // Both players went back to Available (or left) — refresh the lobby roster.
+    // Both players went back to Available (or left); refresh the lobby roster.
     maybe_broadcast_players(&mut app);
 
     // Quiesce-in-place: this bout is fully settled and removed from the registry. We
-    // do NOT exit here — the deploy script polls the active-bout count and replaces
+    // do not exit here; the deploy script polls the active-bout count and replaces
     // the machine once it reaches zero. (Self-exiting would just bounce us back up on
     // the OLD image via fly's restart policy, racing that poll.)
     if app.draining {
-        println!("drain: bout ({match_id}) settled — {} bout(s) remaining", app.bouts.len());
+        println!("drain: bout ({match_id}) settled - {} bout(s) remaining", app.bouts.len());
     }
 }
 
@@ -1116,9 +1120,9 @@ fn resolve_name(app: &App, v: &Value, prior: &str) -> String {
             // A bare (untokened) name is only honored for a NEW identity. Claiming
             // an already-rated name requires a valid token, so a one-line `name`
             // message can't hijack an established player's stats/rating. (Anyone
-            // can still mint a token for any name via /api/identity — identity is
-            // deliberately lightweight, not account-grade — but that's a step up
-            // from trivially spoofing a bare name.)
+            // can still mint a token for any name via /api/identity; identity is
+            // deliberately lightweight rather than account-grade, but that's a step
+            // up from trivially spoofing a bare name.)
             if !app.ratings.contains_key(&clean) || clean == prior {
                 return clean;
             }
@@ -1129,10 +1133,10 @@ fn resolve_name(app: &App, v: &Value, prior: &str) -> String {
 
 /// While this machine is draining for an in-place deploy, it accepts no NEW matches.
 /// Tell the requester "matches paused" (the client shows a notice) but KEEP the
-/// socket — there's no second machine to move to; the in-place restart will reconnect
-/// them onto the new version shortly. Returns true if the request was refused (the
-/// caller should stop). Never touches `rejoin` (a mid-bout player must still reach
-/// their bout here) or clients already in a bout.
+/// socket; there's no second machine to move to, and the in-place restart will
+/// reconnect them onto the new version shortly. Returns true if the request was
+/// refused (the caller should stop). Never touches `rejoin` (a mid-bout player
+/// must still reach their bout here) or clients already in a bout.
 async fn reject_if_draining(state: &Shared, id: &str) -> bool {
     let app = state.lock().await;
     if !app.draining {
@@ -1152,7 +1156,7 @@ async fn reject_if_draining(state: &Shared, id: &str) -> bool {
 /// (`queue`/`challenge`/`challengeAccept`/`challengeDecline`), and in-bout control
 /// (`input`/`rejoin`/`leaveMatch`/`spectate`). A matchmaking arm that pairs two
 /// clients returns a [`PendingBout`] from inside the lock and spawns [`run_bout`]
-/// for it OUTSIDE the lock — the tick loop must not hold the `App` mutex.
+/// for it outside the lock (the tick loop must not hold the `App` mutex).
 async fn handle_message(state: &Shared, id: &str, text: &str) {
     let v: Value = match serde_json::from_str(text) {
         Ok(v) => v,
@@ -1161,7 +1165,7 @@ async fn handle_message(state: &Shared, id: &str, text: &str) {
     match v.get("type").and_then(|t| t.as_str()) {
         // A page opened: count it as a visitor (persistent hit counter), then
         // push the current numbers to everyone so the new page is populated.
-        // (It isn't an active player yet — that needs a gameplay button.)
+        // (It isn't an active player yet; that needs a gameplay button.)
         Some("watch") => {
             let mut app = state.lock().await;
             {
@@ -1172,7 +1176,7 @@ async fn handle_message(state: &Shared, id: &str, text: &str) {
             app.last_broadcast_players = players;
             let msg = stats_msg(players, current_hits(&app));
             broadcast(&app, &msg);
-            // Send the CURRENT lobby roster to this just-connected client — the
+            // Send the current lobby roster to this just-connected client; the
             // periodic `players` push only fires on change, so without this a
             // client that connects after others are already online sees nobody.
             let r = roster(&app);
@@ -1221,10 +1225,10 @@ async fn handle_message(state: &Shared, id: &str, text: &str) {
             }
         }
         // Lobby presence toggle. `{"value":true}` (with an optional identity
-        // `token`/`name`) marks this client "open to matches" — both
-        // challengeable AND auto-pairable. `{"value":false}` leaves the roster.
-        // Going Available also attempts an immediate auto-pair (a directed
-        // challenge isn't required to get into a game).
+        // `token`/`name`) marks this client "open to matches": both challengeable
+        // and auto-pairable. `{"value":false}` leaves the roster. Going Available
+        // also attempts an immediate auto-pair (a directed challenge isn't required
+        // to get into a game).
         Some("available") => {
             if reject_if_draining(state, id).await {
                 return;
@@ -1309,7 +1313,7 @@ async fn handle_message(state: &Shared, id: &str, text: &str) {
                         }
                     });
                 }
-                // Target offline / busy / self — decline immediately.
+                // Target offline / busy / self; decline immediately.
                 _ => {
                     send(&app, id, &json!({"type":"challengeDeclined","by":target}));
                 }
@@ -1356,8 +1360,8 @@ async fn handle_message(state: &Shared, id: &str, text: &str) {
                 send(&app, &cid, &json!({"type":"challengeDeclined","by":by}));
             }
         }
-        // A gameplay action in a server-authoritative match — forward it to that
-        // match's tick loop, which validates + applies it. {seq, input}.
+        // A gameplay action in a server-authoritative match; forward it to that
+        // match's tick loop, which validates and applies it. {seq, input}.
         Some("input") => {
             let seq = v.get("seq").and_then(|n| n.as_u64()).unwrap_or(0);
             let input = v
@@ -1373,7 +1377,7 @@ async fn handle_message(state: &Shared, id: &str, text: &str) {
         }
         // Reconnect after an accidental refresh: the client parked the match in its
         // URL (`?match=<id>`) and now reattaches to the still-running, frozen bout.
-        // Requires a signed token whose name is one of the two participants — so a
+        // Requires a signed token whose name is one of the two participants, so a
         // shared/stale link can't hijack someone else's match (it just fails).
         Some("rejoin") => {
             // The match id is a tagged-UUID string (`match-<uuid>`), carried in the
@@ -1425,13 +1429,13 @@ async fn handle_message(state: &Shared, id: &str, text: &str) {
             };
             println!("rejoin id={id} match_id={mid:?} -> {}", if ok { "ok" } else { "failed" });
             if !ok {
-                // No such live bout / not a participant / the loop just ended — fail
+                // No such live bout / not a participant / the loop just ended; fail
                 // loudly so the client clears the URL and returns to the lobby.
                 send(&app, id, &json!({"type":"rejoinFailed"}));
             }
         }
-        // Intentional in-app "Leave game": forfeit THIS client's own bout right away
-        // (no reconnect grace — that's only for an accidental socket drop). We use
+        // Intentional in-app "Leave game": forfeit this client's own bout right away
+        // (no reconnect grace; that's only for an accidental socket drop). We use
         // the server-side `match_id`/`side` binding (not anything client-supplied),
         // so a client can only forfeit the match it's actually in.
         Some("leaveMatch") => {
@@ -1447,7 +1451,7 @@ async fn handle_message(state: &Shared, id: &str, text: &str) {
             }
         }
         // Read-only spectate (the live-match debug view): attach this socket to a
-        // bout's spectator stream. No identity/token needed — spectators send no
+        // bout's spectator stream. No identity/token needed; spectators send no
         // inputs, so there's nothing to forge.
         Some("spectate") => {
             let mid = v.get("match_id").and_then(|m| m.as_str()).map(|s| s.to_string());
@@ -1476,7 +1480,7 @@ fn new_id(kind: &str) -> String {
     format!("{kind}-{}", uuid::Uuid::new_v4())
 }
 
-/// `GET /ws` — complete the WebSocket upgrade and hand the socket to
+/// `GET /ws`: complete the WebSocket upgrade and hand the socket to
 /// [`handle_socket`] for the lifetime of the connection.
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Shared>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
@@ -1488,8 +1492,8 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Shared>) -> impl I
 ///
 /// The socket is split into a reader (this task's loop) and a writer task fed by
 /// an unbounded channel, so every other part of the server sends to this client by
-/// enqueuing a [`Message`] — it never awaits the socket directly and a slow client
-/// can't stall the matchmaking lock. The ws Ping/Pong loop doubles as the lobby's
+/// enqueuing a [`Message`]; it never awaits the socket directly and a slow client
+/// cannot stall the matchmaking lock. The ws Ping/Pong loop doubles as the lobby's
 /// per-player latency probe. On disconnect we notify a non-bout peer, retract any
 /// pending challenges, and drop the connection; an in-bout drop is left to the
 /// bout's tick loop (which holds its own writer clone) so the reconnect grace can
@@ -1526,8 +1530,8 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
     });
 
     // Ping task: every 5s, stamp the send time and ws-Ping the client. Browsers and
-    // the bot auto-Pong, and the read loop turns the Pong into a round-trip time —
-    // the lobby's per-player latency. Stops when the client is gone.
+    // the bot auto-Pong, and the read loop turns the Pong into a round-trip time
+    // for the lobby's per-player latency display. Stops when the client is gone.
     let ping_state = state.clone();
     let ping_id = id.clone();
     let ping_task = tokio::spawn(async move {
@@ -1592,7 +1596,7 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
         // dropped socket and enters the reconnect-grace freeze (the player may be
         // refreshing), forfeiting only if they don't reattach in time. So only fire
         // `opponentLeft` for a (non-bout) peer link; the loop owns the in-bout case.
-        // We still remove this dead connection below — the loop holds its own `tx`
+        // We still remove this dead connection below; the loop holds its own `tx`
         // clone and detects the drop via send failure.
         let peer = a.clients.get(&id).and_then(|c| c.peer.clone());
         let in_bout = a.clients.get(&id).is_some_and(|c| c.bout.is_some());
@@ -1607,11 +1611,11 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
         let was_listed = a.clients.get(&id).is_some_and(|c| c.status.is_some());
         a.clients.remove(&id);
         metrics::METRICS.ws_connections.dec();
-        // If a named/listed client left, the lobby roster changed — push it.
+        // If a named/listed client left, the lobby roster changed; push it.
         if was_listed {
             maybe_broadcast_players(&mut a);
         }
-        // If an active player's page closed, the live count may drop — recompute
+        // If an active player's page closed, the live count may drop; recompute
         // and push it to everyone still here.
         if a.last_active.remove(&id).is_some() {
             maybe_broadcast_stats(&mut a);
@@ -1626,8 +1630,8 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
 //
 // A SQLite database (the fly volume in prod) is the single source of truth: it
 // holds the full recording JSON alongside the metadata the library lists by, so
-// browsing is one indexed `SELECT … ORDER BY created_at` — not a scan that opens
-// and parses every file. A recording uploaded by the "report a bug" button or
+// browsing is one indexed `SELECT ... ORDER BY created_at` rather than a scan
+// that opens and parses every file. A recording uploaded by the "report a bug" button or
 // the 🔗 Share button lands here keyed by a content hash (dedup), and is fetched
 // back by id. A plain on-disk JSON directory, if present, is imported into the DB
 // once at startup (see `import_dir`).
@@ -1653,14 +1657,14 @@ fn replay_id(json: &str) -> String {
     format!("{:016x}", h.finish())
 }
 
-/// Ids are our own hex hashes; reject anything else (defensive — the DB binds
-/// ids as parameters, so this is belt-and-suspenders against malformed input).
+/// Ids are our own hex hashes; reject anything else as a defensive check (the DB
+/// binds ids as parameters, so this is belt-and-suspenders against malformed input).
 fn valid_replay_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// Wall-clock seconds since the Unix epoch — the `created_at` stamp for stored
-/// recordings (0 if the clock is somehow before the epoch).
+/// Wall-clock seconds since the Unix epoch, used as the `created_at` stamp for
+/// stored recordings (0 if the clock is somehow before the epoch).
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1671,7 +1675,8 @@ fn now_secs() -> i64 {
 /// The DB schema, applied idempotently at every boot (`CREATE TABLE IF NOT
 /// EXISTS`). Three tables: `replays` (the recording store + browse metadata),
 /// `counters` (the persistent visit counter), and `players` (per-player stats).
-/// Columns added independently of this batch are reconciled by [`init_schema`].
+/// Columns present in `SCHEMA` but missing from an older existing table are
+/// reconciled by [`init_schema`] using idempotent `ALTER TABLE ADD COLUMN`.
 const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS replays (
     id          TEXT PRIMARY KEY,
@@ -1710,10 +1715,10 @@ CREATE TABLE IF NOT EXISTS players (
     longest_game   INTEGER
 );";
 
-/// Create the schema and reconcile the `replays` columns the `CREATE TABLE IF NOT
-/// EXISTS` batch can't add to a table that already exists. Each `ADD COLUMN` is
-/// idempotent: the duplicate-column error is ignored, so a row missing the column
-/// simply reads it back as NULL until written. Runs on every boot.
+/// Create the schema and reconcile the `replays` columns that `CREATE TABLE IF NOT
+/// EXISTS` cannot add to an already-existing table. Each `ADD COLUMN` is
+/// idempotent: the duplicate-column error is ignored, and existing rows read
+/// newly added columns as `NULL` until written. Runs on every boot.
 fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(SCHEMA)?;
     // Optional replay title.
@@ -1746,7 +1751,7 @@ fn open_db() -> Connection {
 }
 
 /// Total lines cleared across all boards of a single-board (practice / vs-Computer)
-/// recording — deterministically replayed to the end.
+/// recording, counted by deterministically replaying to the end.
 fn single_replay_lines(r: &Replay) -> i64 {
     let mut p = ReplayPlayer::new(r.clone());
     p.run_to_end();
@@ -1812,9 +1817,9 @@ fn db_insert(conn: &Connection, id: &str, r: &Replay, json: &str, created_at: i6
     )
 }
 
-/// Store a server-recorded online (`Versus`) match. Same `replays` table — mode
+/// Store a server-recorded online (`Versus`) match. Same `replays` table, mode
 /// `"Online"`, `seed` = side A's seed; the `json` holds the full [`VersusReplay`]
-/// (two seeds + the ordered input stream), which the playback page detects.
+/// (two seeds and the ordered input stream), which the playback page detects.
 // 8 columns to persist; bundling them into a struct wouldn't earn its keep.
 #[allow(clippy::too_many_arguments)]
 fn db_insert_versus(
@@ -2054,7 +2059,7 @@ fn db_record_player_stats(
     p.high_lines = opt_max(p.high_lines, m.lines);
     p.high_funds = opt_max(p.high_funds, m.funds);
     p.longest_game = opt_max(p.longest_game, m.ticks);
-    // Kill/death *timing* records only count real top-outs — a forfeit's length is
+    // Kill/death timing records only count real top-outs; a forfeit's length is
     // arbitrary and would otherwise log a bogus "fastest kill" / "quickest death".
     if m.natural {
         if m.won {
@@ -2066,9 +2071,9 @@ fn db_record_player_stats(
     db_put_player(conn, &p)
 }
 
-/// One-time seed of the `players` table from `ratings.json` — only when the table
-/// is empty, so it never clobbers accumulated stats. mu/sigma/experience map to
-/// mu/sigma/games (the rating's experience IS its games-played count).
+/// One-time seed of the `players` table from `ratings.json`, run only when the
+/// table is empty so it never clobbers accumulated stats. mu/sigma/experience map
+/// to mu/sigma/games (the rating's experience is its games-played count).
 fn migrate_ratings_into_players(conn: &Connection, ratings: &HashMap<String, (f64, f64, u32)>) {
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM players", [], |r| r.get(0))
@@ -2140,11 +2145,13 @@ fn db_list(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Value>> {
     rows.collect()
 }
 
-/// Import any on-disk replay JSON files from `dir` into the DB at startup, so a
-/// plain JSON directory (e.g. a fly volume) folds into the indexed store.
-/// Idempotent (`INSERT OR IGNORE` by content id), best-effort — malformed files
-/// are skipped, and each file's mtime is preserved as `created_at` so ordering by
-/// recency survives the import. Returns the number newly inserted.
+/// Import legacy single-game `Replay` JSON files from `dir` into the DB at
+/// startup, so a plain JSON directory (e.g. a fly volume) folds into the indexed
+/// store. Only files that parse as [`Replay`] are imported; `VersusReplay` JSON
+/// is not handled here. Idempotent (`INSERT OR IGNORE` by content id),
+/// best-effort: malformed files are skipped, and each file's mtime is preserved
+/// as `created_at` so ordering by recency survives the import. Returns the number
+/// newly inserted.
 fn import_dir(conn: &Connection, dir: &str) -> usize {
     let rd = match std::fs::read_dir(dir) {
         Ok(r) => r,
@@ -2181,12 +2188,12 @@ fn import_dir(conn: &Connection, dir: &str) -> usize {
 /// Upper bound on a stored recording's `tick_count`. Storing a replay re-plays it
 /// to the end (`run_to_end` ticks the engine once per tick) to compute its line
 /// total, and `POST /api/replays` is unauthenticated with an attacker-controlled
-/// `tick_count` — so the replay work must be bounded. This ceiling is multiple hours
+/// `tick_count`, so the replay work must be bounded. This ceiling is multiple hours
 /// of play at the engine's tick rate, far above any genuine recording, while keeping
 /// the per-upload work finite.
 const MAX_REPLAY_TICKS: u32 = 1_000_000;
 
-/// `POST /api/replays` — store a recording, return `{"id": "..."}`. Validates
+/// `POST /api/replays`: store a recording, return `{"id": "..."}`. Validates
 /// it parses as a [`Replay`] first so we never persist junk.
 async fn post_replay(State(db): State<Db>, body: String) -> impl IntoResponse {
     let replay = match Replay::from_json(&body) {
@@ -2196,9 +2203,9 @@ async fn post_replay(State(db): State<Db>, body: String) -> impl IntoResponse {
     if replay.tick_count > MAX_REPLAY_TICKS {
         return (StatusCode::BAD_REQUEST, "replay too long").into_response();
     }
-    // Persisting computes the line total by deterministically replaying to the end —
-    // CPU work proportional to `tick_count`. Run it on the blocking pool so a burst of
-    // uploads can't starve the async runtime (matchmaking, WS heartbeats) of a worker.
+    // Persisting computes the line total by deterministically replaying to the end;
+    // CPU work is proportional to `tick_count`. Run it on the blocking pool so a burst
+    // of uploads can't starve the async runtime (matchmaking, WS heartbeats).
     let stored = tokio::task::spawn_blocking(move || {
         let id = replay_id(&body);
         let conn = db.lock().unwrap();
@@ -2211,7 +2218,7 @@ async fn post_replay(State(db): State<Db>, body: String) -> impl IntoResponse {
     }
 }
 
-/// `GET /api/replays/:id` — fetch a stored recording as JSON.
+/// `GET /api/replays/:id`: fetch a stored recording as JSON.
 async fn get_replay(State(db): State<Db>, Path(id): Path<String>) -> impl IntoResponse {
     if !valid_replay_id(&id) {
         return (StatusCode::BAD_REQUEST, "bad id").into_response();
@@ -2245,8 +2252,8 @@ async fn get_replay(State(db): State<Db>, Path(id): Path<String>) -> impl IntoRe
     }
 }
 
-/// `GET /replay/:id` — the pretty, shareable playback link. Redirects to the
-/// static player page, which fetches the recording from `/api/replays/:id`.
+/// `GET /replay/:id`: the shareable playback link. Redirects to the static
+/// player page, which fetches the recording from `/api/replays/:id`.
 async fn replay_page(Path(id): Path<String>) -> impl IntoResponse {
     if !valid_replay_id(&id) {
         return (StatusCode::BAD_REQUEST, "bad id").into_response();
@@ -2254,7 +2261,7 @@ async fn replay_page(Path(id): Path<String>) -> impl IntoResponse {
     Redirect::temporary(&format!("/www/replay.html?id={id}")).into_response()
 }
 
-/// `GET /api/replays` — list stored recordings (newest first, capped) with just
+/// `GET /api/replays`: list stored recordings (newest first, capped) with just
 /// enough metadata for the library browse page. Backs `library.html`.
 async fn list_replays(State(db): State<Db>) -> impl IntoResponse {
     let replays = {
@@ -2268,7 +2275,7 @@ async fn list_replays(State(db): State<Db>) -> impl IntoResponse {
 //
 // TrueSkill stays the rating engine; the leaderboard just presents it. Players
 // rank by conservative skill (μ−3σ, the same number matchmaking trusts), shown
-// as an Elo-styled figure — a cosmetic linear transform so the board reads like
+// as an Elo-styled figure, a cosmetic linear transform so the board reads like
 // a familiar ladder rather than raw TrueSkill units.
 
 /// Map conservative TrueSkill (μ−3σ, ~0 for a new player, rising as σ shrinks
@@ -2300,7 +2307,7 @@ fn rank_players(ratings: &HashMap<String, (f64, f64, u32)>) -> Vec<Value> {
     rows.into_iter().take(200).map(|(_, v)| v).collect()
 }
 
-/// `GET /api/leaderboard` — players ranked by conservative TrueSkill, Elo-styled.
+/// `GET /api/leaderboard`: players ranked by conservative TrueSkill, Elo-styled.
 /// Backs `leaderboard.html`.
 async fn leaderboard(State(state): State<Shared>) -> impl IntoResponse {
     let players = {
@@ -2310,8 +2317,8 @@ async fn leaderboard(State(state): State<Shared>) -> impl IntoResponse {
     Json(json!({ "players": players })).into_response()
 }
 
-/// `GET /api/debug/matches` — the live-match debug list: every in-progress bout
-/// (`match_id` + the two player names), so a spectator can pick one to watch
+/// `GET /api/debug/matches`: the live-match debug list; every in-progress bout
+/// (`match_id` and the two player names), so a spectator can pick one to watch
 /// (`?spectate=<match_id>`). Read-only; reflects [`App::bouts`].
 async fn debug_matches(State(state): State<Shared>) -> impl IntoResponse {
     let matches: Vec<Value> = {
@@ -2341,7 +2348,7 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Verify the `x-admin-token` header against `BT_ADMIN_TOKEN`. With that env unset the
-/// admin endpoints are **closed** (fail-closed — never a silently-open admin control).
+/// admin endpoints are closed (fail-closed; a missing token never silently opens them).
 fn admin_authed(headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
     let configured = std::env::var("BT_ADMIN_TOKEN").ok().filter(|t| !t.is_empty());
     let presented = headers.get("x-admin-token").and_then(|h| h.to_str().ok());
@@ -2352,12 +2359,12 @@ fn admin_authed(headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
     }
 }
 
-/// `POST /admin/drain` — begin a quiesce-in-place drain (called at the START of a
-/// deploy). Flips [`App::draining`] so no new matches start, and notifies every lobby
-/// (non-bout) client that matches are paused (they stay connected; the in-place
-/// restart reconnects them onto the new version). Returns the count of bouts still in
-/// flight — the deploy script polls `/api/debug/matches` until that hits zero, then
-/// replaces the machine, so no live game is killed. Idempotent.
+/// `POST /admin/drain`: begin a quiesce-in-place drain (called at the start of a
+/// deploy). Flips [`App::draining`] so no new matches start, and notifies every
+/// lobby (non-bout) client that matches are paused (they stay connected; the
+/// in-place restart reconnects them onto the new version). Returns the count of
+/// bouts still in flight; the deploy script polls `/api/debug/matches` until that
+/// hits zero, then replaces the machine, so no live game is killed. Idempotent.
 async fn admin_drain(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     if let Err(resp) = admin_authed(&headers) {
         return resp;
@@ -2375,9 +2382,9 @@ async fn admin_drain(State(state): State<Shared>, headers: HeaderMap) -> impl In
     (StatusCode::OK, format!("draining; {bouts} bout(s) in flight\n"))
 }
 
-/// `POST /admin/resume` — clear the drain flag (an `undrain`), used by the deploy
-/// script to roll back if the deploy aborts after draining, so the lobby isn't left
-/// paused. Tells lobby clients matches are open again. Idempotent.
+/// `POST /admin/resume`: clear the drain flag (an `undrain`), used by the deploy
+/// script to roll back if the deploy aborts after draining, so the lobby isn't
+/// left paused. Tells lobby clients matches are open again. Idempotent.
 async fn admin_resume(State(state): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     if let Err(resp) = admin_authed(&headers) {
         return resp;
@@ -2394,18 +2401,18 @@ async fn admin_resume(State(state): State<Shared>, headers: HeaderMap) -> impl I
     (StatusCode::OK, "resumed\n".to_string())
 }
 
-/// `POST /admin/grant` — a gated dev tool to inject a weapon and/or funds into a
-/// LIVE online bout, so a developer can exercise the cross-player weapon relay with
+/// `POST /admin/grant`: a gated dev tool to inject a weapon and/or funds into a
+/// live online bout, so a developer can exercise the cross-player weapon relay with
 /// a single `curl` instead of two coordinated browser tabs. Body JSON:
 ///   `{ "match_id": "<string>", "side": "A"|"B", "weapon": <0..=33 optional>, "funds": <i64 optional> }`
 /// At least one of `weapon`/`funds` must be present.
 ///
-/// SECURITY: same fail-closed gate as the other `/admin/*` endpoints — `admin_authed`
-/// first (403 if the `x-admin-token` header is missing/wrong, or `BT_ADMIN_TOKEN` is
-/// unset). It injects only a weapon/funds GRANT (never board state or an arbitrary
-/// input), routed through the bout's own task, so there's no determinism surface: the
-/// grant is NOT recorded into the replay's input stream (see [`BoutControl::DebugGrant`]
-/// and [`Bout::debug_grant`]).
+/// Uses the same fail-closed gate as the other `/admin/*` endpoints (`admin_authed`
+/// first, 403 if the `x-admin-token` header is missing/wrong, or `BT_ADMIN_TOKEN`
+/// is unset). It injects only a weapon/funds grant (never board state or an
+/// arbitrary input), routed through the bout's own task, so there is no determinism
+/// surface: the grant is not recorded into the replay's input stream (see
+/// [`BoutControl::DebugGrant`] and [`Bout::debug_grant`]).
 async fn admin_grant(State(state): State<Shared>, headers: HeaderMap, body: String) -> impl IntoResponse {
     if let Err((code, msg)) = admin_authed(&headers) {
         return (code, msg).into_response();
@@ -2447,7 +2454,7 @@ async fn admin_grant(State(state): State<Shared>, headers: HeaderMap, body: Stri
     // Look up the LIVE bout and hand the grant to its task (out-of-band control
     // channel), so the mutation happens inside the bout's own loop and never races
     // the tick. try_send (not await): we never hold the App lock across a send, and a
-    // full control channel means the bout is wedged — surface that rather than block.
+    // full control channel means the bout is wedged; surface that rather than block.
     let control = {
         let app = state.lock().await;
         app.bouts.get(&match_id).map(|h| h.control.clone())
@@ -2481,7 +2488,7 @@ async fn admin_grant(State(state): State<Shared>, headers: HeaderMap, body: Stri
     .into_response()
 }
 
-/// `POST /api/identity` with `{"name":"<str>"}` — mints an HS256 identity token
+/// `POST /api/identity` with `{"name":"<str>"}`: mints an HS256 identity token
 /// `{"token":"<jwt>"}` carrying the sanitized name. Empty/whitespace names are
 /// rejected; over-long names are capped to [`identity::MAX_NAME_LEN`].
 async fn post_identity(body: String) -> impl IntoResponse {
@@ -2496,7 +2503,7 @@ async fn post_identity(body: String) -> impl IntoResponse {
     Json(json!({ "token": token })).into_response()
 }
 
-/// `GET /api/player/:name` — a player's stats. An unknown player returns a fresh,
+/// `GET /api/player/:name`: a player's stats. An unknown player returns a fresh,
 /// zeroed record (200, not 404) so the lobby can show a brand-new player.
 async fn player_profile(State(db): State<Db>, Path(name): Path<String>) -> impl IntoResponse {
     let stats = {
@@ -2516,7 +2523,7 @@ async fn track_http(
     next.run(req).await
 }
 
-/// Paths whose responses carry `Cache-Control: no-cache` — the page, the compiled
+/// Paths whose responses carry `Cache-Control: no-cache`: the page, the compiled
 /// browser bundle, the wasm, and assets. API/WS/admin paths are left untouched.
 fn is_static_path(path: &str) -> bool {
     path == "/"
@@ -2526,12 +2533,13 @@ fn is_static_path(path: &str) -> bool {
 }
 
 /// Make browsers REVALIDATE static assets on every load instead of serving a
-/// heuristically-cached copy — so a deploy actually reaches clients rather than a
+/// heuristically-cached copy, so a deploy actually reaches clients rather than a
 /// stale `main.js` lingering (notably on mobile Safari, which caches aggressively).
 /// `no-cache` means "you may store it, but revalidate before using": ServeDir sends
 /// `Last-Modified`, so the conditional request gets a cheap 304 when nothing changed
-/// and a fresh 200 when it did — correctness without re-downloading the wasm every
-/// time. Scoped to [`is_static_path`]; dynamic API/WS responses are unaffected.
+/// and a fresh 200 when it did. This gives correctness without re-downloading the
+/// wasm every time. Scoped to [`is_static_path`]; dynamic API/WS responses are
+/// unaffected.
 async fn static_no_cache(
     req: axum::extract::Request,
     next: axum::middleware::Next,
@@ -2545,17 +2553,18 @@ async fn static_no_cache(
     res
 }
 
-/// Boot the server: open the replay DB (importing any on-disk JSON), build the
-/// shared state, wire the axum router (the `/ws` matchmaking socket, the replay /
-/// leaderboard / player / identity / admin / metrics endpoints, then static files
-/// as a fallback), and serve forever. The two middleware layers add a
-/// revalidate-on-load cache policy to static assets and a request counter; the
-/// idle-decay task keeps the live "players online" count honest as clients go
-/// quiet. Binds the IPv6 any-address so the same listener serves the public site,
-/// fly's IPv4 proxy, and the IPv6-only 6PN network the region bots reach us on.
+/// Boot the server: open the replay DB (importing legacy `Replay` JSON from
+/// `REPLAYS_DIR` if present), build the shared state, wire the axum router (the
+/// `/ws` matchmaking socket, the replay / leaderboard / player / identity /
+/// admin / metrics endpoints, then static files as a fallback), and serve
+/// forever. The two middleware layers add a revalidate-on-load cache policy to
+/// static assets and a request counter; the idle-decay task keeps the live
+/// "players online" count honest as clients go quiet. Binds the IPv6 any-address
+/// so the same listener serves the public site, fly's IPv4 proxy, and the
+/// IPv6-only 6PN network the region bots reach us on.
 #[tokio::main]
 async fn main() {
-    // Error tracking — inert until SENTRY_DSN is set (a fly secret). The guard is
+    // Error tracking, inert until SENTRY_DSN is set (a fly secret). The guard is
     // held for the whole process; the `panic` integration's hook captures crashes
     // (including from spawned tasks). No-op + zero overhead when unconfigured.
     let _sentry_guard = std::env::var("SENTRY_DSN").ok().filter(|d| !d.is_empty()).map(|dsn| {
@@ -2632,9 +2641,9 @@ async fn main() {
         .with_state(state);
 
     // Bind the IPv6 any-address. On Linux this is dual-stack (IPV6_V6ONLY=0 by
-    // default), so it serves BOTH the public site (the fly proxy reaches us over
-    // IPv4) AND fly's private 6PN network, which is IPv6-ONLY — that 6PN path is
-    // how the region bots reach us at ws://battletris.internal:8080. A 0.0.0.0
+    // default), so it serves both the public site (the fly proxy reaches us over
+    // IPv4) and fly's private 6PN network (IPv6-only). That 6PN path is how the
+    // region bots reach us at ws://battletris.internal:8080. A 0.0.0.0
     // (IPv4-only) bind would leave the 6PN port closed and the bots unable to connect.
     let addr = format!("[::]:{port}");
     let listener = tokio::net::TcpListener::bind(&addr)
@@ -2646,7 +2655,7 @@ async fn main() {
 
 /// Tests for the matchmaking/settlement "between-the-game" layer: rating updates,
 /// pairing eligibility, the drain gate, presence restoration, challenge routing,
-/// and the replay/counters DB helpers — exercised against an in-memory SQLite and
+/// and the replay/counters DB helpers, exercised against an in-memory SQLite and
 /// hand-built [`App`] state, with no live sockets.
 #[cfg(test)]
 mod tests {

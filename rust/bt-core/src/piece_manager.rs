@@ -1,10 +1,10 @@
-//! Piece selection — the faithful analogue of `BTPieceManager`
+//! Piece selection, the faithful analogue of `BTPieceManager`
 //! (`usr/src/game/BTPieceManager.{H,C}`).
 //!
 //! The next piece is chosen by rejection sampling against a per-piece "keep
 //! probability" table: roll a uniform id, keep it with probability
 //! `keep_prob[id]`, re-roll otherwise. Expressing the distribution as a table of
-//! probabilities is what makes the stream-altering weapons trivial — each just
+//! probabilities makes the stream-altering weapons trivial: each just
 //! rewrites a few entries (zeroing the standard pieces and enabling the weird
 //! ones for Feared Weird, zeroing the die for No Dice, and so on) and selection
 //! is unchanged.
@@ -25,16 +25,16 @@ use crate::constants::*;
 pub struct PieceManager {
     /// `keep_prob_[BT_MAX_PIECES+1]`.
     keep_prob: [f64; 19],
-    /// `hap_on_` — pending forced happy pieces (Have a Nice Day).
+    /// `hap_on_`: pending forced happy pieces (Have a Nice Day).
     hap_on: i32,
-    /// `broken_` — Broken Record active.
+    /// `broken_`: Broken Record active.
     broken: bool,
-    /// `old_piece_` — last piece id produced (for Broken Record repeats).
+    /// `old_piece_`: last piece id produced (for Broken Record repeats).
     old_piece: i32,
 }
 
 impl PieceManager {
-    /// Raw internal state — for full-game keyframe serialization (client-server
+    /// Raw internal state, for full-game keyframe serialization (client-server
     /// reconciliation). `(keep_prob, hap_on, broken, old_piece)`. Pair with
     /// [`PieceManager::set_raw`].
     pub fn raw(&self) -> ([f64; 19], i32, bool, i32) {
@@ -49,7 +49,7 @@ impl PieceManager {
         self.old_piece = old_piece;
     }
 
-    /// `BTPieceManager::BTPieceManager` — install the default keep
+    /// `BTPieceManager::BTPieceManager`: install the default keep
     /// probabilities (standard pieces 0.21, die 1.0, happy & long-dong 0.02,
     /// weird/4x4 0.0).
     pub fn new() -> PieceManager {
@@ -81,7 +81,7 @@ impl PieceManager {
         }
     }
 
-    /// `BT_START` handling in `BTPieceManager::receive` — reset to defaults.
+    /// `BT_START` handling in `BTPieceManager::receive`: reset to defaults.
     pub fn reset(&mut self) {
         // Standard pieces (1..=7): BT_DEFAULT_KEEP_PROB
         for i in BT_EL_PIECE..=BT_BOX_PIECE {
@@ -106,7 +106,7 @@ impl PieceManager {
         self.hap_on = 0;
     }
 
-    /// `BTPieceManager::create` — select and construct the next piece at
+    /// `BTPieceManager::create`: select and construct the next piece at
     /// `(x, y)`.
     ///
     /// Selection (faithful, incl. RNG consumption order):
@@ -119,7 +119,7 @@ impl PieceManager {
     /// ONLY when `i == BT_DIE_PIECE` (matches `BTDiePiece::construct`).
     pub fn create(&mut self, rng: &mut Rng, x: i32, y: i32) -> Piece {
         // `!broken || (broken && X)` simplifies to `!broken || X` (X = the lrand48 draw);
-        // identical result AND RNG-consumption (lrand48 evaluated iff broken) — clippy::nonminimal_bool.
+        // identical result AND RNG-consumption (lrand48 evaluated iff broken); clippy::nonminimal_bool.
         let i = if self.hap_on == 0 && (!self.broken || rng.lrand48() % BT_BROKEN_PROB == 0) {
             // Standard piece selection via rejection sampling
             loop {
@@ -131,7 +131,7 @@ impl PieceManager {
         } else if self.hap_on == 0 && self.broken {
             // Broken Record: repeat the old piece. Guard the degenerate case
             // where Broken activated before any piece spawned (old_piece still
-            // 0, an invalid id) — fall back to a valid piece instead of
+            // 0, an invalid id): fall back to a valid piece instead of
             // panicking in `from_id`. Unreachable in real play (a Game always
             // spawns first), so this never changes RNG order or a live game.
             if self.old_piece != 0 {

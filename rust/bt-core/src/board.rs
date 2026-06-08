@@ -1,4 +1,4 @@
-//! The board grid and its mechanics — the faithful analogue of
+//! The board grid and its mechanics, the faithful analogue of
 //! `BTBoardManager` (`usr/src/game/BTBoardManager.{H,C}`).
 //!
 //! Owned by the main port (correctness-critical). The grid is `width * height`
@@ -29,13 +29,13 @@ pub struct Board {
     pub height: i32,
     /// Row-major: index = `y * width + x`. `None` = empty.
     cells: Vec<Option<Cell>>,
-    /// `BTActive[]` — active-weapon flags consulted by mechanics here.
+    /// `BTActive[]`: active-weapon flags consulted by mechanics here.
     pub active: ActiveFlags,
-    /// `upside_` — board currently flipped (Upbyside).
+    /// `upside_`: board currently flipped (Upbyside).
     pub upside: bool,
-    /// `computer_` — true for the AI's board (changes a few branches).
+    /// `computer_`: true for the AI's board (changes a few branches).
     pub computer: bool,
-    /// `idiot_` / `reason_` — set by `landed`/`check_lines`, drained by the game.
+    /// `idiot_` / `reason_`: set by `landed`/`check_lines`, drained by the game.
     pub idiot: bool,
     pub reason: i16,
     /// Board indices filled during the current placement (`new_fill_`), used by
@@ -44,7 +44,7 @@ pub struct Board {
 }
 
 impl Board {
-    /// `BTBoardManager::BTBoardManager` — an empty board.
+    /// `BTBoardManager::BTBoardManager`: an empty board.
     pub fn new(width: i32, height: i32, computer: bool) -> Board {
         Board {
             width,
@@ -100,7 +100,7 @@ impl Board {
 
     /// `BTBoardManager::occupied` (inline, `BTBoardManager.H:71-86`).
     ///
-    /// Returns true if `(x, y)` is blocked — out of bounds or filled. With the
+    /// Returns true if `(x, y)` is blocked: out of bounds or filled. With the
     /// FALL_OUT weapon active the floor/ceiling open up except for a ledge of
     /// width `BT_FALL_OUT_LEDGE` at each side.
     pub fn occupied(&self, x: i32, y: i32) -> bool {
@@ -128,7 +128,7 @@ impl Board {
         false
     }
 
-    /// `BTBoardManager::fill` — place `cell` at `(x, y)` and record it for idiot
+    /// `BTBoardManager::fill`: place `cell` at `(x, y)` and record it for idiot
     /// detection. A box that lands off-board (e.g. via FALL_OUT) is discarded.
     pub fn fill(&mut self, x: i32, y: i32, cell: Cell) {
         if self.in_bounds(x, y) {
@@ -136,7 +136,7 @@ impl Board {
             self.cells[i] = Some(cell);
             self.new_fill.push(i);
         }
-        // else: fell off the board — discard (C++ `delete new_box`).
+        // else: fell off the board; discard (C++ `delete new_box`).
     }
 
     /// Raise the idiot (heckle) flag with `reason`; the game drains it after the
@@ -146,7 +146,7 @@ impl Board {
         self.reason = reason;
     }
 
-    /// `BTBoardManager::flushIdiot` — read & clear the idiot flag, returning the
+    /// `BTBoardManager::flushIdiot`: read and clear the idiot flag, returning the
     /// reason if one was set.
     pub fn flush_idiot(&mut self) -> Option<i16> {
         let out = if self.idiot { Some(self.reason) } else { None };
@@ -154,7 +154,7 @@ impl Board {
         out
     }
 
-    /// `BTBoardManager::clear` — empty the board.
+    /// `BTBoardManager::clear`: empty the board.
     pub fn clear(&mut self) {
         for c in self.cells.iter_mut() {
             *c = None;
@@ -175,7 +175,7 @@ impl Board {
         None
     }
 
-    /// `BTBoardManager::landed` — "bad move" (idiot) detection after a piece
+    /// `BTBoardManager::landed`: "bad move" (idiot) detection after a piece
     /// locks at `(x, y)`: an empty square surrounded on left, right and logical
     /// top by boxes, where at least one of those was just placed this turn.
     pub fn landed(&mut self, x: i32, y: i32) {
@@ -220,7 +220,7 @@ impl Board {
         self.new_fill.clear();
     }
 
-    /// `BTBoardManager::checkLines` — detect & clear full lines, award funds
+    /// `BTBoardManager::checkLines`: detect and clear full lines, award funds
     /// (`value * lines`), and set idiot flags (missed-smiley / near-death).
     pub fn check_lines(&mut self) -> LineClear {
         let force = self.is_active(WeaponToken::Force);
@@ -299,7 +299,7 @@ impl Board {
             return LineClear::default();
         }
 
-        // Cleared at least one line — not an idiot after all.
+        // Cleared at least one line; unset the idiot flag.
         self.idiot = false;
         let funds = value * lines;
         LineClear {
@@ -309,7 +309,7 @@ impl Board {
         }
     }
 
-    /// `BTBoardManager::removeLine` — drop the board into `line` over columns
+    /// `BTBoardManager::removeLine`: drop the board into `line` over columns
     /// `[x1, x2)` (negative `x2` means full width). Honors FORCE (no shift),
     /// BOTTLE (narrow to the neck) and UPBYSIDE (shift the other way).
     fn remove_line(&mut self, line: i32, mut x1: i32, mut x2: i32) {
@@ -373,7 +373,7 @@ impl Board {
         }
     }
 
-    /// `BTBoardManager::insertLine` — a rise-up / Lawyers' Delite garbage line:
+    /// `BTBoardManager::insertLine`: a rise-up / Lawyers' Delite garbage line.
     /// push the stack up (or down when upside-down) and insert a solid row of
     /// green boxes with one random gap. Garbage boxes carry no funds value.
     pub fn insert_line(&mut self, rng: &mut Rng) {
@@ -427,13 +427,13 @@ impl Board {
     }
 
     // -----------------------------------------------------------------------
-    // Weapon effects on the board — `BTBoardManager::receive` (BT_WPN_ON /
+    // Weapon effects on the board, `BTBoardManager::receive` (BT_WPN_ON /
     // BT_WPN_OFF). The active-flag bookkeeping is done by [`Board::set_active`];
     // these apply the one-shot board mutation.
     // -----------------------------------------------------------------------
 
-    /// Set/clear an active-weapon flag the board logic consults (`BTActive[]` is
-    /// boolean in the original, not a counter).
+    /// Set/clear an active-weapon flag the board logic consults. `BTActive[]` is
+    /// boolean in the original.
     pub fn set_active(&mut self, token: WeaponToken, on: bool) {
         self.active.set(token, on);
     }
@@ -451,7 +451,7 @@ impl Board {
         std::mem::swap(&mut self.cells, &mut other.cells);
     }
 
-    /// Exchange the contents of two squares — the primitive the board flips are
+    /// Exchange the contents of two squares, the primitive the board flips are
     /// built from.
     fn swap(&mut self, x1: i32, y1: i32, x2: i32, y2: i32) {
         let a = self.get(x1, y1);
@@ -460,7 +460,7 @@ impl Board {
         self.set(x2, y2, a);
     }
 
-    /// `BTBoardManager::flipOnHoriz` — mirror top↔bottom (Upbyside).
+    /// `BTBoardManager::flipOnHoriz`: mirror top↔bottom (Upbyside).
     fn flip_horiz(&mut self) {
         for i in 0..self.height / 2 {
             for j in 0..self.width {
@@ -469,7 +469,7 @@ impl Board {
         }
     }
 
-    /// `BTBoardManager::flipOnVert` — mirror left↔right (Flip Out).
+    /// `BTBoardManager::flipOnVert`: mirror left↔right (Flip Out).
     fn flip_vert(&mut self) {
         for i in 0..self.width / 2 {
             for j in 0..self.height {
@@ -485,7 +485,7 @@ impl Board {
     /// rows, which only Bottle can do: planting its neck walls can finish a
     /// partially filled neck row, so it runs `check_lines` after the walls go up
     /// (`BTBoardManager.C:440`). Those funds and lines are real earnings, so the
-    /// return value is propagated rather than swallowed — the caller
+    /// return value is propagated. The caller
     /// (`Game::apply_weapon_on`) credits them exactly like a normal clear. Every
     /// other weapon returns the empty clear.
     pub fn apply_weapon(&mut self, token: WeaponToken, rng: &mut Rng) -> LineClear {
@@ -501,14 +501,14 @@ impl Board {
             WeaponToken::PieceIt | WeaponToken::Bug => {
                 // A box at a random empty spot in the middle two quarters
                 // (`BTBoardManager.C:307-310`: `do { i=rand%w; j=...; } while
-                // (occupied)`). The original's rejection loop is UNBOUNDED — it spins
+                // (occupied)`). The original's rejection loop is UNBOUNDED: it spins
                 // forever if the middle-half band has no empty cell. In real play the
                 // band (w * h/2 cells) holds far more than the ~4 a piece deposits, so
                 // there is always an empty slot; but a crafted board import / keyframe
                 // could pack the band and hang the server. We GUARD only that case: if
                 // (and only if) the band has no empty cell, no-op; otherwise run the
                 // EXACT original unbounded rejection loop. This preserves the original
-                // RNG draw sequence byte-for-byte in every state with a free slot —
+                // RNG draw sequence byte-for-byte in every state with a free slot.
                 // the loop is only entered when it is guaranteed to terminate.
                 let q1 = self.height / 4;
                 let band_has_empty = (q1..q1 + self.height / 2)
@@ -586,7 +586,7 @@ impl Board {
                 // top, when upside-down) line over the non-ledge columns
                 // (BTBoardManager.C:414). The direction test is
                 // `!Upbyside || computer` rather than a bare `!upside` because a
-                // computer board is never visually flipped — so even with
+                // computer board is never visually flipped, so even with
                 // Upbyside active the AI's board still falls out from the BOTTOM.
                 // (`remove_line` / `insert_line` gate on `computer` for the same
                 // reason.)

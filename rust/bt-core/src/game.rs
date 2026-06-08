@@ -1,15 +1,14 @@
-//! The single-player game state machine — a faithful, deterministic port of the
+//! The single-player game state machine, a faithful, deterministic port of the
 //! falling/sliding/locking core of `BTGame` (`usr/src/game/BTGame.C`).
 //!
-//! Time is virtual, not real. Instead of driving the game from OS timeouts, the
-//! host advances a virtual clock with [`Game::tick`] by an explicit `dt_ms` and
-//! feeds inputs between ticks. That is what makes the engine reproducible: the
-//! same seed and the same `(input, dt)` sequence always produce the same state,
-//! which replays, property tests, and server reconciliation all depend on.
+//! Time is virtual. The host advances a virtual clock with [`Game::tick`] by an
+//! explicit `dt_ms` and feeds inputs between ticks. The same seed and the same
+//! `(input, dt)` sequence always produce the same state, which replays, property
+//! tests, and server reconciliation all depend on.
 //!
 //! The core loop is spawn → fall → slide → lock → clear lines → award funds →
 //! spawn → top-out for a single board. Weapons, the bazaar, and the two-player
-//! relay build on the score/funds economy modeled here — see the `op_*` mirror
+//! relay build on the score/funds economy modeled here. See the `op_*` mirror
 //! fields and [`GameEvent`], the push channel by which a tick reports its
 //! relay-visible signals (the host also pulls state through the getters,
 //! `render_ids`, and the keyframe codec).
@@ -27,8 +26,8 @@ use crate::weapons::{weapon_table, ActiveFlags, WeaponToken, BT_MAX_WEAPONS};
 ///
 /// It holds both this player's own totals AND a mirror of the opponent's
 /// (`op_*`). The mirror is kept current by the relay so this player's local
-/// logic — the bazaar trigger (combined lines) and Lawyers' Delite (reacting to
-/// the opponent's lines) — can read the opponent's standing without reaching
+/// logic (the bazaar trigger on combined lines and Lawyers' Delite reacting to
+/// the opponent's lines) can read the opponent's standing without reaching
 /// across into the other game.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Score {
@@ -38,21 +37,21 @@ pub struct Score {
     pub op_score: i64,
     /// This player's total lines cleared.
     pub lines: i64,
-    /// Mirror of the opponent's `lines` — combined with `lines` drives the
+    /// Mirror of the opponent's `lines`. Combined with `lines`, it drives the
     /// shared bazaar countdown.
     pub op_lines: i64,
-    /// This player's current funds balance — earned from clears (die/happy
+    /// This player's current funds balance, earned from clears (die/happy
     /// values × line multipliers) and spent/seized/negated by the bazaar and the
     /// economy weapons.
     pub funds: i64,
-    /// Mirror of the opponent's `funds`. Display-only — never read by the
-    /// simulation — so the authoritative server may withhold it from a client.
+    /// Mirror of the opponent's `funds`. Display-only and never read by the
+    /// simulation, so the authoritative server may withhold it from a client.
     pub op_funds: i64,
 }
 
 /// Which timer is live for the current piece. The drop clock and the slide
-/// (lock-delay) clock are mutually exclusive — a piece is either falling under
-/// gravity or running out its lock delay, never both — so one enum captures the
+/// (lock-delay) clock are mutually exclusive: a piece is either falling under
+/// gravity or running out its lock delay, never both at once, so one enum captures the
 /// whole timing state instead of two independently armed timers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
@@ -75,21 +74,21 @@ pub enum GameEvent {
     Locked { lines: i32, value: i32, funds: i32 },
     /// An "airslide" was performed (`BT_AIRSLIDE`).
     Airslide,
-    /// This player launched a weapon — the relay must deliver it to the
+    /// This player launched a weapon; the relay must deliver it to the
     /// opponent (where it becomes `BT_WPN_ON`). Mirrors `BT_WPN_LAUNCH`.
     WeaponLaunched(WeaponToken),
-    /// This player's score changed — the relay sends it to the opponent as
+    /// This player's score changed. The relay sends it to the opponent as
     /// `BT_OP_SCORE` (drives Lawyers' Delite, taxes, the bazaar trigger).
     Scored { score: i64, lines: i64, funds: i64 },
     /// A signed funds transfer from this (victim) player to the opponent, which
     /// the relay adds to the attacker's balance: Mondale's 30% cut of
-    /// newly-banked funds, or Keating's full seizure. It conserves money — the
-    /// attacker's balance changes by exactly what this player's did — and is
+    /// newly-banked funds, or Keating's full seizure. It conserves money: the
+    /// attacker's balance changes by exactly what this player's did, and is
     /// signed, so seizing a player who is in the red (e.g. after a Reagan)
     /// transfers a negative amount. The attacker is always this player's
     /// opponent, so the relay routes it to the other side.
     FundsStolen(i64),
-    /// Combined lines crossed a multiple of 20 — open the weapons bazaar
+    /// Combined lines crossed a multiple of 20, opening the weapons bazaar
     /// (`BT_START_BAZ`).
     EnterBazaar,
     /// An "idiot" signal after a lock (`BT_IDIOT`): bad move / near death /
@@ -106,7 +105,7 @@ pub struct Game {
     board: Board,
     /// Source of the next piece (owns the keep-probability distribution).
     pieces: PieceManager,
-    /// The deterministic RNG — every random draw in the whole game comes through
+    /// The deterministic RNG. Every random draw in the whole game comes through
     /// here, which is what makes a seed fully reproducible.
     rng: Rng,
     score: Score,
@@ -220,7 +219,7 @@ impl Game {
     pub fn board(&self) -> &Board {
         &self.board
     }
-    /// Mutable board access — for the cross-player relay (Swap), sandbox/test
+    /// Mutable board access, for the cross-player relay (Swap), sandbox/test
     /// setup, and tooling. Normal gameplay goes through the typed methods.
     pub fn board_mut(&mut self) -> &mut Board {
         &mut self.board
@@ -233,7 +232,7 @@ impl Game {
     pub fn current_piece(&self) -> Option<&Piece> {
         self.current.as_ref()
     }
-    /// The falling piece's board origin — kept beside the piece's own copy (see
+    /// The falling piece's board origin, kept beside the piece's own copy (see
     /// the `x`/`y` field note), and the position collision/locking trust.
     pub fn piece_pos(&self) -> (i32, i32) {
         (self.x, self.y)
@@ -253,7 +252,7 @@ impl Game {
 
     // ---- lifecycle ---------------------------------------------------------
 
-    /// `BTGame::startGame` — spawn the first piece and arm the drop timer.
+    /// `BTGame::startGame`: spawn the first piece and arm the drop timer.
     fn start_game(&mut self) {
         self.x = self.def_x;
         self.y = self.def_y;
@@ -325,7 +324,7 @@ impl Game {
         }
     }
 
-    /// `BTGame::drop` — move the piece down one row, or begin a slide if blocked.
+    /// `BTGame::drop`: move the piece down one row, or begin a slide if blocked.
     fn drop_step(&mut self) {
         if let Some(mut p) = self.current.take() {
             if !p.move_to(&self.board, self.x, self.y + self.delta_y) {
@@ -338,17 +337,17 @@ impl Game {
         }
     }
 
-    /// `BTGame::startSlide` — switch to the slide timer (the lock delay).
+    /// `BTGame::startSlide`: switch to the slide timer (the lock delay).
     fn start_slide(&mut self) {
         self.sliding = 1;
-        // BTGame::startSlide: BT_SLIDE_TIME * (1 - BTActive[NO_SLIDE]) — i.e. 0
+        // BTGame::startSlide: BT_SLIDE_TIME * (1 - BTActive[NO_SLIDE]), i.e. 0
         // (instant lock) while No Slide is active.
         self.slide_time = BT_SLIDE_TIME * (1 - self.weapons.is_active(WeaponToken::NoSlide) as i32);
         self.phase = Phase::Sliding;
         self.slide_accum = 0;
     }
 
-    /// `BTGame::place` — slide-expiry handler: lock the piece (and spawn the
+    /// `BTGame::place`: slide-expiry handler. Lock the piece (and spawn the
     /// next) if it still can't move down, otherwise resume falling.
     fn place(&mut self, force: bool) {
         let mut p = match self.current.take() {
@@ -394,7 +393,7 @@ impl Game {
             // board -> ... -> score_manager -> ... -> weapon_manager (BTGame.C:400-406),
             // so BTScoreManager (the bazaar trigger) sees the line BEFORE
             // BTWeaponManager (duration expiry). Match that order: open the bazaar
-            // FIRST, then expire durations — otherwise a single line that both opens
+            // FIRST, then expire durations. Otherwise a single line that both opens
             // the bazaar and expires Carter would charge BASE prices in the bazaar
             // when the original charges the still-DOUBLED Carter price (the curse
             // hasn't lifted yet at bazaar-open). Then publish our score.
@@ -416,7 +415,7 @@ impl Game {
         } else {
             // It can fall again (it was slid over a hole during the lock delay):
             // resume falling instead of locking. Advance BOTH the game's position
-            // and the piece's own — collision/locking read self.x/y while render
+            // and the piece's own. Collision/locking read self.x/y while render
             // and land() read p.x/y, and a piece that locks must sit exactly where
             // it was drawn, so the two are kept in lockstep here.
             self.y += self.delta_y;
@@ -478,7 +477,7 @@ impl Game {
         }
     }
 
-    /// `BTGame::beginDrop` — engage fast drop and award the human hard-drop
+    /// `BTGame::beginDrop`: engage fast drop and award the human hard-drop
     /// bonus (`BT_BOARD_HGT - y_`, BTGame.C:729): the further the piece still
     /// had to fall, the more it's worth.
     pub fn begin_drop(&mut self) {
@@ -561,7 +560,7 @@ impl Game {
         self.arsenal.quantity(i)
     }
 
-    /// `BTWeaponManager::launchWeapon` — fire arsenal slot `slot` (0-based) at
+    /// `BTWeaponManager::launchWeapon`: fire arsenal slot `slot` (0-based) at
     /// the opponent (emits [`GameEvent::WeaponLaunched`]).
     pub fn launch_weapon(&mut self, slot: usize) {
         if self.in_bazaar || self.phase == Phase::Over {
@@ -579,7 +578,7 @@ impl Game {
         self.pending.push(token);
     }
 
-    /// `BT_OP_SCORE` — the opponent's score changed. Updates the mirror, applies
+    /// `BT_OP_SCORE`: the opponent's score changed. Updates the mirror, applies
     /// Lawyers' Delite, and advances the bazaar trigger.
     pub fn receive_op_score(&mut self, op_score: i64, op_lines: i64, op_funds: i64) {
         let old_op_lines = self.score.op_lines;
@@ -594,7 +593,7 @@ impl Game {
         self.update_bazaar();
     }
 
-    /// Credit (or debit) this player's funds directly — the relay's hook for
+    /// Credit (or debit) this player's funds directly. This is the relay's hook for
     /// paying the attacker the funds a Mondale/Keating victim lost (see
     /// [`GameEvent::FundsStolen`]). Emits a `Scored` so the gain propagates to
     /// the opponent's mirror like any other funds change.
@@ -634,7 +633,7 @@ impl Game {
     /// Sell `token` back in the bazaar (the "Remove" button): refund its
     /// effective price and remove one from the arsenal. Returns true on success.
     ///
-    /// The refund is [`Self::bazaar_price`], which — like the buy price — reflects
+    /// The refund is [`Self::bazaar_price`], which (like the buy price) reflects
     /// the current Carter multiplier (BTBazaar.C:458), so a Carter-cursed sale
     /// refunds at the doubled price.
     pub fn sell_weapon(&mut self, token: WeaponToken) -> bool {
@@ -671,7 +670,7 @@ impl Game {
 
     /// Swap Meet (`BTGame.C:492-534`): exchange this game's board grid with
     /// `other`'s, after both sides drop Bottle and Upbyside. Only the grid
-    /// moves — active flags, durations, funds, score and the falling piece all
+    /// moves; active flags, durations, funds, score and the falling piece all
     /// stay with their player.
     pub fn swap_board_with(&mut self, other: &mut Game) {
         for t in [WeaponToken::Bottle, WeaponToken::Upbyside] {
@@ -701,7 +700,7 @@ impl Game {
     /// The playfield as a flat `width*height` grid of render ids (row-major),
     /// with the falling piece overlaid; empty squares are `-2` (matching the
     /// front-end's `EMPTY` sentinel / `WasmGame::render_grid`). This is the form
-    /// the canvas draws — used by the server's spy reveal (a degraded copy).
+    /// the canvas draws, used by the server's spy reveal (a degraded copy).
     pub fn render_ids(&self) -> Vec<i32> {
         let (w, h) = (self.board.width, self.board.height);
         let mut grid = vec![-2i32; (w * h) as usize];
@@ -789,10 +788,10 @@ impl Game {
     // ---- full-game keyframe (client-server reconciliation) ----------------
     // Server-authoritative online play needs a COMPLETE engine snapshot the
     // client can restore and then re-simulate its unacked inputs on top of.
-    // `export_board` alone is only a render view — it omits the falling piece,
+    // `export_board` alone is only a render view: it omits the falling piece,
     // phase/timers, the RNG + piece-manager state, and the weapon flags/pending
     // queue, all of which drive the deterministic stream. `snapshot`/`restore`
-    // capture the whole `Game` as a flat `i64` codec (no serde — bt-core stays
+    // capture the whole `Game` as a flat `i64` codec (no serde; bt-core stays
     // dependency-free), versioned for forward-compat.
 
     /// Keyframe format version (bump on any layout change).
@@ -878,7 +877,7 @@ impl Game {
     /// Restore the entire game state from a [`Self::snapshot`] keyframe. Reads
     /// into locals first and only commits if the keyframe is well-formed and
     /// fully consumed, so a malformed/truncated keyframe leaves `self` untouched
-    /// and returns `false` (never panics — the cursor is bounds-checked).
+    /// and returns `false`. The cursor is bounds-checked, so a malformed keyframe never panics.
     pub fn restore(&mut self, data: &[i64]) -> bool {
         let mut c = Cur { d: data, i: 0, ok: true };
         if c.next() != Self::KEYFRAME_VERSION {
@@ -1045,7 +1044,7 @@ impl Game {
         true
     }
 
-    /// [`Self::snapshot`] as little-endian bytes — the wire form for the
+    /// [`Self::snapshot`] as little-endian bytes, the wire form for the
     /// client-server keyframe. (The i64 stream includes `keep_prob` f64
     /// bit-patterns that exceed 2^53, so it can't ride as JSON numbers; bytes
     /// round-trip exactly and the transport sends them as a `Uint8Array`.)
@@ -1057,8 +1056,8 @@ impl Game {
     /// [`Self::snapshot_bytes`] except `op_funds` (this player's mirror of the
     /// opponent's funds) is zeroed. Funds are spy-revealed in the original, so
     /// the authoritative server must not leak the opponent's funds to a client
-    /// through the reconciliation keyframe. `op_funds` is display-only — the
-    /// client's simulation never reads it — so zeroing it is harmless to
+    /// through the reconciliation keyframe. `op_funds` is display-only and
+    /// the client's simulation never reads it, so zeroing it is harmless to
     /// reconciliation (a restored client just shows 0 until a spy reveals it).
     pub fn client_keyframe_bytes(&self) -> Vec<u8> {
         let mut g = self.clone();
@@ -1079,7 +1078,7 @@ impl Game {
         self.restore(&kf)
     }
 
-    /// Effective bazaar price for `token` — doubled while Carter is active
+    /// Effective bazaar price for `token`, doubled while Carter is active
     /// (the original displays and charges the doubled price).
     pub fn bazaar_price(&self, token: WeaponToken) -> i32 {
         let p = weapon_table()[token.index()].price as i32;
@@ -1093,7 +1092,7 @@ impl Game {
     /// Credit a line-clear's funds to this player, applying the Mondale tax if
     /// active and emitting `FundsStolen` for the swiped remainder. The caller owns
     /// the `Locked`/`Scored` events. This is the single funds-crediting path so
-    /// every source of cleared funds is taxed identically — a Bottle-completed
+    /// every source of cleared funds is taxed identically. A Bottle-completed
     /// neck row and a normally locked line go through here the same way.
     fn credit_clear_funds(&mut self, clear_funds: i32) {
         let gained = if self.weapons.is_active(WeaponToken::Mondale) {
@@ -1111,12 +1110,12 @@ impl Game {
         self.score.funds += gained;
     }
 
-    /// `BTGame::receive(BT_WPN_ON)` + the per-subsystem effects — activate a
+    /// `BTGame::receive(BT_WPN_ON)` and the per-subsystem effects: activate a
     /// weapon on THIS (victim) player.
     fn apply_weapon_on(&mut self, token: WeaponToken) {
         // BTActive[token] = 1 (boolean), remaining_ += duration (accumulates).
         // Capture the prior active state so the RELATIVE drop-time shifts
-        // (Speedy/Meadow) fire only on the inactive->active transition — see the
+        // (Speedy/Meadow) fire only on the inactive->active transition; see the
         // Speedy/Meadow arms below.
         let was_active = self.weapons.is_active(token);
         self.weapons.set(token, true);
@@ -1154,7 +1153,7 @@ impl Game {
             // `apply_weapon_off` reverts it once (active is a boolean flag, so a
             // weapon expires once however many times it was launched). The scale
             // is therefore gated on the inactive->active transition so it pairs
-            // 1:1 with that single revert — relaunching an already-active Speedy
+            // 1:1 with that single revert. Relaunching an already-active Speedy
             // still extends its duration via `remaining_`, but must NOT re-scale
             // the clock, or the unmatched scale would persist past expiry and
             // permanently distort gravity.
@@ -1179,7 +1178,7 @@ impl Game {
                 // "...all taken away ... and given to you." Zero the victim's
                 // funds and hand the seized amount to the attacker via the relay.
                 // The seizure reads the balance at flush (the next lock), which is
-                // AFTER that lock's clear has already been credited — so funds the
+                // AFTER that lock's clear has already been credited, so funds the
                 // victim banks on the triggering piece are included in the haul.
                 let stolen = self.score.funds;
                 self.score.funds = 0;
@@ -1192,7 +1191,7 @@ impl Game {
         }
     }
 
-    /// `BT_WPN_OFF` — a weapon's duration expired; revert its effect.
+    /// `BT_WPN_OFF`: a weapon's duration expired. Reverts its effect.
     fn apply_weapon_off(&mut self, token: WeaponToken) {
         self.weapons.set(token, false);
         self.board.revert_weapon(token);
@@ -1216,7 +1215,7 @@ impl Game {
         }
     }
 
-    /// `BTWeaponManager::receive(BT_LINE)` — count active-weapon durations down
+    /// `BTWeaponManager::receive(BT_LINE)`: count active-weapon durations down
     /// by the lines just cleared; expire any that hit zero.
     fn tick_durations(&mut self, lines: i32) {
         for i in 0..BT_MAX_WEAPONS {
@@ -1323,8 +1322,8 @@ mod tests {
     use super::*;
 
     /// The "blocks sit in mid-air" guarantee: `place()` (the lock-delay expiry)
-    /// re-checks gravity. If the piece can still move down — e.g. it was slid
-    /// over a hole during the 150ms slide window — it RESUMES FALLING instead of
+    /// re-checks gravity. If the piece can still move down (for example, it was
+    /// slid over a hole during the 150ms slide window), it resumes falling instead of
     /// locking floating. So a locked piece is always supported; overhangs from a
     /// tuck are possible (classic Tetris keeps holes), but nothing locks with
     /// empty space under every cell.
@@ -1347,7 +1346,7 @@ mod tests {
         assert_eq!(
             g.current.as_ref().map(|p| p.kind.id()),
             Some(piece_id),
-            "same piece still in play — it did NOT lock or spawn a new one"
+            "same piece still in play; it did not lock or spawn a new one"
         );
         // The crux of the guarantee: the game's position (collision/lock) and the
         // piece's own (render/land) must stay in lockstep after the resume.
@@ -1356,7 +1355,7 @@ mod tests {
     }
 
     /// While the weapons bazaar is open the whole game is frozen
-    /// (`BTGame::pauseAllTimeOuts`), so player input must be inert — a held drop
+    /// (`BTGame::pauseAllTimeOuts`), so player input must be inert. A held drop
     /// key cannot keep the piece moving while the player is shopping.
     #[test]
     fn begin_drop_is_ignored_in_the_bazaar() {
@@ -1414,7 +1413,7 @@ mod tests {
             g.tick(16);
         }
         let snap = g.snapshot();
-        let mut h = Game::new(1); // a DIFFERENT seed — restore must overwrite everything
+        let mut h = Game::new(1); // a DIFFERENT seed; restore must overwrite everything
         assert!(h.restore(&snap), "restore accepts a valid keyframe");
         assert_eq!(h.snapshot(), snap, "the restored game re-serializes identically");
 
@@ -1428,7 +1427,7 @@ mod tests {
     #[test]
     fn keyframe_enables_deterministic_continuation() {
         // The reason this codec exists: restore a mid-game keyframe into a fresh
-        // engine and the two must stay bit-identical when driven the same way —
+        // engine and the two must stay bit-identical when driven the same way;
         // including the RNG-advancing weapon that naive board-snapping can't track.
         let mut a = Game::new(0x1234);
         for i in 0..200 {

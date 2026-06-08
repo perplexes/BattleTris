@@ -1,4 +1,4 @@
-//! The player's weapon arsenal — a faithful port of `BTArsenal`
+//! The player's weapon arsenal, a faithful port of `BTArsenal`
 //! (`usr/src/game/BTArsenal.{H,C}`): `BT_ARSENAL_SIZE` (10) slots, each holding
 //! a weapon token and a quantity. New purchases stack onto a matching slot or
 //! fill the first empty one.
@@ -7,8 +7,8 @@ use crate::constants::BT_ARSENAL_SIZE;
 use crate::weapons::WeaponToken;
 
 /// A fixed bank of weapon slots. Parallel arrays rather than a `Vec` of
-/// `(token, count)` pairs because slot POSITION is meaningful — the UI shows a
-/// stable row of slots and Lazy Susan swaps whole arsenals — so slots must keep
+/// `(token, count)` pairs because slot POSITION is meaningful: the UI shows a
+/// stable row of slots and Lazy Susan swaps whole arsenals, so slots must keep
 /// their index even when emptied, and the capacity is a hard cap.
 #[derive(Clone, Debug)]
 pub struct Arsenal {
@@ -25,12 +25,12 @@ impl Default for Arsenal {
 }
 
 impl Arsenal {
-    /// An empty arsenal — every slot vacant.
+    /// An empty arsenal (every slot vacant).
     pub fn new() -> Arsenal {
         Arsenal { rep: [None; BT_ARSENAL_SIZE], quantity: [0; BT_ARSENAL_SIZE] }
     }
 
-    /// `BTArsenal::buyWeapon` — stack onto a matching slot, else the first empty
+    /// `BTArsenal::buyWeapon`: stack onto a matching slot, else the first empty
     /// slot. Returns false if the arsenal is full.
     pub fn buy(&mut self, w: WeaponToken) -> bool {
         for i in 0..BT_ARSENAL_SIZE {
@@ -59,7 +59,7 @@ impl Arsenal {
         false
     }
 
-    /// `BTArsenal::useWeapon` — consume one from slot `index`; empties the slot
+    /// `BTArsenal::useWeapon`: consume one from slot `index`; empties the slot
     /// when the quantity hits zero.
     pub fn use_slot(&mut self, index: usize) {
         if index >= BT_ARSENAL_SIZE || self.quantity[index] == 0 {
@@ -98,7 +98,7 @@ impl Arsenal {
         self.quantity.get(index).copied().unwrap_or(0)
     }
 
-    /// Empty every slot — used when a game resets.
+    /// Empty every slot, used when a game resets.
     pub fn clear(&mut self) {
         self.rep = [None; BT_ARSENAL_SIZE];
         self.quantity = [0; BT_ARSENAL_SIZE];
