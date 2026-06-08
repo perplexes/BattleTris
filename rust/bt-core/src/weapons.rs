@@ -1,8 +1,9 @@
 //! Weapon tokens, active-weapon flags, and the weapon database.
 //!
 //! `WeaponToken` is ported verbatim from the `BTWeaponToken` enum in
-//! `usr/src/game/BTProtocol.H` (order and discriminants matter — they index
-//! `keep_prob_`, the arsenal, and the `BTActive[]` array).
+//! `usr/src/game/BTProtocol.H` (order and discriminants matter — they index the
+//! active-flag array, the per-weapon duration array, and [`weapon_table`], and
+//! identify the token on the arsenal/wire protocol).
 //!
 //! Weapon *effects* live in the board ([`crate::board`]), piece manager and
 //! game state machine; this module is the data + the active-flag bookkeeping.
