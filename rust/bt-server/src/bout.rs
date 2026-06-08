@@ -1,21 +1,21 @@
 //! Server-authoritative online match (a "bout").
 //!
-//! The server owns the authoritative simulation for a matched pair — a
-//! [`bt_core::Versus`] holding both boards — and is the single source of truth.
-//! Clients send INPUTS; the server applies them to the authoritative match, ticks
-//! the deterministic engine on its own clock, and ships authoritative
-//! [`Snapshot`](crate::bout::Snapshot)s back. Clients predict locally and
-//! reconcile against those snapshots.
+//! The server owns the authoritative simulation for a matched pair, a
+//! [`bt_core::Versus`] holding both boards. Clients send inputs; the server
+//! applies them to the authoritative match, ticks the deterministic engine on its
+//! own clock, and ships authoritative [`Snapshot`](crate::bout::Snapshot)s back.
+//! Clients predict locally and reconcile against those snapshots.
 //!
-//! Two properties fall out of putting the authority on the server rather than
-//! relaying peer-to-peer:
-//!   * **Anti-cheat** — a client can only send legal *inputs*
-//!     ([`is_legal_client_input`](crate::bout::is_legal_client_input)); it can't
-//!     inject weapons/funds/board state.
+//! Centralizing authority on the server gives two properties:
+//!   * Anti-cheat: a client can only send legal *inputs*
+//!     ([`is_legal_client_input`](crate::bout::is_legal_client_input)) and cannot
+//!     inject weapons, funds, or board state.
 //!     The server resolves every cross-player effect (Mirror, Swap, taxes).
-//!   * **A totally-ordered event log** — the server sees every input in order,
-//!     so an online match is recordable as a [`bt_replay::Replay`]: the seeds
-//!     plus that one ordered stream replay the whole bout deterministically.
+//!   * A totally-ordered event log: the server sees every input in order, so
+//!     a bout's client-input stream is recordable as a [`bt_replay::VersusReplay`].
+//!     The seeds plus that ordered stream reproduce the match deterministically.
+//!     Out-of-band actions (admin debug grants, forfeits) are excluded from the
+//!     input stream and from any resulting replay.
 //!
 //! Transport wiring (the `/ws` handoff from matchmaking, snapshot broadcast
 //! cadence, client prediction/reconciliation) layers on top of this core.
@@ -38,18 +38,17 @@ fn side_idx(side: Side) -> usize {
     }
 }
 
-/// Whether an [`Input`] is a legal action a CLIENT may submit.
+/// Whether an [`Input`] is a legal action a client may submit.
 ///
 /// The relay-internal variants (`ReceiveWeapon`, `ReceiveOpScore`, `AddFunds`,
-/// `AiDrop`) must NEVER be accepted from a client — those are how the *server*
-/// applies cross-player effects, and letting a client send them would let it
-/// grant itself weapons or funds. Rejecting them is the heart of the
-/// authoritative model's anti-cheat.
+/// `AiDrop`) are rejected because those are how the server applies cross-player
+/// effects. Accepting them from a client would let it grant itself weapons or
+/// funds, defeating the authoritative model's anti-cheat guarantee.
 ///
-/// `SetPaused` is also rejected: a client-controlled pause would freeze only
-/// that side's authoritative board while the opponent keeps ticking (a grief /
-/// stall exploit). A faithful *synchronized* match-pause (the original's
-/// `BT_PAUSE`) is server-owned and a later feature, not a client input.
+/// `SetPaused` is also rejected. A client-controlled pause would freeze only
+/// that side's authoritative board while the opponent keeps ticking, which is a
+/// grief/stall exploit. A synchronized match-pause is server-owned and a later
+/// feature.
 pub fn is_legal_client_input(input: &Input) -> bool {
     matches!(
         input,
@@ -67,10 +66,10 @@ pub fn is_legal_client_input(input: &Input) -> bool {
 
 /// Inputs allowed while a side is in the weapons bazaar. The match is frozen for
 /// the synchronized bazaar (neither board ticks), so only shopping actions are
-/// permitted — movement/rotate/drop/launch are inert until the player leaves.
-/// `Game` already blocks drops in the bazaar, but not movement/rotate/launch, so
-/// the server gates them here (otherwise a direct client could nudge its frozen
-/// piece or fire weapons mid-shop).
+/// permitted; movement/rotate/drop/launch are inert until the player leaves.
+/// `Game` already blocks drops in the bazaar but not movement/rotate/launch, so
+/// the server gates them here to prevent a client from nudging its frozen piece
+/// or firing weapons mid-shop.
 fn is_bazaar_input(input: &Input) -> bool {
     matches!(
         input,
@@ -90,12 +89,11 @@ pub struct SelfStatus {
     pub lines_til_bazaar: i32,
 }
 
-/// What a player is allowed to see about their OPPONENT by default — only
-/// score/lines for the opponent panel. NOT the board and NOT funds: those are
-/// revealed only by a spy (Ames "displays your opponent's screen and your
-/// opponent's funds"). The spy is a server-authorized extension to this view
-/// (the degraded `spy_board` on [`Snapshot`]), so a client can never see the
-/// opponent's board by simply asking for it.
+/// What a player is allowed to see about their opponent by default: score and
+/// lines for the opponent panel only. The opponent's board is not included; it
+/// is revealed only by an active spy, as a degraded `spy_board` on [`Snapshot`].
+/// The opponent's funds are never revealed, even under a spy. A client cannot
+/// see the opponent's board by requesting it directly.
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct OppView {
     pub score: i64,
@@ -103,16 +101,17 @@ pub struct OppView {
     pub game_over: bool,
     /// Whether the opponent is still in the bazaar. Both sides enter the bazaar
     /// together (combined-line trigger), so during the barrier this tells the
-    /// client whether the opponent has hit Done yet — driving the "opponent is
+    /// client whether the opponent has hit Done yet, driving the "opponent is
     /// ready" / "waiting for opponent" prompt. Not sensitive (no board/funds).
     pub in_bazaar: bool,
 }
 
-/// One authoritative frame sent to a client. Per-frame frames are LIGHT — the
-/// client renders its own board from local prediction; `ack` (the last input
-/// seq the server applied from this client) lets it discard acked inputs. The
-/// full authoritative state rides `keyframe` (the byte form of `Game::snapshot`)
-/// on a throttle: the client restores it and re-applies its unacked inputs.
+/// One authoritative frame sent to a client. Per-frame frames are intentionally
+/// small: the client renders its own board from local prediction, and `ack` (the
+/// last input seq the server applied from this client) lets it discard those
+/// inputs. The full authoritative state rides `keyframe` (the byte form of
+/// `Game::snapshot`) on a throttle; the client restores it and re-applies its
+/// unacked inputs.
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct Snapshot {
     pub tick: u64,
@@ -125,8 +124,8 @@ pub struct Snapshot {
     /// Whether a spy of THIS client is currently active (drives showing/hiding
     /// the opponent-board panel), sent every frame.
     pub spying: bool,
-    /// The opponent's board as revealed by this client's active spy — already
-    /// DEGRADED to the spy's accuracy server-side (so a client can't read cells
+    /// The opponent's board as revealed by this client's active spy, already
+    /// degraded to the spy's accuracy server-side (so a client can't read cells
     /// the spy didn't earn). Rides the throttled keyframe frames, like `keyframe`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spy_board: Option<Vec<i32>>,
@@ -136,8 +135,8 @@ pub struct Snapshot {
     pub keyframe: Option<Vec<u8>>,
 }
 
-/// % of a spy's revealed cells the server HIDES — `1 - report_prob` from
-/// BTRecon.C: Ames shows 50%, Ace 85%, Condor (satellite) is perfect.
+/// Percentage of a spy's revealed cells the server hides (`1 - report_prob` from
+/// BTRecon.C): Ames shows 50%, Ace 85%, Condor (satellite) is perfect.
 fn spy_hide_pct(token: WeaponToken) -> u32 {
     match token {
         WeaponToken::Ames => 50,
@@ -148,7 +147,7 @@ fn spy_hide_pct(token: WeaponToken) -> u32 {
 
 /// Degrade a render-id grid (`Game::render_ids`, empty = -2) to a spy's accuracy
 /// by HIDING a deterministic ~hide% of non-empty cells. Doing it server-side
-/// means a modified client never receives the cells the spy didn't earn — the
+/// so a modified client never receives the cells the spy didn't earn; the
 /// reveal is gated by the spy the player actually bought. Stable per position.
 fn degrade_board(mut grid: Vec<i32>, token: WeaponToken) -> Vec<i32> {
     let hide = spy_hide_pct(token);
@@ -170,11 +169,11 @@ fn degrade_board(mut grid: Vec<i32>, token: WeaponToken) -> Vec<i32> {
 pub struct Bout {
     versus: Versus,
     tick: u64,
-    /// The two seeds, kept so the match can be exported as a deterministic
-    /// [`VersusReplay`] (the seeds + the totally-ordered input stream replay it).
+    /// The two seeds, kept so the match can be exported as a [`VersusReplay`]
+    /// (the seeds and the totally-ordered client-input stream together reproduce it).
     seed_a: u64,
     seed_b: u64,
-    /// Every applied client input, stamped with the tick — the replay's frames.
+    /// Every applied client input, stamped with the tick; these are the replay's frames.
     frames: Vec<VersusFrame>,
     /// Last applied input sequence number per side (A = index 0, B = index 1).
     ack: [u64; 2],
@@ -203,9 +202,10 @@ impl Bout {
         }
     }
 
-    /// Export the match so far as a deterministic, replayable [`VersusReplay`]
-    /// (the seeds + the totally-ordered client-input stream). Replaying re-runs a
-    /// `Versus`, so the whole relay reproduces — no need to record its effects.
+    /// Export the match so far as a [`VersusReplay`] capturing the seeds and the
+    /// totally-ordered client-input stream. Replaying re-runs a `Versus` from those
+    /// inputs; out-of-band actions (admin debug grants, forfeits) are not recorded
+    /// here and will not appear in playback.
     ///
     /// `tick_count` is `self.tick`, the number of ticks the bout actually ran.
     /// The server's match loop applies a batch of inputs and then ALWAYS ticks
@@ -229,32 +229,31 @@ impl Bout {
 
     /// Apply a client's input to its side of the authoritative match. Returns
     /// false (and does nothing) if the input is rejected:
-    ///   * not a legal client action ([`is_legal_client_input`] — anti-cheat),
-    ///   * stale / replayed (`seq` not strictly greater than the last applied —
+    ///   * not a legal client action ([`is_legal_client_input`], anti-cheat gate),
+    ///   * stale or replayed (`seq` not strictly greater than the last applied,
     ///     so a malicious/buggy client can't re-apply old inputs or rewind `ack`),
-    ///   * a non-shopping action while EITHER side is in the bazaar — the bazaar is
-    ///     a synchronized BARRIER, so the whole match is frozen (incl. the side that
+    ///   * a non-shopping action while either side is in the bazaar (the bazaar is
+    ///     a synchronized barrier; the whole match is frozen including the side that
     ///     already left); only [`is_bazaar_input`] passes.
     ///
-    /// Returns whether the input was actually APPLIED. Either way, a fresh legal input
-    /// advances this side's `ack` (so the client's reconciliation knows we've caught up
-    /// to its sends) — see below for why a barrier-rejected input must still be acked.
+    /// Returns whether the input was actually applied. Either way, a fresh legal input
+    /// advances this side's `ack` (so the client's reconciliation knows the server has
+    /// caught up to its sends); see below for why a barrier-rejected input must still be acked.
     pub fn apply_input(&mut self, side: Side, input: &Input, seq: u64) -> bool {
         let idx = side_idx(side);
         if !is_legal_client_input(input) || seq <= self.ack[idx] {
             return false;
         }
-        // Ack a fresh, legal input as soon as we've SEEN it — BEFORE the barrier check,
-        // and even if the barrier then blocks applying it. The `ack` means "I've
-        // processed your inputs up through seq N", which is what a client gates its
-        // reconciliation on; it does NOT mean "I applied it". Acking here is essential:
-        // under latency a client sends gameplay inputs that cross the bazaar boundary
-        // before its snapshot says the barrier is up; the barrier (below) drops them.
-        // If we didn't ack them, a client that waits for `ack` to catch up to what it
-        // sent (the bot's `sync::decide` WaitAck gate) would deadlock forever in the
-        // bazaar — it never reaches Shop, never sends LeaveBazaar, and the whole match
-        // freezes. (For the browser the same un-acked input would replay on every
-        // keyframe, drifting the board.) Acking it lets reconciliation discard it.
+        // Ack a fresh, legal input as soon as it is seen, before the barrier check and
+        // even if the barrier then blocks applying it. The `ack` means "I've processed
+        // your inputs up through seq N", which a client uses to gate its reconciliation;
+        // it does not mean "I applied it". Acking here is essential: under latency a
+        // client sends gameplay inputs that cross the bazaar boundary before its snapshot
+        // shows the barrier is up; the barrier drops them. Without acking them, a client
+        // that waits for `ack` to catch up (the bot's `sync::decide` WaitAck gate) would
+        // deadlock in the bazaar: it never reaches Shop, never sends LeaveBazaar, and the
+        // match freezes. For the browser the same un-acked input would replay on every
+        // keyframe, drifting the board. Acking it lets reconciliation discard it.
         self.ack[idx] = seq;
         // Bazaar BARRIER: while EITHER side is shopping the whole match is frozen, so
         // even the side that left first can't keep moving/rotating/launching. Only
@@ -268,19 +267,19 @@ impl Bout {
         }
         let g = self.versus.game_mut(side);
         input.apply_to_game(g);
-        // Record it (stamped with the current tick — inputs for tick N are drained
+        // Record it (stamped with the current tick; inputs for tick N are drained
         // before the Nth tick advances, so a replay applies them at the same tick).
         self.frames.push(VersusFrame { tick: self.tick as u32, side: idx as u8, input: input.clone() });
         true
     }
 
-    /// Out-of-band ADMIN grant (the `POST /admin/grant` dev tool): add one weapon
-    /// and/or some funds to `side`'s authoritative game. This is NOT a client input —
+    /// Out-of-band admin grant (the `POST /admin/grant` dev tool): add one weapon
+    /// and/or some funds to `side`'s authoritative game. This is not a client input;
     /// it is never recorded into the replay `frames` and never touches `ack`, so it
     /// cannot perturb input ordering or the deterministic input stream. The bout's
     /// normal snapshot path (a keyframe rides the next send, see `run_bout`'s
-    /// `want_keyframe`) syncs the client; replaying the recorded `frames` reproduces
-    /// the bout WITHOUT this grant, exactly as for any other un-recorded server action.
+    /// `want_keyframe`) syncs the client. Replaying the recorded `frames` reproduces
+    /// the bout without this grant, as with any other un-recorded server action.
     /// Returns `(weapon_granted, funds_applied)` for the HTTP summary.
     pub fn debug_grant(&mut self, side: Side, weapon: Option<WeaponToken>, funds: Option<i64>) -> (bool, bool) {
         let g = self.versus.game_mut(side);
@@ -295,13 +294,14 @@ impl Bout {
         (weapon_granted, funds_applied)
     }
 
-    /// Reset one side's input-sequence baseline. Called when a fresh client REATTACHES
-    /// to this bout (a reconnect/refresh): the new client restarts its `seq` at 0, but
-    /// our `ack` still holds the disconnected client's last value — so without this
-    /// every reconnected input would be `seq <= ack` and get rejected, snapping the
-    /// player's piece back for the rest of the match. The reconnecting client's old
-    /// in-flight inputs are gone (its socket closed; the input channel was drained
-    /// ticks ago), so dropping the baseline to 0 is safe and lets `seq` 1,2,3… through.
+    /// Reset one side's input-sequence baseline. Called when a fresh client reattaches
+    /// to this bout after a reconnect or refresh: the new client restarts its `seq` at
+    /// 0, but `ack` still holds the disconnected client's last value. Without this
+    /// reset every reconnected input would satisfy `seq <= ack` and be rejected,
+    /// snapping the player's piece back for the rest of the match. The reconnecting
+    /// client's old in-flight inputs are gone (its socket closed; the input channel was
+    /// drained ticks ago), so dropping the baseline to 0 is safe and lets seq 1, 2,
+    /// 3, ... through.
     pub fn reset_ack(&mut self, side: Side) {
         self.ack[side_idx(side)] = 0;
     }
@@ -334,8 +334,8 @@ impl Bout {
     }
 
     /// Take (and clear) the "a client can't have predicted this" flag from the
-    /// last tick (a delivered weapon / funds tax / bazaar entry) — the server
-    /// pushes a prompt keyframe when it's set.
+    /// last tick (a delivered weapon, funds tax, or bazaar entry). The server
+    /// pushes a prompt keyframe when it is set.
     pub fn take_dirty(&mut self) -> bool {
         self.versus.take_dirty()
     }
@@ -352,24 +352,24 @@ impl Bout {
         self.versus.is_over()
     }
 
-    /// This side's cleared-line count — for settling the match outcome (TrueSkill).
+    /// This side's cleared-line count, used for settling the match outcome (TrueSkill).
     pub fn lines(&self, side: Side) -> u32 {
         self.versus.game(side).score().lines.max(0) as u32
     }
 
-    /// This side's final score — for the per-player `high_score` stat at settlement.
+    /// This side's final score, used for the per-player `high_score` stat at settlement.
     pub fn score(&self, side: Side) -> i64 {
         self.versus.game(side).score().score
     }
 
-    /// This side's final funds — for the per-player `high_funds` stat at settlement.
+    /// This side's final funds, used for the per-player `high_funds` stat at settlement.
     pub fn funds(&self, side: Side) -> i64 {
         self.versus.game(side).score().funds
     }
 
-    /// Total count of `token` in `side`'s arsenal (summed across slots) — a read-only
-    /// view used to confirm an admin grant landed in the authoritative game. Test-only
-    /// (the live snapshot/spectator paths already serialize the arsenal for clients).
+    /// Total count of `token` in `side`'s arsenal (summed across slots). A read-only
+    /// view used to confirm an admin grant landed in the authoritative game. Test-only;
+    /// the live snapshot and spectator paths already serialize the arsenal for clients.
     #[cfg(test)]
     pub fn arsenal_count(&self, side: Side, token: WeaponToken) -> u16 {
         let g = self.versus.game(side);
@@ -379,14 +379,14 @@ impl Bout {
             .sum()
     }
 
-    /// How many ticks the match has run — the unit for the per-player time stats
+    /// How many ticks the match has run, the unit for the per-player time stats
     /// (`longest_game`, `fastest_kill`, `quickest_death`).
     pub fn tick_count(&self) -> u64 {
         self.tick
     }
 
-    /// The authoritative snapshot for `side` as a ready-to-send ws message: the
-    /// [`Snapshot`] fields plus a `{"type":"snapshot"}` tag.
+    /// Build the authoritative snapshot for `side` as a ready-to-send WebSocket
+    /// message: the [`Snapshot`] fields serialized with a `{"type":"snapshot"}` tag.
     pub fn snapshot_message(&self, side: Side, include_keyframe: bool) -> String {
         let mut v = serde_json::to_value(self.snapshot_for(side, include_keyframe))
             .unwrap_or(serde_json::Value::Null);
@@ -439,10 +439,10 @@ impl Bout {
         }
     }
 
-    /// A read-only two-board frame for SPECTATORS (the live-match debug view):
-    /// both boards' full render grids + HUDs, no per-side POV and no
-    /// keyframe/prediction machinery — a spectator just renders what the server
-    /// has. `run_bout` ships this to anyone watching at a modest cadence.
+    /// A read-only two-board frame for spectators (the live-match debug view):
+    /// both boards' full render grids and HUDs, without per-side POV or
+    /// keyframe/prediction machinery. A spectator renders what the server has.
+    /// `run_bout` ships this to anyone watching at a modest cadence.
     pub fn spectator_message(&self, name_a: &str, name_b: &str) -> String {
         let side = |g: &bt_core::Game| {
             let mut arsenal = Vec::with_capacity(20);

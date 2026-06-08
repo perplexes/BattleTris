@@ -1,10 +1,9 @@
 //! Prometheus metrics for the server. Exposed at `/metrics` in text format for
-//! fly.io's managed Grafana to scrape (see `[[metrics]]` in fly.toml). Counters are
-//! cheap atomics, so instrumentation is sprinkled on the hot paths directly.
+//! fly.io's managed Grafana to scrape (see `[[metrics]]` in fly.toml).
 //!
-//! What's tracked (the operational picture for release): HTTP request rate
-//! ("hit rate"), WebSocket message throughput (msgs/sec, by direction), ping
-//! round-trip latency (a histogram → p50/p95), live connections, and matches.
+//! Tracked: HTTP request rate ("hit rate"), WebSocket message throughput
+//! (msgs/sec, by direction), ping round-trip latency (histogram, p50/p95),
+//! live connections, and matches started.
 
 use prometheus::{
     Counter, CounterVec, Encoder, Gauge, Histogram, HistogramOpts, Opts, Registry, TextEncoder,
@@ -12,14 +11,14 @@ use prometheus::{
 use std::sync::LazyLock;
 
 /// The process-wide metric handles, registered against one [`Registry`] that
-/// `/metrics` serializes. Each field is a cheap atomic, so hot-path call sites
-/// can bump them inline.
+/// `/metrics` serializes. The metric handles are process-wide shared references;
+/// simple increments and observations are cheap enough to call on hot paths inline.
 pub struct Metrics {
     /// The collector every metric registers into; [`render`] gathers it.
     registry: Registry,
-    /// WebSocket frames, labelled `direction` = "in" | "out". `rate()` → msgs/sec.
+    /// WebSocket frames, labelled `direction` = "in" | "out". `rate()` -> msgs/sec.
     pub ws_messages: CounterVec,
-    /// Ping round-trip latency (ms) — the same RTT shown in the lobby.
+    /// Ping round-trip latency (ms), the same RTT shown in the lobby.
     pub ws_ping_ms: Histogram,
     /// HTTP requests served (static files + API + ws upgrades). `rate()` → hit rate.
     pub http_requests: Counter,
@@ -58,12 +57,13 @@ pub static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
     Metrics { registry, ws_messages, ws_ping_ms, http_requests, ws_connections, matches }
 });
 
-/// Count one inbound WebSocket frame — wraps the `direction="in"` label so the
-/// read loop stays a one-liner.
+/// Count one inbound WebSocket frame. Centralizes the `direction="in"` label so
+/// the read loop stays a one-liner and call sites don't duplicate it.
 pub fn ws_in() {
     METRICS.ws_messages.with_label_values(&["in"]).inc();
 }
-/// Count one outbound WebSocket frame (`direction="out"`).
+/// Count one outbound WebSocket frame. Centralizes the `direction="out"` label
+/// so writer call sites don't duplicate it.
 pub fn ws_out() {
     METRICS.ws_messages.with_label_values(&["out"]).inc();
 }
