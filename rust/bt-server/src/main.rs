@@ -1245,7 +1245,7 @@ async fn handle_message(state: &Shared, id: &str, text: &str) {
             let pending = {
                 let mut app = state.lock().await;
                 if app.clients.get(id).is_some_and(|c| c.bout.is_some()) {
-                    None // already in a match — ignore
+                    None // already in a match; ignore
                 } else {
                     let prior = app.clients.get(id).map(|c| c.name.clone()).unwrap_or_default();
                     let name = resolve_name(&app, &v, &prior);
@@ -2386,7 +2386,7 @@ async fn admin_drain(State(state): State<Shared>, headers: HeaderMap) -> impl In
         }
     }
     let bouts = app.bouts.len();
-    println!("drain: started — new matches paused, {bouts} bout(s) to finish");
+    println!("drain: started; new matches paused, {bouts} bout(s) to finish");
     (StatusCode::OK, format!("draining; {bouts} bout(s) in flight\n"))
 }
 
@@ -2405,7 +2405,7 @@ async fn admin_resume(State(state): State<Shared>, headers: HeaderMap) -> impl I
             let _ = c.tx.send(Message::Text(notice.clone()));
         }
     }
-    println!("drain: resumed — matchmaking re-enabled");
+    println!("drain: resumed; matchmaking re-enabled");
     (StatusCode::OK, "resumed\n".to_string())
 }
 
@@ -2605,7 +2605,7 @@ async fn main() {
     // fallback is fixed for the run, and a missing BT_JWT_SECRET is logged).
     let _ = identity::secret();
     if std::env::var("BT_JWT_SECRET").is_err() {
-        println!("BT_JWT_SECRET unset — using a per-process-random token secret");
+        println!("BT_JWT_SECRET unset; using a per-process-random token secret");
     }
 
     // Decay tick: re-broadcast the "players online" count as players go idle past
@@ -2830,7 +2830,7 @@ mod tests {
     /// `BT_ADMIN_TOKEN` is PROCESS-GLOBAL, so the tests that set/unset it must not run
     /// concurrently (one's `remove_var` would race another's read). This serializes
     /// them: each such test holds this lock for its whole body. A poisoned lock (an
-    /// earlier panic) is fine to reuse — we only need mutual exclusion, not the data.
+    /// earlier panic) is fine to reuse, since we only need mutual exclusion, not the data.
     fn admin_env_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
@@ -2857,7 +2857,7 @@ mod tests {
 
     /// Register a fake live bout in `app.bouts` and hand back its control RECEIVER
     /// (so a test can observe the `DebugGrant` the handler routes to it) plus the
-    /// input receiver (kept alive so the input channel isn't closed). No tick loop —
+    /// input receiver (kept alive so the input channel isn't closed). No tick loop:
     /// these tests assert the HTTP handler's auth/validation/routing, not application.
     fn register_fake_bout(app: &mut App, match_id: &str) -> (mpsc::Receiver<BoutControl>, mpsc::Receiver<BoutInput>) {
         let (control_tx, control_rx) = mpsc::channel::<BoutControl>(4);
@@ -2871,12 +2871,12 @@ mod tests {
 
     // (1) An UNAUTHED request (no x-admin-token while BT_ADMIN_TOKEN is set) is 403,
     // and (2) with BT_ADMIN_TOKEN UNSET admin is fail-closed: even a token-bearing
-    // request is 403. Both share one test because BT_ADMIN_TOKEN is process-global —
+    // request is 403. Both share one test because BT_ADMIN_TOKEN is process-global;
     // running them as separate parallel tests would race the env var.
     //
     // These three tests mutate the process-global `BT_ADMIN_TOKEN`, so they (a) hold
     // `admin_env_lock()` for mutual exclusion and (b) are SYNCHRONOUS `#[test]`s that
-    // drive the async handler via `block_on` — never holding the std guard across an
+    // drive the async handler via `block_on`, never holding the std guard across an
     // `.await` in async code (which clippy's `await_holding_lock` rightly forbids).
     fn rt() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
@@ -2907,7 +2907,7 @@ mod tests {
     }
 
     // (4) Authed-but-malformed requests are 4xx: bad side, out-of-range weapon, neither
-    // field present, and an unknown match_id (404). Auth must NOT mask these — they're
+    // field present, and an unknown match_id (404). Auth must NOT mask these, as they're
     // only reachable once admin_authed passes.
     #[test]
     fn admin_grant_validates_body_and_match() {
@@ -2942,7 +2942,7 @@ mod tests {
         std::env::remove_var("BT_ADMIN_TOKEN");
     }
 
-    // (3a) A valid authed grant ROUTES the right DebugGrant to the bout's task — the
+    // (3a) A valid authed grant ROUTES the right DebugGrant to the bout's task: the
     // handler resolves the live bout by match_id and sends a control message carrying
     // the parsed side/weapon/funds. (3b below proves the bout task then applies it.)
     #[test]
@@ -2976,7 +2976,7 @@ mod tests {
     }
 
     // Bout::debug_grant applies a weapon and/or funds to the named side's
-    // authoritative game WITHOUT recording an input frame — so the replay/input
+    // authoritative game WITHOUT recording an input frame, so the replay/input
     // stream (and thus determinism) is untouched. This is the unit-level teeth for
     // the determinism claim.
     #[test]
@@ -2993,7 +2993,7 @@ mod tests {
         // The OTHER side is untouched.
         assert_eq!(bout.arsenal_count(Side::B, tok), 0, "side B's arsenal is unchanged");
 
-        // Determinism: an admin grant is NOT a recorded input — the exported replay's
+        // Determinism: an admin grant is NOT a recorded input, so the exported replay's
         // frame stream is empty (no client inputs), so a fresh replay reproduces the
         // bout WITHOUT the grant.
         let replay = bout.to_replay(bout::TICK_MS, "test");
@@ -3299,7 +3299,7 @@ mod tests {
         let mut app = test_app();
         let _b1 = add_bot(&mut app, "1","Tokyo-Ernie");
         let _b2 = add_bot(&mut app, "2","London-Ernie");
-        // Bots are passive — they never auto-pair (with each other or a human).
+        // Bots are passive: they never auto-pair (with each other or a human).
         assert!(!is_match_candidate(&app, "1", "2"), "two bots don't auto-pair");
         // A human going Available is NOT thrown into a waiting bot.
         let _h = add_client(&mut app, "3","human");
@@ -3376,7 +3376,7 @@ mod tests {
         // cached identity token no longer verifies (e.g. it was minted under an
         // earlier server secret) falls back to the bare `name`. resolve_name refuses
         // a bare, already-rated name (the anti-hijack guard) unless it equals the
-        // connection's `prior` name — empty on a fresh socket — so the player
+        // connection's `prior` name (empty on a fresh socket), so the player
         // collapses to "". `queue` then lists them as "anon"; `available` drops them
         // from the roster entirely. The fix is client-side: always mint a FRESH token
         // (it verifies under the current secret), so the token path resolves the name
@@ -3395,7 +3395,7 @@ mod tests {
 
         // A FRESH token (the current process secret) verifies, so the name resolves
         // directly and the bare-name guard is bypassed. This is what the client now
-        // always sends — one fresh mint per session instead of a cached, stale token.
+        // always sends: one fresh mint per session instead of a cached, stale token.
         let fresh = identity::issue_token("player972");
         assert_eq!(
             resolve_name(&app, &json!({ "name": "player972", "token": fresh }), ""),
@@ -3434,7 +3434,7 @@ mod tests {
     #[test]
     fn start_bout_remembers_pre_match_presence_for_restore() {
         let mut app = test_app();
-        // A bot (Available) challenged by a human (no presence — a pure challenger).
+        // A bot (Available) challenged by a human (no presence; a pure challenger).
         let _bot = add_bot(&mut app, "1","Tokyo-Ernie");
         let _human = add_client(&mut app, "2","human"); // status stays None
         start_bout(&mut app, "2", "1", None).expect("bout starts");
@@ -3486,7 +3486,7 @@ mod tests {
         set_present(&mut app, "1",Status::Available);
         set_present(&mut app, "2",Status::Available);
 
-        // alice goes through the matcher with NO one queued — bob is Available, so
+        // alice goes through the matcher with NO one queued; bob is Available, so
         // they pair purely on presence.
         let pending = try_match(&mut app, "1").expect("two Available clients pair");
         assert_eq!((pending.id_a.as_str(), pending.id_b.as_str()), ("2", "1"), "bob (the candidate) is side A");
@@ -3561,7 +3561,7 @@ mod tests {
             .expect("alice matchStart");
         assert_eq!(start["match_id"].as_str(), Some(mid.as_str()));
 
-        // A reattach (from the rejoin handler) reaches the bout's control receiver —
+        // A reattach (from the rejoin handler) reaches the bout's control receiver;
         // the loop would consume this to swap the socket back in and resume.
         let (txn, _rxn) = mpsc::unbounded_channel::<Message>();
         app.bouts[&mid]
@@ -3580,7 +3580,7 @@ mod tests {
     #[test]
     fn leave_resolves_a_clients_own_bout_from_server_state() {
         // The `leaveMatch` handler reads (match_id, side) from the client's OWN
-        // server-side binding — never anything client-supplied — so a client can
+        // server-side binding (never anything client-supplied), so a client can
         // only forfeit the bout it is actually in. Mirror that resolution here.
         let mut app = test_app();
         let _a = add_client(&mut app, "1","alice");
@@ -3690,7 +3690,7 @@ mod tests {
         assert_eq!(vet.games, 42, "experience maps to games");
         assert_eq!(vet.wins, 0, "migration brings ratings, not a win/loss split");
 
-        // A second migration is a no-op (table no longer empty) — it must not
+        // A second migration is a no-op (table no longer empty) and must not
         // clobber accumulated stats.
         let win = MatchStats { won: true, score: 1, lines: 1, funds: 1, ticks: 10, natural: true };
         db_record_player_stats(&conn, "veteran", 31.0, 1.9, &win).unwrap();
