@@ -15,6 +15,8 @@
 //! `RATINGS_FILE` (default `ratings.json`).
 //!
 //! Protocol (JSON text frames):
+//!
+//! ```text
 //!   client -> server:
 //!     {"type":"queue","token":"<jwt>"}      (Find Match; or {"name":"alice"})
 //!     {"type":"available","value":true,"token":"<jwt>"}   (open to matches)
@@ -31,10 +33,11 @@
 //!     {"type":"opponentReconnecting"}       (opponent dropped; bout frozen, grace)
 //!     {"type":"opponentResumed"}            (opponent reattached; play resumes)
 //!     {"type":"rejoinFailed"}               (no such live bout for this identity)
+//! ```
 //!
 //! Every connected client speaks the server-authoritative protocol (sends
-//! `input`, renders `snapshot`); the server runs the only simulation. (The legacy
-//! WebRTC P2P relay — `signal`/`matched` — was removed with that migration.)
+//! `input`, renders `snapshot`); the server runs the only simulation, so a client
+//! can never inject board state or cross-player effects — only legal inputs.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -141,11 +144,18 @@ impl Status {
 
 /// Per-connected-client state.
 struct Client {
+    /// The player name this connection claims (empty until it establishes one).
+    /// Keys ratings, the roster, and bout participation. An already-rated name can
+    /// only be claimed with a valid token, not a bare `name` (see [`resolve_name`]).
     name: String,
+    /// Writer side of this connection's outbound channel. Every send to the client
+    /// (direct or broadcast) enqueues here; the per-socket writer task drains it.
     tx: mpsc::UnboundedSender<Message>,
     /// The opponent connection while in a match — used to send `opponentLeft` if
     /// this client disconnects mid-bout. Set in [`start_bout`], cleared at end.
     peer: Option<String>,
+    /// This connection's current rating, loaded for `name` at queue/available time
+    /// and refreshed in place when a bout it played settles.
     state: PlayerState,
     /// While in a match: the channel to the match's tick loop and which side this
     /// client plays. `input` messages are forwarded here.
@@ -171,8 +181,8 @@ struct Client {
     /// When the last ws Ping was sent to this client (to measure round-trip time on
     /// the matching Pong). `None` between a Pong and the next Ping.
     ping_sent_at: Option<Instant>,
-    /// Last measured round-trip time, in ms — shown in the lobby roster (replacing
-    /// the old geo label). `None` until the first Pong comes back.
+    /// Last measured round-trip time, in ms — shown next to the name in the lobby
+    /// roster. `None` until the first Pong comes back.
     ping_ms: Option<u32>,
 }
 
@@ -186,9 +196,15 @@ fn post_bout_status(prev: Option<Status>) -> Option<Status> {
     prev.map(|_| Status::Available)
 }
 
-/// Shared server state.
+/// Shared server state. One instance lives behind the [`Shared`] tokio mutex; a
+/// connection's read loop, the per-bout tick loops, and the timed broadcasts all
+/// reach in through it.
 struct App {
+    /// Every live connection, keyed by its tagged-UUID `client-…` id. A single
+    /// player may hold several (multiple tabs); the roster de-dupes by name.
     clients: HashMap<String, Client>,
+    /// Connections that pressed Find Match and have no opponent yet — the
+    /// explicit auto-pair queue, scanned alongside lobby-Available clients.
     waiting: Vec<String>,
     /// Last time each connection pressed a gameplay button. "Players online" is
     /// the count of these within `ACTIVE_WINDOW` (set on `active`, pruned on
@@ -199,8 +215,11 @@ struct App {
     last_broadcast_players: usize,
     /// Persisted ratings by player name: (mu, sigma, experience).
     ratings: HashMap<String, (f64, f64, u32)>,
-    /// Pairings already rated (keyed by `match_id`).
+    /// Pairings already rated (keyed by `match_id`), so a bout settles a rating
+    /// change exactly once even if the settle path is reached more than once.
     settled: HashSet<String>,
+    /// TrueSkill tuning shared by matchmaking quality, rating updates, and the
+    /// new-player base rating.
     params: Ts2Params,
     /// Replay/counters DB (shared with the HTTP handlers) — backs the hit counter
     /// and the per-player stats (`players`) table.
@@ -225,6 +244,10 @@ struct App {
 }
 
 impl App {
+    /// Boot the shared state over a replay/counters DB. `ratings.json` is the
+    /// working source-of-truth for matchmaking ratings; the `players` table is
+    /// seeded from it once (idempotently) so the per-player profile endpoint can
+    /// answer from one indexed lookup rather than re-reading the JSON.
     fn new(db: Db) -> App {
         let ratings = {
             // Seed the players table from ratings.json on first boot (idempotent),
@@ -250,6 +273,9 @@ impl App {
         }
     }
 
+    /// The rating state to play `name` at — their persisted `(mu, sigma,
+    /// experience)` if known, otherwise the configured new-player rating. An
+    /// empty name (an un-named connection) also falls through to a new rating.
     fn rating_for(&self, name: &str) -> PlayerState {
         match self.ratings.get(name) {
             Some(&(mu, sigma, experience)) => PlayerState { rating: Rating::new(mu, sigma), experience },
@@ -257,16 +283,23 @@ impl App {
         }
     }
 
+    /// Record `name`'s post-match rating in the in-memory map (the caller
+    /// persists the whole map to `ratings.json` after settling).
     fn store_rating(&mut self, name: &str, s: PlayerState) {
         self.ratings
             .insert(name.to_string(), (s.rating.mu, s.rating.sigma, s.experience));
     }
 }
 
+/// Path to the persisted ratings JSON (`RATINGS_FILE`, default `ratings.json`;
+/// prod points it at the fly volume alongside the replay DB).
 fn ratings_file() -> String {
     std::env::var("RATINGS_FILE").unwrap_or_else(|_| "ratings.json".to_string())
 }
 
+/// Send one message to a single client by id (no-op if it has disconnected).
+/// Enqueues on the client's writer channel rather than touching the socket, so
+/// the caller never blocks on a slow peer.
 fn send(app: &App, id: &str, msg: &Value) {
     if let Some(c) = app.clients.get(id) {
         let _ = c.tx.send(Message::Text(msg.to_string()));
@@ -293,6 +326,8 @@ fn active_count(app: &App, now: Instant) -> usize {
         .count()
 }
 
+/// The current persistent visit total (the "you are visitor #N" counter) read
+/// from the DB — the figure that rides every `stats` broadcast.
 fn current_hits(app: &App) -> i64 {
     let conn = app.db.lock().unwrap();
     db_hits(&conn)
@@ -381,6 +416,10 @@ fn maybe_broadcast_players(app: &mut App) {
     }
 }
 
+/// Load persisted ratings from `ratings.json` (name -> `(mu, sigma,
+/// experience)`). A missing or malformed file yields an empty map — a fresh
+/// server simply starts everyone at the new-player rating. A field absent from a
+/// row falls back to the new-player default rather than dropping the player.
 fn load_ratings() -> HashMap<String, (f64, f64, u32)> {
     let mut out = HashMap::new();
     if let Ok(txt) = std::fs::read_to_string(ratings_file()) {
@@ -396,6 +435,9 @@ fn load_ratings() -> HashMap<String, (f64, f64, u32)> {
     out
 }
 
+/// Persist the whole ratings map back to `ratings.json` (pretty-printed).
+/// Best-effort — a write error is swallowed rather than failing a settled match;
+/// the in-memory map stays authoritative until the next successful write.
 fn save_ratings(ratings: &HashMap<String, (f64, f64, u32)>) {
     let obj: Value = ratings
         .iter()
@@ -453,6 +495,9 @@ struct BoutHandle {
     /// A clone of the bout's input channel, given to a reconnecting client so its
     /// inputs flow to the same loop.
     input_tx: mpsc::Sender<BoutInput>,
+    /// The two participants' names, so a `rejoin` can confirm the reconnecting
+    /// identity actually belongs to this match (and pick its side) without
+    /// touching the bout task.
     name_a: String,
     name_b: String,
 }
@@ -784,8 +829,8 @@ fn sidx(s: Side) -> usize {
 /// the server's clock, broadcasts a snapshot to each client (~30Hz), and settles
 /// on the natural end.
 ///
-/// **Reconnect grace (pause-both).** A *human* side's socket dropping no longer
-/// forfeits instantly: the whole bout FREEZES (sim + inputs halt) for up to
+/// **Reconnect grace (pause-both).** When a *human* side's socket drops, the
+/// whole bout FREEZES (sim + inputs halt) for up to
 /// [`REJOIN_GRACE`] while we wait for that player to reconnect (an accidental
 /// refresh) and reattach via [`BoutControl::Reattach`] (the `rejoin` handler). The
 /// still-connected side is told `opponentReconnecting`; on reattach both get a
@@ -1006,10 +1051,10 @@ async fn run_bout(state: Shared, pb: PendingBout) {
             bout.tick_count(),
             bout.is_over(), // natural finish only — a forfeit isn't a real top-out
         );
-        // Persist the match as a deterministic, replayable VersusReplay (closes
-        // D5) — but ONLY for a natural finish (a real top-out the board reaches).
-        // A forfeit (a client disconnected) isn't in the seed+input stream, so its
-        // playback would never latch a winner; we don't store those.
+        // Persist the match as a deterministic, replayable VersusReplay — but ONLY
+        // for a natural finish (a real top-out the board reaches). A forfeit (a
+        // client disconnected) isn't in the seed+input stream, so its playback would
+        // never latch a winner; we don't store those.
         if bout.is_over() {
             let replay = bout.to_replay(bout::TICK_MS, ENGINE_SHA);
             let json = replay.to_json();
@@ -1045,6 +1090,8 @@ async fn run_bout(state: Shared, pb: PendingBout) {
     }
 }
 
+/// The `rating` frame a player receives when a bout settles: their new mu/sigma,
+/// the conservative (μ−3σ) figure the ladder ranks on, and whether they won.
 fn rating_msg(s: &PlayerState, won: bool) -> Value {
     json!({
         "type": "rating",
@@ -1097,6 +1144,15 @@ async fn reject_if_draining(state: &Shared, id: &str) -> bool {
     true
 }
 
+/// Dispatch one client text frame by its `type`, the lobby/matchmaking protocol's
+/// whole inbound surface. A malformed frame or an unknown `type` is ignored
+/// (the wire is untrusted; nothing crashes a connection).
+///
+/// The arms split into presence/identity (`watch`/`active`/`available`), pairing
+/// (`queue`/`challenge`/`challengeAccept`/`challengeDecline`), and in-bout control
+/// (`input`/`rejoin`/`leaveMatch`/`spectate`). A matchmaking arm that pairs two
+/// clients returns a [`PendingBout`] from inside the lock and spawns [`run_bout`]
+/// for it OUTSIDE the lock — the tick loop must not hold the `App` mutex.
 async fn handle_message(state: &Shared, id: &str, text: &str) {
     let v: Value = match serde_json::from_str(text) {
         Ok(v) => v,
@@ -1420,10 +1476,24 @@ fn new_id(kind: &str) -> String {
     format!("{kind}-{}", uuid::Uuid::new_v4())
 }
 
+/// `GET /ws` — complete the WebSocket upgrade and hand the socket to
+/// [`handle_socket`] for the lifetime of the connection.
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Shared>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
+/// Own one client connection end to end: register a fresh [`Client`], spawn the
+/// writer and keepalive-ping tasks, pump inbound frames through [`handle_message`],
+/// and clean up on disconnect.
+///
+/// The socket is split into a reader (this task's loop) and a writer task fed by
+/// an unbounded channel, so every other part of the server sends to this client by
+/// enqueuing a [`Message`] — it never awaits the socket directly and a slow client
+/// can't stall the matchmaking lock. The ws Ping/Pong loop doubles as the lobby's
+/// per-player latency probe. On disconnect we notify a non-bout peer, retract any
+/// pending challenges, and drop the connection; an in-bout drop is left to the
+/// bout's tick loop (which holds its own writer clone) so the reconnect grace can
+/// apply.
 async fn handle_socket(socket: WebSocket, state: Shared) {
     let id = new_id("client");
     let (mut sender, mut receiver) = socket.split();
@@ -1518,8 +1588,8 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
             clear_challenge(&mut a, &cid);
             send(&a, &cid, &json!({"type":"challengeDeclined","by":by}));
         }
-        // A mid-bout disconnect is NOT a forfeit anymore: the bout's tick loop sees
-        // the dropped socket and enters the reconnect-grace freeze (the player may be
+        // A mid-bout disconnect is NOT a forfeit: the bout's tick loop sees the
+        // dropped socket and enters the reconnect-grace freeze (the player may be
         // refreshing), forfeiting only if they don't reattach in time. So only fire
         // `opponentLeft` for a (non-bout) peer link; the loop owns the in-bout case.
         // We still remove this dead connection below — the loop holds its own `tx`
@@ -1559,8 +1629,8 @@ async fn handle_socket(socket: WebSocket, state: Shared) {
 // browsing is one indexed `SELECT … ORDER BY created_at` — not a scan that opens
 // and parses every file. A recording uploaded by the "report a bug" button or
 // the 🔗 Share button lands here keyed by a content hash (dedup), and is fetched
-// back by id. Older deployments stored replays as JSON files; those are imported
-// into the DB once at startup (see `import_dir`).
+// back by id. A plain on-disk JSON directory, if present, is imported into the DB
+// once at startup (see `import_dir`).
 
 /// Path to the SQLite database (`REPLAY_DB`, default `replays.db`; prod sets
 /// `/data/replays.db` on the fly volume).
@@ -1568,8 +1638,8 @@ fn db_path() -> String {
     std::env::var("REPLAY_DB").unwrap_or_else(|_| "replays.db".to_string())
 }
 
-/// Legacy on-disk JSON directory, imported once at startup if present
-/// (`REPLAYS_DIR`, default `replays`; prod's old store was `/data/replays`).
+/// On-disk JSON replay directory, imported into the DB once at startup if present
+/// (`REPLAYS_DIR`, default `replays`; prod points it at `/data/replays`).
 fn replays_dir() -> String {
     std::env::var("REPLAYS_DIR").unwrap_or_else(|_| "replays".to_string())
 }
@@ -1589,6 +1659,8 @@ fn valid_replay_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// Wall-clock seconds since the Unix epoch — the `created_at` stamp for stored
+/// recordings (0 if the clock is somehow before the epoch).
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1596,6 +1668,10 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+/// The DB schema, applied idempotently at every boot (`CREATE TABLE IF NOT
+/// EXISTS`). Three tables: `replays` (the recording store + browse metadata),
+/// `counters` (the persistent visit counter), and `players` (per-player stats).
+/// Columns added independently of this batch are reconciled by [`init_schema`].
 const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS replays (
     id          TEXT PRIMARY KEY,
@@ -1634,18 +1710,19 @@ CREATE TABLE IF NOT EXISTS players (
     longest_game   INTEGER
 );";
 
+/// Create the schema and reconcile the `replays` columns the `CREATE TABLE IF NOT
+/// EXISTS` batch can't add to a table that already exists. Each `ADD COLUMN` is
+/// idempotent: the duplicate-column error is ignored, so a row missing the column
+/// simply reads it back as NULL until written. Runs on every boot.
 fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(SCHEMA)?;
-    // Migration for DBs created before `title` existed. CREATE TABLE IF NOT
-    // EXISTS won't add the column, so ALTER it in; ignore the duplicate-column
-    // error when it's already there.
+    // Optional replay title.
     let _ = conn.execute("ALTER TABLE replays ADD COLUMN title TEXT", []);
-    // Player names per online match (for the library's "Alice vs Bob" + profile
-    // links); same idempotent-ALTER migration. Older rows keep NULL names.
+    // Per-online-match player names (the library's "Alice vs Bob" + profile links).
     let _ = conn.execute("ALTER TABLE replays ADD COLUMN name_a TEXT", []);
     let _ = conn.execute("ALTER TABLE replays ADD COLUMN name_b TEXT", []);
-    // Total lines cleared in the recording (shown in the library). Backfilled
-    // for pre-existing rows by `backfill_lines`.
+    // Total lines cleared in the recording (shown in the library); a NULL is
+    // filled in by `backfill_lines`.
     let _ = conn.execute("ALTER TABLE replays ADD COLUMN lines INTEGER", []);
     Ok(())
 }
@@ -1687,9 +1764,10 @@ fn versus_replay_lines(r: &VersusReplay) -> i64 {
     p.game(true).score().lines + p.game(false).score().lines
 }
 
-/// One-time backfill of the `lines` column for rows recorded before it existed
-/// (best-effort: malformed JSON is skipped). After the first run no rows are
-/// NULL, so subsequent startups are no-ops.
+/// Fill the `lines` column for any row that still has it NULL, by deterministically
+/// replaying the recording to count cleared lines (best-effort: malformed JSON is
+/// skipped). Once every row has a value the query matches nothing, so later boots
+/// are no-ops.
 fn backfill_lines(conn: &Connection) {
     let rows: Vec<(String, String)> = match conn.prepare("SELECT id, json FROM replays WHERE lines IS NULL") {
         Ok(mut stmt) => stmt
@@ -1771,8 +1849,9 @@ fn db_insert_versus(
     )
 }
 
-/// Fetch a recording's JSON by id. (Kept as a focused helper; the served endpoint
-/// uses [`db_get_with_names`], but tests + future callers want the plain JSON.)
+/// Fetch a recording's raw JSON by id, with no name injection. The served endpoint
+/// uses [`db_get_with_names`]; this focused helper is the plain-JSON form tests
+/// read against.
 #[allow(dead_code)]
 fn db_get(conn: &Connection, id: &str) -> rusqlite::Result<Option<String>> {
     conn.query_row("SELECT json FROM replays WHERE id = ?1", [id], |row| row.get::<_, String>(0))
@@ -1826,7 +1905,9 @@ fn db_hits(conn: &Connection) -> i64 {
 // rating source-of-truth for matchmaking; this table mirrors mu/sigma so the
 // per-player profile endpoint is one indexed lookup.
 
-/// A player's stored stats. `None` figures are "never recorded yet".
+/// A player's stored stats, one row in the `players` table. `None` figures are
+/// "never recorded yet". `mu`/`sigma` mirror `ratings.json` so a profile lookup
+/// is one indexed read; `ratings.json` stays the matchmaking source-of-truth.
 #[derive(Debug, Clone, PartialEq)]
 struct PlayerStats {
     name: String,
@@ -1835,7 +1916,10 @@ struct PlayerStats {
     games: i64,
     wins: i64,
     losses: i64,
+    /// Length of the current unbroken run, of the kind named by `streak_type`.
     streak: i64,
+    /// Which result the current `streak` counts: `"wins"` or `"losses"`. `None`
+    /// only before the player's first recorded match.
     streak_type: Option<String>,
     high_score: Option<i64>,
     high_lines: Option<i64>,
@@ -2056,10 +2140,11 @@ fn db_list(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Value>> {
     rows.collect()
 }
 
-/// One-time migration: import any pre-existing on-disk replay JSON (the old file
-/// store / a fly volume from before the DB) into the DB. Idempotent (`INSERT OR
-/// IGNORE` by content id), best-effort — malformed files are skipped, and the
-/// file's mtime is preserved as `created_at` so historical ordering survives.
+/// Import any on-disk replay JSON files from `dir` into the DB at startup, so a
+/// plain JSON directory (e.g. a fly volume) folds into the indexed store.
+/// Idempotent (`INSERT OR IGNORE` by content id), best-effort — malformed files
+/// are skipped, and each file's mtime is preserved as `created_at` so ordering by
+/// recency survives the import. Returns the number newly inserted.
 fn import_dir(conn: &Connection, dir: &str) -> usize {
     let rd = match std::fs::read_dir(dir) {
         Ok(r) => r,
@@ -2460,6 +2545,14 @@ async fn static_no_cache(
     res
 }
 
+/// Boot the server: open the replay DB (importing any on-disk JSON), build the
+/// shared state, wire the axum router (the `/ws` matchmaking socket, the replay /
+/// leaderboard / player / identity / admin / metrics endpoints, then static files
+/// as a fallback), and serve forever. The two middleware layers add a
+/// revalidate-on-load cache policy to static assets and a request counter; the
+/// idle-decay task keeps the live "players online" count honest as clients go
+/// quiet. Binds the IPv6 any-address so the same listener serves the public site,
+/// fly's IPv4 proxy, and the IPv6-only 6PN network the region bots reach us on.
 #[tokio::main]
 async fn main() {
     // Error tracking — inert until SENTRY_DSN is set (a fly secret). The guard is
@@ -2541,8 +2634,8 @@ async fn main() {
     // Bind the IPv6 any-address. On Linux this is dual-stack (IPV6_V6ONLY=0 by
     // default), so it serves BOTH the public site (the fly proxy reaches us over
     // IPv4) AND fly's private 6PN network, which is IPv6-ONLY — that 6PN path is
-    // how the region bots reach us at ws://battletris.internal:8080. Binding only
-    // 0.0.0.0 (IPv4) left the 6PN port closed, so the bots got "connection refused".
+    // how the region bots reach us at ws://battletris.internal:8080. A 0.0.0.0
+    // (IPv4-only) bind would leave the 6PN port closed and the bots unable to connect.
     let addr = format!("[::]:{port}");
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
@@ -2551,6 +2644,10 @@ async fn main() {
     axum::serve(listener, app).await.unwrap();
 }
 
+/// Tests for the matchmaking/settlement "between-the-game" layer: rating updates,
+/// pairing eligibility, the drain gate, presence restoration, challenge routing,
+/// and the replay/counters DB helpers — exercised against an in-memory SQLite and
+/// hand-built [`App`] state, with no live sockets.
 #[cfg(test)]
 mod tests {
     use super::*;

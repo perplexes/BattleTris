@@ -11,7 +11,11 @@ use prometheus::{
 };
 use std::sync::LazyLock;
 
+/// The process-wide metric handles, registered against one [`Registry`] that
+/// `/metrics` serializes. Each field is a cheap atomic, so hot-path call sites
+/// can bump them inline.
 pub struct Metrics {
+    /// The collector every metric registers into; [`render`] gathers it.
     registry: Registry,
     /// WebSocket frames, labelled `direction` = "in" | "out". `rate()` → msgs/sec.
     pub ws_messages: CounterVec,
@@ -25,6 +29,8 @@ pub struct Metrics {
     pub matches: Counter,
 }
 
+/// The one shared metrics instance, built and registered on first access. Call
+/// sites reach the counters through `METRICS.…`; [`render`] reads the registry.
 pub static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
     let registry = Registry::new();
     let ws_messages = CounterVec::new(
@@ -52,10 +58,12 @@ pub static METRICS: LazyLock<Metrics> = LazyLock::new(|| {
     Metrics { registry, ws_messages, ws_ping_ms, http_requests, ws_connections, matches }
 });
 
-/// Convenience helpers so call sites stay one-liners.
+/// Count one inbound WebSocket frame — wraps the `direction="in"` label so the
+/// read loop stays a one-liner.
 pub fn ws_in() {
     METRICS.ws_messages.with_label_values(&["in"]).inc();
 }
+/// Count one outbound WebSocket frame (`direction="out"`).
 pub fn ws_out() {
     METRICS.ws_messages.with_label_values(&["out"]).inc();
 }
