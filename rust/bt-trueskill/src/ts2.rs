@@ -30,40 +30,58 @@ use crate::{quality_1v1, rate_1v1_draw, Params, Rating};
 /// Who won the match.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Winner {
+    /// Player A won outright.
     A,
+    /// Player B won outright.
     B,
+    /// Neither side won (a tie, or — once quits are resolved — both quit).
     Draw,
 }
 
-/// The observable result of a match.
+/// The observable result of a match: who won, plus the side signals (lines,
+/// quits) that the TS2 model folds into the update.
 #[derive(Clone, Copy, Debug)]
 pub struct MatchOutcome {
+    /// The reported winner. A quit overrides this when the match is rated.
     pub winner: Winner,
-    /// Lines cleared by A and B (the TS2 individual-statistic signal).
+    /// Lines cleared by A and B — the TS2 individual-statistic signal. A wide
+    /// line margin is extra evidence of a skill gap beyond the bare win bit.
     pub a_lines: u32,
     pub b_lines: u32,
-    /// Whether each player rage-quit / disconnected.
+    /// Whether each player quit / disconnected. A one-sided quit makes that
+    /// player lose (if both quit it's a draw), and any quitter takes an extra
+    /// rating penalty on top.
     pub a_quit: bool,
     pub b_quit: bool,
 }
 
 impl MatchOutcome {
+    /// An A win with the given line counts and no quits — the common case.
     pub fn a_wins(a_lines: u32, b_lines: u32) -> Self {
         MatchOutcome { winner: Winner::A, a_lines, b_lines, a_quit: false, b_quit: false }
     }
+    /// A B win with the given line counts and no quits.
     pub fn b_wins(a_lines: u32, b_lines: u32) -> Self {
         MatchOutcome { winner: Winner::B, a_lines, b_lines, a_quit: false, b_quit: false }
     }
 }
 
 /// A player's persistent rating plus their match experience.
+///
+/// Experience is carried alongside the rating because the TS2 experience offset
+/// (eq 8) gives newer players a small upward nudge that decays with games
+/// played — so the count, not just the rating, must persist between matches.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PlayerState {
+    /// The Gaussian skill belief.
     pub rating: Rating,
+    /// Number of rated matches played — drives the decaying experience offset.
     pub experience: u32,
 }
 
 impl PlayerState {
+    /// A zero-experience state around `rating` — pass [`Params::new_rating`] for
+    /// a brand-new player at the prior.
     pub fn new(rating: Rating) -> Self {
         PlayerState { rating, experience: 0 }
     }
@@ -87,6 +105,9 @@ pub struct Ts2Params {
 }
 
 impl Default for Ts2Params {
+    /// Classic defaults plus deliberately conservative TS2 knobs. The lines/quit/
+    /// experience weights are uncalibrated (see the module caveat), so they are
+    /// set low enough to nudge rather than dominate the classic update.
     fn default() -> Self {
         Ts2Params {
             base: Params::default(),
@@ -103,6 +124,11 @@ impl Default for Ts2Params {
 impl Ts2Params {
     /// The experience offset for a player with `experience` matches (eq 8):
     /// `bump * exp(-experience / k)`.
+    ///
+    /// A small upward `mu` nudge that is largest for a brand-new player and
+    /// decays toward zero with games played, so newcomers (who tend to be
+    /// underrated early) climb a little faster without permanently inflating
+    /// anyone. `experience_k <= 0` disables it.
     pub fn experience_offset(&self, experience: u32) -> f64 {
         if self.experience_k <= 0.0 {
             return 0.0;
@@ -111,8 +137,9 @@ impl Ts2Params {
     }
 }
 
-/// Effective winner once quits are accounted for: a quit is a surrender (loss).
-/// If both quit, it's a draw.
+/// Effective winner once quits are accounted for: a quit is a surrender (loss),
+/// so it overrides whatever `winner` was reported. If both quit, it's a draw.
+/// This is what stops a player from dodging a rating hit by disconnecting.
 fn effective_winner(o: &MatchOutcome) -> Winner {
     match (o.a_quit, o.b_quit) {
         (true, true) => Winner::Draw,
@@ -173,7 +200,11 @@ fn rate_decisive(winner: Rating, loser: Rating, z: f64, p: &Ts2Params) -> (Ratin
     )
 }
 
-/// Rate a 1v1 match with the TS2 model. Returns updated states (experience++).
+/// Rate a 1v1 match with the TS2 model — the public entry point. Applies, in
+/// order: the rating update (a decisive result folds in the line-margin signal;
+/// a draw uses the classic draw update and ignores lines), then the quit penalty
+/// and the experience offset; returns the updated states with `experience`
+/// incremented.
 pub fn rate_match(
     a: PlayerState,
     b: PlayerState,
@@ -188,6 +219,8 @@ pub fn rate_match(
             rate_decisive(a.rating, b.rating, z, p)
         }
         Winner::B => {
+            // rate_decisive takes (winner, loser); call it B-first and the line
+            // margin from B's view, then swap the pair back to (A, B) order.
             let z = o.b_lines as f64 - o.a_lines as f64;
             let (w, l) = rate_decisive(b.rating, a.rating, z, p);
             (l, w)
@@ -213,7 +246,9 @@ pub fn rate_match(
     )
 }
 
-/// Match quality (probability of a draw) for matchmaking two players.
+/// Match quality (a `[0, 1]` balance score) for matchmaking two players — the
+/// TS2 wrapper over [`quality_1v1`] that takes [`PlayerState`]s. Higher means a
+/// more balanced, more interesting pairing.
 pub fn match_quality(a: &PlayerState, b: &PlayerState, p: &Ts2Params) -> f64 {
     quality_1v1(a.rating, b.rating, &p.base)
 }

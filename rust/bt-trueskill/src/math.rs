@@ -1,5 +1,12 @@
 //! Standard-normal helpers and the truncated-Gaussian `v`/`w` correction
 //! functions used by the TrueSkill update (Herbrich et al., 2007).
+//!
+//! The cdf (via an `erfc` approximation) and its inverse (Acklam's rational
+//! approximation) are computed in-crate rather than pulled from a dependency, so
+//! the crate stays self-contained; their accuracy (~1e-7 / ~1e-9) is far finer
+//! than rating math needs. The `v`/`w` functions are the heart of
+//! the update: each maps a normalized skill gap to "how much should this result
+//! move the rating," derived from a Gaussian truncated at the win/draw boundary.
 
 use std::f64::consts::PI;
 
@@ -9,7 +16,7 @@ pub fn pdf(x: f64) -> f64 {
     (-(x * x) / 2.0).exp() / (2.0 * PI).sqrt()
 }
 
-/// Standard normal cdf `Phi(x)`, via `erfc`.
+/// Standard normal cdf `Phi(x)` — the probability mass below `x`, via `erfc`.
 #[inline]
 pub fn cdf(x: f64) -> f64 {
     0.5 * erfc(-x / std::f64::consts::SQRT_2)
@@ -95,20 +102,27 @@ pub fn inv_cdf(p: f64) -> f64 {
     }
 }
 
-/// `V` correction for a win: mean shift factor. `t` is the normalized skill
-/// difference, `e` the normalized draw margin.
+/// `V` correction for a win: the mean-shift factor `pdf/cdf` of a Gaussian
+/// truncated at the win boundary. `t` is the normalized skill difference, `e` the
+/// normalized draw margin. Largest when the winner was the underdog (`t` very
+/// negative) — that is the surprising result that should move ratings most.
 pub fn v_win(t: f64, e: f64) -> f64 {
     let x = t - e;
     let denom = cdf(x);
     if denom < 1e-300 {
-        // pdf(x)/cdf(x) -> -x as x -> -inf
+        // For a deep upset the cdf underflows to 0; use the analytic limit
+        // pdf(x)/cdf(x) -> -x as x -> -inf so the ratio stays finite.
         -x
     } else {
         pdf(x) / denom
     }
 }
 
-/// `W` correction for a win: variance shrink factor in `[0, 1)`.
+/// `W` correction for a win: the variance-shrink factor, clamped to `[0, 1]`.
+/// How much of the player's uncertainty this result resolves; the true factor is
+/// below 1, but it is clamped because rounding in the `v`/`pdf` approximations
+/// could otherwise nudge it just outside the valid range (a negative shrink would
+/// grow variance — physically wrong).
 pub fn w_win(t: f64, e: f64) -> f64 {
     let x = t - e;
     let v = v_win(t, e);
@@ -116,12 +130,15 @@ pub fn w_win(t: f64, e: f64) -> f64 {
     w.clamp(0.0, 1.0)
 }
 
-/// `V` correction for a draw.
+/// `V` correction for a draw: the mean shift toward the opponent. Uses the
+/// two-sided truncation (the result fell *within* `±e` of a tie) rather than the
+/// one-sided win boundary.
 pub fn v_draw(t: f64, e: f64) -> f64 {
     let denom = cdf(e - t) - cdf(-e - t);
     let numer = pdf(-e - t) - pdf(e - t);
     if denom < 1e-300 {
-        // Degenerate; fall back to the win correction's asymptotics.
+        // The truncation interval has underflowed to zero mass; fall back to the
+        // win correction's asymptotics so the factor stays finite.
         if t < 0.0 {
             -t - e
         } else {
@@ -132,7 +149,9 @@ pub fn v_draw(t: f64, e: f64) -> f64 {
     }
 }
 
-/// `W` correction for a draw, in `[0, 1)`.
+/// `W` correction for a draw, clamped to `[0, 1]`. Variance-shrink counterpart of
+/// [`v_draw`]; the degenerate interval returns the maximal shrink (1.0), and the
+/// result is clamped for the same reason as [`w_win`].
 pub fn w_draw(t: f64, e: f64) -> f64 {
     let denom = cdf(e - t) - cdf(-e - t);
     let v = v_draw(t, e);

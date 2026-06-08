@@ -23,18 +23,30 @@ pub mod ts2;
 pub use ts2::{MatchOutcome, Ts2Params};
 
 /// A Gaussian skill belief: `N(mu, sigma^2)`.
+///
+/// Skill is never observed directly, only inferred from match outcomes, so it is
+/// carried as a full distribution rather than a single number: `mu` is the
+/// current best guess and `sigma` is how unsure we are of it. A match generally
+/// moves `mu` toward the result and tightens `sigma` as evidence accumulates
+/// (the dynamics term can nudge `sigma` back up between games — see [`Params::tau`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rating {
+    /// Mean of the skill belief — the point estimate of the player's strength.
     pub mu: f64,
+    /// Standard deviation of the belief — the uncertainty. High for new players,
+    /// generally shrinking as they are measured.
     pub sigma: f64,
 }
 
 impl Rating {
+    /// A rating with an explicit mean and uncertainty. Most callers want
+    /// [`Params::new_rating`] (the prior) instead of hand-picking these.
     pub fn new(mu: f64, sigma: f64) -> Rating {
         Rating { mu, sigma }
     }
 
-    /// Variance `sigma^2`.
+    /// Variance `sigma^2`. The math works in variance space (additive,
+    /// closed-form) and only takes the square root back to `sigma` at the end.
     #[inline]
     pub fn variance(&self) -> f64 {
         self.sigma * self.sigma
@@ -42,28 +54,47 @@ impl Rating {
 
     /// A conservative skill estimate for leaderboards / display: `mu - k*sigma`
     /// (TrueSkill convention `k = 3`).
+    ///
+    /// Ranking by `mu` alone would let a lucky newcomer with one win and huge
+    /// `sigma` outrank a proven veteran. Subtracting `k` standard deviations is
+    /// "skill we're confident the player has at least," so the leaderboard /
+    /// rating display ranks by this: a player must both perform AND be *measured*
+    /// (low `sigma`) to climb.
     pub fn conservative(&self, k: f64) -> f64 {
         self.mu - k * self.sigma
     }
 }
 
 /// Tunable model parameters (classic TrueSkill).
+///
+/// These set the shape of the rating system: where new players start, how much
+/// a single game is allowed to move a rating, and how the model treats draws.
 #[derive(Clone, Copy, Debug)]
 pub struct Params {
-    /// Prior mean for a new player.
+    /// Prior mean for a new player — the `mu` everyone starts at.
     pub mu0: f64,
-    /// Prior standard deviation for a new player.
+    /// Prior standard deviation for a new player. Large by design so early games
+    /// move a new player's `mu` quickly until the system has measured them.
     pub sigma0: f64,
-    /// Performance variance `beta` — the per-game randomness.
+    /// Performance standard deviation `beta` — how far a player's per-game
+    /// showing can stray from their true skill (enters the math as `beta^2`).
+    /// Larger `beta` means a single result is weaker evidence, so updates are
+    /// gentler.
     pub beta: f64,
-    /// Dynamics `tau` — additive per-match skill drift (keeps sigma from
-    /// collapsing).
+    /// Dynamics standard deviation `tau` — its square `tau^2` is added to each
+    /// player's variance before a match. Re-inflates `sigma` a touch each game so
+    /// a long-settled rating never freezes solid and can still track a player who
+    /// genuinely improves or rusts.
     pub tau: f64,
-    /// Probability of a draw, used to derive the draw margin `epsilon`.
+    /// Assumed probability of a draw, used to derive the draw margin `epsilon`
+    /// (the performance gap below which a game counts as a tie).
     pub draw_probability: f64,
 }
 
 impl Default for Params {
+    /// The classic TrueSkill defaults (`mu0 = 25`, `sigma0 = 25/3`, with
+    /// `beta`/`tau` derived from `sigma0`). Chosen because this is a fresh 1v1
+    /// game with no historical scale to anchor to.
     fn default() -> Self {
         let sigma0 = 25.0 / 3.0;
         Params {
@@ -77,13 +108,17 @@ impl Default for Params {
 }
 
 impl Params {
-    /// A fresh rating at the prior.
+    /// A fresh rating at the prior — what a never-seen player starts with.
     pub fn new_rating(&self) -> Rating {
         Rating::new(self.mu0, self.sigma0)
     }
 
     /// Draw margin `epsilon` for a 1v1 (`n = 2` players):
     /// `epsilon = Phi^{-1}((p_draw + 1) / 2) * sqrt(2) * beta`.
+    ///
+    /// The margin by which one performance must exceed the other to count as a
+    /// win rather than a draw; derived from [`draw_probability`](Self::draw_probability)
+    /// so a single knob ("how often do players tie?") fixes it.
     pub fn draw_margin(&self) -> f64 {
         math::inv_cdf((self.draw_probability + 1.0) / 2.0) * std::f64::consts::SQRT_2 * self.beta
     }
@@ -91,19 +126,30 @@ impl Params {
 
 /// Update two ratings after `winner` beats `loser` (1v1, no draw).
 ///
-/// Returns `(new_winner, new_loser)`. Closed-form EP update from Herbrich et
-/// al. (2007).
+/// Returns `(new_winner, new_loser)`. The winner's `mu` rises and the loser's
+/// falls, both by an amount scaled by how *surprising* the result was: beating a
+/// favorite moves ratings far more than beating an underdog, because the latter
+/// is what the model already expected. The result is also evidence that usually
+/// tightens both beliefs, though the dynamics term can leave an already-certain
+/// rating's `sigma` slightly higher. Closed-form EP update from Herbrich et al.
+/// (2007).
 pub fn rate_1v1(winner: Rating, loser: Rating, p: &Params) -> (Rating, Rating) {
-    // Inflate variance by the dynamics factor first.
+    // Inflate variance by the dynamics factor first, so skill is allowed to have
+    // drifted since the last game before we measure this one.
     let sw2 = winner.variance() + p.tau * p.tau;
     let sl2 = loser.variance() + p.tau * p.tau;
 
+    // c normalizes the skill gap by the total uncertainty (both players' sigma
+    // plus the per-game performance noise 2*beta^2); t and e are that gap and the
+    // draw margin expressed on the standard-normal scale the v/w factors expect.
     let c = (2.0 * p.beta * p.beta + sw2 + sl2).sqrt();
     let eps = p.draw_margin();
 
     let t = (winner.mu - loser.mu) / c;
     let e = eps / c;
 
+    // v and w are the truncated-Gaussian corrections: v drives the mean shift,
+    // w the variance shrink. They encode the "surprise" — large for an upset.
     let v = math::v_win(t, e);
     let w = math::w_win(t, e);
 
@@ -113,6 +159,11 @@ pub fn rate_1v1(winner: Rating, loser: Rating, p: &Params) -> (Rating, Rating) {
 }
 
 /// Update two ratings after a 1v1 draw. Order of `a`/`b` does not matter.
+///
+/// A draw is itself evidence — that the two are close — so it pulls the means
+/// gently toward each other (no movement when they are already equal) and
+/// usually tightens both beliefs, rather than leaving the ratings untouched (the
+/// dynamics term can still raise an already-certain `sigma`).
 pub fn rate_1v1_draw(a: Rating, b: Rating, p: &Params) -> (Rating, Rating) {
     let sa2 = a.variance() + p.tau * p.tau;
     let sb2 = b.variance() + p.tau * p.tau;
@@ -132,20 +183,30 @@ pub fn rate_1v1_draw(a: Rating, b: Rating, p: &Params) -> (Rating, Rating) {
 }
 
 /// Apply the per-player mean/variance update given the shared `v`/`w` factors.
-/// `sign` is +1 for the player favored by `t` (winner / `a`), -1 otherwise.
+///
+/// Both players consume the same `v`/`w` (the result was one shared event); they
+/// differ only in `sign` and in their own pre-game variance, so a more uncertain
+/// player moves further on the same outcome. `sign` is +1 for the player favored
+/// by `t` (winner / `a`), -1 otherwise.
 fn update(mu: f64, var: f64, c: f64, v: f64, w: f64, sign: f64) -> Rating {
     let mean_mult = var / c;
     let var_mult = var / (c * c);
     let new_mu = mu + sign * mean_mult * v;
     let mut new_var = var * (1.0 - var_mult * w);
     if new_var < 1e-9 {
-        new_var = 1e-9; // numerical floor — variance must stay positive
+        new_var = 1e-9; // numerical floor — variance must stay strictly positive
     }
     Rating::new(new_mu, new_var.sqrt())
 }
 
-/// Match quality for matchmaking: the probability the match is a draw given the
-/// two ratings (1 = perfectly balanced). Closed form for 1v1.
+/// Match quality for matchmaking: a `[0, 1]` balance score derived from the
+/// draw probability, higher meaning a more even contest. Closed form for 1v1.
+///
+/// Drives pairing — the lobby prefers high-quality matchups so games are close.
+/// For a given pair it peaks when the two `mu`s coincide and falls as the gap
+/// widens; the ceiling itself is below 1 unless both players are also well
+/// measured (e.g. two fresh default ratings score ~0.45, not 1, because their
+/// `sigma` is large).
 pub fn quality_1v1(a: Rating, b: Rating, p: &Params) -> f64 {
     let two_beta2 = 2.0 * p.beta * p.beta;
     let denom = two_beta2 + a.variance() + b.variance();
