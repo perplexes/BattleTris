@@ -1,7 +1,8 @@
 //! Diagnostic tool: replay a stored versus `VersusReplay` and either dump both
-//! boards at a tick, or scan every tick for an engine invariant violation. Built
-//! while chasing the "piece rests in mid-air" bug (replay 75037e...) — kept as a
-//! reusable debugger. See CLAUDE.md ("Debugging replays").
+//! boards at a tick, or scan every tick for an engine invariant violation. The
+//! scan checks the game-vs-piece position-sync invariant — the engine's
+//! collision/lock position must equal the falling piece's own render position at
+//! all times — and reports any divergence as a desync frame.
 //!
 //! Get a stored replay's JSON:
 //!   curl https://battletris.fly.dev/api/replays/<id> -o /tmp/r.json
@@ -9,8 +10,7 @@
 //! Dump both boards at a tick (# = locked, O = falling piece):
 //!   cargo run -p bt-replay --example dump_replay -- /tmp/r.json 231
 //!
-//! Scan ALL ticks for a position desync (game pos vs piece pos — the class of
-//! bug that lets a piece lock floating):
+//! Scan ALL ticks for a position desync (game pos vs piece pos must stay equal):
 //!   cargo run -p bt-replay --example dump_replay -- /tmp/r.json
 
 use bt_replay::{VersusReplay, VersusReplayPlayer};
