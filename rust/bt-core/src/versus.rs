@@ -45,11 +45,12 @@ pub fn is_spy(token: WeaponToken) -> bool {
 /// Whether a Mirror makes `token` fizzle harmlessly rather than backfire onto a
 /// cursed launcher (`BTWeaponManager.C:204-216`).
 ///
-/// Two reasons a weapon is on this list: it has no meaningful self-target
-/// (Swap/Susan would exchange a board with itself; Keating/Mondale/Reagan/NiceDay
-/// against yourself is incoherent), or it would loop (Mirror reflecting Mirror).
-/// The spies are here too — reflecting an info weapon onto its own launcher does
-/// nothing useful, so it simply fizzles.
+/// A weapon fizzles when reflecting it onto its own launcher is meaningless:
+/// Swap/Susan would exchange a player's board or arsenal with itself;
+/// Keating/Mondale skim funds you would be taking from yourself; Have a Nice Day
+/// gifting yourself a smiley is harmless; the spies reveal you to yourself; and
+/// Mirror reflecting Mirror would loop. Every weapon NOT on this list backfires
+/// with real effect (e.g. Reagan negates the cursed launcher's own funds).
 pub fn mirror_nullifies(token: WeaponToken) -> bool {
     use WeaponToken::*;
     matches!(
