@@ -148,10 +148,13 @@ export type ServerMessageType = ServerMessage['type'];
 export type ClientMessage =
     | { type: 'available'; value: boolean; name?: string; token?: string; geo?: string; bot?: boolean }
     | { type: 'queue'; name: string; token: string; authoritative: true }
-    | { type: 'challenge'; target: string }
+    /** Directed challenge to another player. `name`/`token` are forwarded server-side
+     *  for identity verification when a challenge is sent while already open-to-matches. */
+    | { type: 'challenge'; target: string; name?: string; token?: string }
     | { type: 'challengeAccept'; from: string }
     | { type: 'challengeDecline'; from: string }
-    | { type: 'rejoin'; match_id: string; token: string; name: string }
+    | { type: 'rejoin'; match_id: string; token: string; name: string | null }
     | { type: 'leaveMatch' }
-    | { type: 'watch'; target: string }
+    /** Subscribe to live-site stats (lobby watch) — no target field for the stats variant. */
+    | { type: 'watch' }
     | { type: 'active' };

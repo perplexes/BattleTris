@@ -72,11 +72,13 @@ function fitCanvases(): void {
 function renderHud(el: HTMLElement, s: SpectateSide): void {
     const effects: string[] = [];
     for (let i = 0; i + 1 < s.effects.length; i += 2) {
-        effects.push(`<div><span>${weapon_name(s.effects[i])}</span><b>${s.effects[i + 1]}</b></div>`);
+        // Bounds checked above; ?? 0 satisfies noUncheckedIndexedAccess.
+        effects.push(`<div><span>${weapon_name(s.effects[i] ?? 0)}</span><b>${s.effects[i + 1] ?? 0}</b></div>`);
     }
     const slots: string[] = [];
     for (let i = 0; i < 10 && i * 2 + 1 < s.arsenal.length; i++) {
-        const tok = s.arsenal[i * 2], qty = s.arsenal[i * 2 + 1];
+        // Bounds checked above; ?? -1 / ?? 0 satisfy noUncheckedIndexedAccess.
+        const tok = s.arsenal[i * 2] ?? -1, qty = s.arsenal[i * 2 + 1] ?? 0;
         const n = (i + 1) % 10;
         slots.push(tok >= 0
             ? `<div>${n}. ${weapon_name(tok)}${qty > 1 ? ' &times;' + qty : ''}</div>`

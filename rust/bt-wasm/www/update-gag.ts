@@ -23,8 +23,8 @@ const UPDATE_CONCERNED_AFTER = 25; // the "we are concerned" line only after thi
 export const UPDATE_ACHIEVEMENT_AT = 50;  // press count that unlocks the achievement (once, persisted)
 
 export function gagOrdinal(n: number): string {
-    const s = ['th', 'st', 'nd', 'rd'], v = n % 100;
-    return n + (s[(v - 20) % 10] || s[v] || s[0]);
+    const s: [string, string, string, string] = ['th', 'st', 'nd', 'rd'], v = n % 100;
+    return n + (s[(v - 20) % 10] ?? s[v] ?? s[0]);
 }
 export function gagElapsed(ms: number): string {
     const t = Math.max(0, Math.floor(ms / 1000));

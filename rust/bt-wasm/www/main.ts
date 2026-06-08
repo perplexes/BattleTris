@@ -1,7 +1,7 @@
 import init, { WasmGame, WasmVsComputer, WasmClient, fixed_dt, max_weapons, weapon_name, weapon_price, weapon_description, weapon_duration } from '../pkg/bt_wasm.js';
 import { CELL_SIZE, drawBoard } from './render.js';
 import { Sound } from './sound.js';
-import type { ServerMessage, PlayerInfo, SideStatus, OppStatus, PlayerStats, ReplayMeta } from './protocol.js';
+import type { ServerMessage, ClientMessage, PlayerInfo, SideStatus, OppStatus, PlayerStats, ReplayMeta } from './protocol.js';
 import { escapeHtml } from './dom-util.js';
 import { nextGag, initialGagState, type GagState } from './update-gag.js';
 
@@ -259,12 +259,15 @@ const SELF_CHALLENGE_GAGS = [
 async function challengeSelected() {
     if (!selectedPlayer) return;
     if (selectedPlayer === playerName) {
-        showToast(SELF_CHALLENGE_GAGS[Math.floor(Math.random() * SELF_CHALLENGE_GAGS.length)], 4500);
+        showToast(SELF_CHALLENGE_GAGS[Math.floor(Math.random() * SELF_CHALLENGE_GAGS.length)] ?? '', 4500);
         return;
     }
     if (!await ensureIdentity()) return; // need a name/token first (field is focused)
     if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'challenge', target: selectedPlayer, name: playerName, token: identityToken }));
+        sendMsg({ type: 'challenge', target: selectedPlayer,
+            ...(playerName != null && { name: playerName }),
+            ...(identityToken != null && { token: identityToken }),
+        });
         setOnlineStatus(`Challenging ${selectedPlayer}…`);
         if (onlineStatus) onlineStatus.style.display = 'block';
     }
@@ -285,9 +288,10 @@ async function setAvailable(v: boolean) {
         syncAvailableUI(false);
         return;
     }
-    if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'available', value: v, name: playerName, token: identityToken }));
-    }
+    sendMsg({ type: 'available', value: v,
+        ...(playerName != null && { name: playerName }),
+        ...(identityToken != null && { token: identityToken }),
+    });
     syncAvailableUI(v);
 }
 
@@ -305,9 +309,8 @@ function respondChallenge(accept: boolean) {
     if (!pendingChallenger) return;
     const from = pendingChallenger;
     pendingChallenger = null;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: accept ? 'challengeAccept' : 'challengeDecline', from }));
-    }
+    if (accept) { sendMsg({ type: 'challengeAccept', from }); }
+    else { sendMsg({ type: 'challengeDecline', from }); }
     if (accept) { setOnlineStatus(`Accepting ${from}…`); if (onlineStatus) onlineStatus.style.display = 'block'; }
 }
 async function loadPlayerStats(name: string) {
@@ -422,6 +425,13 @@ function setOnlineStatus(msg: string) {
     onlineStatus.textContent = msg;
 }
 
+// Type-safe WebSocket send: serialises a ClientMessage to JSON and sends it.
+// Only call when the socket is open; callers are responsible for the readyState
+// guard (so the send sites can choose how to handle a closed socket).
+function sendMsg(msg: ClientMessage): void {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+}
+
 // ─── Live site stats (players online + 90s hit counter) ─────────────────────────
 //
 // A dedicated read-only websocket, opened on page load and kept open. Sending
@@ -444,26 +454,29 @@ function connectLobby() {
     const sock = new WebSocket(`${wsProto}://${location.host}/ws`);
     ws = sock;
     sock.onopen = () => {
-        if (ws !== sock) return; // superseded before it opened
-        sock.send(JSON.stringify({ type: 'watch' }));
+        if (ws !== sock) return; // superseded before it opened; ws !== sock so sendMsg is a no-op anyway
+        sendMsg({ type: 'watch' });
         // Rejoin takes priority: reattach to a live bout (after a refresh or a brief
         // socket drop) before doing any lobby presence. The server reattaches us and
         // replays matchStart + a keyframe; on failure it sends rejoinFailed.
         if (pendingRejoin !== null) {
             const mid = pendingRejoin; // a tagged-UUID string (match-<uuid>) from the URL
             pendingRejoin = null;
-            sock.send(JSON.stringify({ type: 'rejoin', match_id: mid, token: identityToken, name: playerName }));
+            sendMsg({ type: 'rejoin', match_id: mid, token: identityToken ?? '', name: playerName });
             return;
         }
         // Re-assert "Open to matches" across a reconnect (else the server forgets).
         if (availableToggle && availableToggle.checked) {
-            sock.send(JSON.stringify({ type: 'available', value: true, name: playerName, token: identityToken }));
+            sendMsg({ type: 'available', value: true,
+                ...(playerName != null && { name: playerName }),
+                ...(identityToken != null && { token: identityToken }),
+            });
         }
         // A Find Match requested while the socket was down (e.g. just after a
         // forfeit-leave): send the queue now that we're connected.
         if (pendingQueue) {
             pendingQueue = false;
-            sock.send(JSON.stringify({ type: 'queue', name: playerName, token: identityToken, authoritative: true }));
+            sendMsg({ type: 'queue', name: playerName ?? '', token: identityToken ?? '', authoritative: true });
         }
     };
     sock.onmessage = onSignalMessage;
@@ -594,9 +607,7 @@ function markActive() {
     const now = performance.now();
     if (now - lastActiveSent < 5000) return;
     lastActiveSent = now;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'active' }));
-    }
+    sendMsg({ type: 'active' });
 }
 
 // Reset match/search state. Does NOT close the socket — it's the persistent
@@ -767,7 +778,7 @@ async function findMatch() {
     cancelSearchBtn.style.display = 'inline-block';
     setOnlineStatus('Searching for an opponent…');
     if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'queue', name: playerName, token: identityToken, authoritative: true }));
+        sendMsg({ type: 'queue', name: playerName ?? '', token: identityToken ?? '', authoritative: true });
     } else {
         // Socket down (e.g. just after a forfeit-leave) — reconnect and queue on open.
         pendingQueue = true;
@@ -782,7 +793,7 @@ function cancelSearch() {
     findMatchBtn.classList.remove('searching');
     cancelSearchBtn.style.display = 'none';
     onlineStatus.style.display = 'none';
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'available', value: false }));
+    sendMsg({ type: 'available', value: false });
 }
 
 // Drop into a fresh online match. Online boards are independent (each player has
@@ -1335,8 +1346,9 @@ function processEvents() {
 
     for (let i = 0; i < events.length; i += 4) {
         // Events are packed [tag, a, b, c]; only tag + a are consumed here.
-        const tag = events[i];
-        const a = events[i + 1];
+        // i < events.length guarantees both slots exist; ?? 0 satisfies the checker.
+        const tag = events[i] ?? 0;
+        const a = events[i + 1] ?? 0;
 
         // Audio for the local player's events (synthesized in sound.js).
         if (tag === 0) {
@@ -1577,6 +1589,7 @@ canvas.addEventListener('touchstart', (e) => {
     if (mode === 'online' && onlinePaused) return;
 
     const touch = e.changedTouches[0];
+    if (!touch) return; // length check above guarantees this, but satisfies the checker
     const cell = canvas.clientWidth / game.width();
 
     touchState = {
@@ -1600,10 +1613,8 @@ canvas.addEventListener('touchmove', (e) => {
     // Find our tracked touch
     let touch: Touch | null = null;
     for (let i = 0; i < e.changedTouches.length; i++) {
-        if (e.changedTouches[i].identifier === touchState.id) {
-            touch = e.changedTouches[i];
-            break;
-        }
+        const t = e.changedTouches[i];
+        if (t && t.identifier === touchState.id) { touch = t; break; }
     }
     if (!touch) return;
 
@@ -1642,10 +1653,8 @@ canvas.addEventListener('touchend', (e) => {
     // Find our tracked touch
     let touch: Touch | null = null;
     for (let i = 0; i < e.changedTouches.length; i++) {
-        if (e.changedTouches[i].identifier === touchState.id) {
-            touch = e.changedTouches[i];
-            break;
-        }
+        const t = e.changedTouches[i];
+        if (t && t.identifier === touchState.id) { touch = t; break; }
     }
     if (!touch) {
         // Touch ended but not tracked; clear state
@@ -1909,8 +1918,8 @@ function leaveToLobby() {
     // grace (that's only for an accidental refresh). We keep the persistent lobby
     // socket; the server resets us to lobby presence when the bout ends.
     const forfeiting = (mode === 'online' && !gameEnded);
-    if (forfeiting && ws && ws.readyState === WebSocket.OPEN) {
-        try { ws.send(JSON.stringify({ type: 'leaveMatch' })); } catch (_) {}
+    if (forfeiting) {
+        try { sendMsg({ type: 'leaveMatch' }); } catch (_) {}
     }
     pendingRejoin = null;        // cancel any queued reconnect — we're leaving on purpose
     clearMatchUrl();             // a refresh now lands in the lobby, not back in the match

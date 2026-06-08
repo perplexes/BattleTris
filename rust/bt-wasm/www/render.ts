@@ -45,7 +45,7 @@ export function drawBoard(
     // Draw each cell
     for (let y = 0; y < height; y++) {
         for (let x = 0; x < width; x++) {
-            const cellId = grid[y * width + x];
+            const cellId = grid[y * width + x] ?? 0;
             drawCellOnContext(context, x, y, cellId);
         }
     }
@@ -67,7 +67,8 @@ export function drawCellOnContext(
 
     // Beveled colored boxes (1-8)
     if (cellId >= 1 && cellId <= 8) {
-        const colors = PALETTE[cellId];
+        // PALETTE has an entry for every id 1-8; the guard above guarantees this.
+        const colors = PALETTE[cellId]!;
         // Dark shadow on bottom-right
         context.fillStyle = colors.dark;
         context.fillRect(px, py, CELL_SIZE, CELL_SIZE);
@@ -153,8 +154,8 @@ export function drawCellOnContext(
 
         // Draw pips: solid black squares (NOT beveled — a die pip is a flat dot).
         const value = cellId - 23;
-        const X = [1, 7, 13];
-        const Y = [1, 7, 13];
+        const X: [number, number, number] = [1, 7, 13];
+        const Y: [number, number, number] = [1, 7, 13];
         const pipSize = 5;
 
         context.fillStyle = '#000000';

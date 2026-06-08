@@ -184,7 +184,7 @@ function idFromUrl(): string | null {
     // hex-only capture is exact — no hyphens/UUIDs to truncate. Confirmed against
     // bt-server/src/main.rs.
     const m = location.pathname.match(/\/replay\/([0-9a-fA-F]+)/);
-    return m ? m[1] : null;
+    return m ? (m[1] ?? null) : null;
 }
 
 function sizeCanvas(c: HTMLCanvasElement, w: number, h: number, scale: number): void {
@@ -231,11 +231,13 @@ function renderHud(el: HTMLElement, h: Hud | null): void {
 
     const effects: string[] = [];
     for (let i = 0; i + 1 < h.effects.length; i += 2) {
-        effects.push(`<div><span>${weapon_name(h.effects[i])}</span><b>${h.effects[i + 1]}</b></div>`);
+        // Bounds checked above; ?? 0 satisfies noUncheckedIndexedAccess.
+        effects.push(`<div><span>${weapon_name(h.effects[i] ?? 0)}</span><b>${h.effects[i + 1] ?? 0}</b></div>`);
     }
     const slots: string[] = [];
     for (let i = 0; i < 10 && i * 2 + 1 < h.arsenal.length; i++) {
-        const tok = h.arsenal[i * 2], qty = h.arsenal[i * 2 + 1];
+        // Bounds checked above; ?? -1 / ?? 0 satisfy noUncheckedIndexedAccess.
+        const tok = h.arsenal[i * 2] ?? -1, qty = h.arsenal[i * 2 + 1] ?? 0;
         const n = (i + 1) % 10;
         slots.push(tok >= 0
             ? `<div>${n}. ${weapon_name(tok)}${qty > 1 ? ' &times;' + qty : ''}</div>`
@@ -262,7 +264,8 @@ function captureLaunches(): void {
     if (!l || l.length === 0) return;
     const tick = player.tick_index();
     for (let i = 0; i + 1 < l.length; i += 2) {
-        const side = l[i], token = l[i + 1];
+        // Bounds checked above; ?? 0 satisfies noUncheckedIndexedAccess.
+        const side = l[i] ?? 0, token = l[i + 1] ?? 0;
         const who = side === 0 ? player.labelA() : player.labelB();
         const row = document.createElement('div');
         row.className = 'rel-row rel-side-' + side;
