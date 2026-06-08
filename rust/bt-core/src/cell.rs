@@ -134,7 +134,9 @@ impl Cell {
         self.kind.is_removable()
     }
 
-    /// `BTBox::hide()`.
+    /// Cloak this square so it renders as nothing — the Twilight Zone effect.
+    /// The cell keeps its true kind and value; only its rendered id is suppressed
+    /// ([`Cell::id`] returns -1), so clearing and funds are unaffected.
     pub fn hide(&mut self) {
         self.hidden = true;
     }

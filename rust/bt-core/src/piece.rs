@@ -275,12 +275,15 @@ impl Piece {
         }
     }
 
-    /// `BTPiece::isMapped`.
+    /// Whether local grid cell `(x, y)` is part of the piece's shape.
     pub fn is_mapped(&self, x: usize, y: usize) -> bool {
         self.cells[x][y].is_some()
     }
 
-    /// `BTPiece::canMoveTo` — can the piece occupy board position `(x, y)`?
+    /// Whether the piece would fit if its origin were at board `(x, y)`. Tests
+    /// every occupied local cell against the board, where out-of-bounds counts as
+    /// occupied — so this rejects both overlaps and moves off the walls/floor in
+    /// one check (`BTPiece::canMoveTo`).
     pub fn can_move_to(&self, board: &Board, x: i32, y: i32) -> bool {
         for i in 0..BT_PIECE_WIDTH {
             for j in 0..BT_PIECE_HEIGHT {
@@ -304,7 +307,9 @@ impl Piece {
         }
     }
 
-    /// `BTPiece::canRotate`.
+    /// Whether the piece could rotate at board `(x, y)` — the rotated footprint
+    /// is collision-tested before any rotation commits. A `rot` of 0 means the
+    /// piece has no rotation, so it can never rotate (`BTPiece::canRotate`).
     pub fn can_rotate(&self, board: &Board, x: i32, y: i32) -> bool {
         if self.rot == 0 {
             return false;
