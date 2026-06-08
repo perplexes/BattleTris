@@ -1,30 +1,34 @@
-//! Deterministic, seedable RNG matching the POSIX `drand48` family and a
-//! `rand()` used by the original game.
+//! Deterministic, seedable RNG reproducing the POSIX `drand48` family and the
+//! `rand()` the game draws from.
 //!
-//! The original (`BTPieceManager.C`, `BTBoardManager.C`, `BTPiece.C`) draws
-//! from `rand()`, `drand48()`, and `lrand48()`:
-//!   * piece selection: `rand() % BT_MAX_PIECES + 1`, then `drand48()` vs the
-//!     keep probability; `lrand48() % BT_BROKEN_PROB` for the Broken weapon.
-//!   * die value: `rand() % 6 + 1`.
-//!   * board weapon effects: `rand() % width`, `rand() % 2`, etc.
+//! Determinism is the whole point: the engine is replayed and re-simulated
+//! (replays, property tests, and server-authoritative reconciliation all rerun
+//! the same seed and must land on the same state), so randomness has to be a
+//! pure function of the seed and the exact sequence of draws — never the host
+//! platform's libc. This is a single 48-bit LCG implemented per POSIX so it
+//! gives identical results everywhere.
 //!
-//! ## Contract (do not change these public signatures; fill in the bodies):
-//!   * [`Rng::new`], [`Rng::rand`], [`Rng::rand_below`], [`Rng::drand48`],
-//!     [`Rng::lrand48`], [`RAND_MAX`].
+//! The order and KIND of draw matters as much as the values, because the engine
+//! consumes them in a fixed order that any faithful re-run must match:
+//!   * piece selection rolls `rand()` for the id, then `drand48()` against the
+//!     keep probability, plus `lrand48()` for the Broken Record reroll.
+//!   * a die's pips come from `rand()`.
+//!   * board weapon effects draw `rand()` for positions and coin flips.
 //!
-//! Implement the `drand48` family exactly per POSIX (48-bit LCG, multiplier
-//! `0x5DEECE66D`, increment `0xB`, modulus 2^48; `srand48(seed)` sets the high
-//! 32 bits of state to `seed` and the low 16 to `0x330E`). Make it fully
-//! deterministic from `new(seed)` so runs are reproducible across platforms.
+//! Each generator pulls from the same shared 48-bit state, so the methods are
+//! not interchangeable — calling the wrong one would desync every later draw.
 
-/// `RAND_MAX` for our deterministic `rand()`.
+/// Upper bound of [`Rng::rand`], inclusive — the 31-bit range the game's modulo
+/// idioms (`rand() % n`) assume.
 pub const RAND_MAX: i32 = 0x7fff_ffff;
 
-/// A deterministic POSIX-style RNG.
+/// A deterministic POSIX-style RNG. All three generators share one 48-bit LCG
+/// state, so the struct is cheap to clone and snapshot (a single integer is the
+/// entire reproducible random stream).
 #[derive(Clone, Debug)]
 pub struct Rng {
-    // 48-bit drand48 state; the implementing agent decides the exact layout.
-    #[allow(dead_code)]
+    /// The 48-bit LCG state. Only the low 48 bits are significant; the top 16
+    /// are always zero after each step.
     state: u64,
 }
 
@@ -49,39 +53,42 @@ impl Rng {
         Rng { state }
     }
 
-    /// Advance the 48-bit LCG state and return the new value.
-    /// POSIX drand48 step: X = (A * X + C) mod 2^48
-    /// where A = 0x5DEECE66D, C = 0xB.
+    /// The single LCG step shared by every generator: `X = (A·X + C) mod 2^48`,
+    /// the POSIX `drand48` recurrence. Every public draw advances state exactly
+    /// once through here, which is what keeps the stream order well-defined.
     fn next_state(&mut self) -> u64 {
         const A: u64 = 0x5DEECE66D;
         const C: u64 = 0xB;
-        const MOD: u64 = 1u64 << 48; // 2^48
+        const MOD: u64 = 1u64 << 48;
         self.state = (A.wrapping_mul(self.state).wrapping_add(C)) & (MOD - 1);
         self.state
     }
 
-    /// `rand()` — uniform in `0..=RAND_MAX`.
+    /// `rand()` — uniform in `0..=RAND_MAX`. Takes the top 31 bits of the 48-bit
+    /// state, the high bits being the well-distributed ones in an LCG.
     pub fn rand(&mut self) -> i32 {
-        // Advance state and return top 31 bits as i32.
         let x = self.next_state();
         (x >> 17) as i32
     }
 
-    /// `rand() % n` for `n > 0` (matches the C++ `rand() % n` idiom).
+    /// `rand() % n`, the modulo idiom the game uses for "pick one of `n`".
+    /// Requires `n > 0`.
     pub fn rand_below(&mut self, n: i32) -> i32 {
         self.rand() % n
     }
 
-    /// `drand48()` — uniform double in `[0.0, 1.0)`.
+    /// `drand48()` — uniform double in `[0.0, 1.0)`, the full 48-bit state scaled
+    /// to a fraction. Used for the keep-probability comparison in piece
+    /// selection.
     pub fn drand48(&mut self) -> f64 {
-        // Advance state and return as f64 / 2^48.
         let x = self.next_state();
         x as f64 / ((1u64 << 48) as f64)
     }
 
-    /// `lrand48()` — uniform non-negative long in `0..2^31`.
+    /// `lrand48()` — uniform non-negative long in `0..2^31` (same top-31-bit
+    /// extraction as [`Rng::rand`], returned wide). Used for the Broken Record
+    /// reroll.
     pub fn lrand48(&mut self) -> i64 {
-        // Advance state and return top 31 bits as i64.
         let x = self.next_state();
         (x >> 17) as i64
     }

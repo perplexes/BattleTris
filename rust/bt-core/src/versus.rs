@@ -1,23 +1,23 @@
 //! Two-player match wiring — the cross-player weapon relay plus an authoritative
 //! head-to-head match engine.
 //!
-//! The original BattleTris ran each player's board on their own client and
-//! exchanged deltas peer-to-peer (`BTCommManager`). This module hosts BOTH
-//! boards in one place so a single authority can tick them in lockstep and
-//! resolve the cross-player weapons (Mirror, Swap, Susan, the funds taxes)
-//! deterministically. It is consumed two ways:
-//!   * [`bt_ai::VsComputer`] (player vs Ernie) — reuses [`deliver_weapon`].
-//!   * the server's authoritative online match — owns a [`Versus`] and feeds it
-//!     each client's inputs, then ships authoritative snapshots back.
+//! Cross-player weapons (Mirror, Swap, Susan, the funds taxes) touch BOTH
+//! players, which a single [`Game`] cannot resolve on its own. So this module
+//! holds both boards in one place and ticks them in lockstep, giving one
+//! authority that resolves the relay deterministically. It is consumed two ways:
+//!   * `bt_ai::VsComputer` (player vs Ernie) — reuses [`deliver_weapon`].
+//!   * the server's authoritative online match — owns a [`Versus`], feeds each
+//!     client's inputs in, and ships authoritative snapshots back.
 //!
-//! Keeping it in `bt-core` (dependency-free) means the netcode never pulls in
-//! the AI crate just to relay a weapon.
+//! It lives in `bt-core` (which stays dependency-free) so the netcode can relay
+//! a weapon without pulling in the AI crate.
 
 use crate::game::{Game, GameEvent};
 use crate::weapons::WeaponToken;
 
-/// Which side of a head-to-head match. Generic A/B (the player-vs-AI wrapper
-/// keeps its own Player/Ai naming and maps onto this only when it needs to).
+/// Which side of a head-to-head match. Deliberately anonymous A/B rather than
+/// player/opponent — the relay is symmetric, and the player-vs-AI wrapper keeps
+/// its own Player/Ai naming, mapping onto these only at the boundary.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Side {
     A,
@@ -25,6 +25,7 @@ pub enum Side {
 }
 
 impl Side {
+    /// The opposing side — the relay's "deliver to the other player".
     pub fn other(self) -> Side {
         match self {
             Side::A => Side::B,
@@ -33,17 +34,22 @@ impl Side {
     }
 }
 
-/// Whether `token` is a spy (Ames/Ace/Condor) — an info weapon that reveals the
-/// opponent's board TO the launcher, rather than hitting the opponent. Resolved
-/// by the host (the server includes a degraded opponent board in the launcher's
-/// snapshot), not by the board engine.
+/// Whether `token` is a spy (Ames/Ace/Condor). Spies are information weapons:
+/// they reveal the opponent's board TO the launcher instead of hitting the
+/// opponent, so they are handled by the host (which includes a degraded opponent
+/// board in the launcher's snapshot) and never delivered as a board effect.
 pub fn is_spy(token: WeaponToken) -> bool {
     matches!(token, WeaponToken::Ames | WeaponToken::Ace | WeaponToken::Condor)
 }
 
-/// Weapons a Mirror simply nullifies (fizzles) rather than backfiring, per the
-/// original `BTWeaponManager.C:204-216` switch and the Mirror description.
-/// Includes Mirror itself (so a curse can't ping-pong) and the spies (D6).
+/// Whether a Mirror makes `token` fizzle harmlessly rather than backfire onto a
+/// cursed launcher (`BTWeaponManager.C:204-216`).
+///
+/// Two reasons a weapon is on this list: it has no meaningful self-target
+/// (Swap/Susan would exchange a board with itself; Keating/Mondale/Reagan/NiceDay
+/// against yourself is incoherent), or it would loop (Mirror reflecting Mirror).
+/// The spies are here too — reflecting an info weapon onto its own launcher does
+/// nothing useful, so it simply fizzles.
 pub fn mirror_nullifies(token: WeaponToken) -> bool {
     use WeaponToken::*;
     matches!(
@@ -52,40 +58,49 @@ pub fn mirror_nullifies(token: WeaponToken) -> bool {
     )
 }
 
-/// Route a weapon launched by `attacker` at `victim`, honoring the OFFENSIVE
-/// Mirror (faithful to `BTWeaponManager.C:204-219`).
+/// Route a weapon launched by `attacker` at `victim`, honoring the offensive
+/// Mirror (`BTWeaponManager.C:204-219`).
 ///
-/// Launching Mirror is a normal attack that curses the opponent. While a player
-/// is mirror-cursed, every weapon THEY launch is caught by their own curse: the
-/// nullify-9 ([`mirror_nullifies`]) fizzle, everything else backfires onto the
-/// cursed launcher. An un-cursed launch (Mirror included) hits the opponent.
+/// Launching Mirror is itself a normal attack that curses the opponent. The
+/// twist is what happens while a player IS mirror-cursed: their own curse
+/// catches every weapon they launch — [`mirror_nullifies`] ones fizzle, all
+/// others backfire onto the cursed launcher. An un-cursed launch (Mirror
+/// included) hits the opponent as normal.
 ///
-/// Swap/Susan act on both boards at once; every other weapon is queued on its
-/// target and lands at that target's next lock (the port's `weapq_` model).
+/// Swap and Susan act on both boards at once and are applied here immediately;
+/// every other weapon is queued on its target and takes effect at that target's
+/// next piece lock (the `weapq_` model).
 pub fn deliver_weapon(attacker: &mut Game, victim: &mut Game, token: WeaponToken) {
     if attacker.weapon_active(WeaponToken::Mirror) {
         if mirror_nullifies(token) {
             return; // fizzles against the launcher's own mirror curse
         }
-        // Backfires onto the cursed launcher (a local BT_WPN_ON in the original;
-        // queued to the launcher's next lock here, per the port's weapq model).
+        // Backfires: the effect is queued onto the cursed launcher's own next
+        // lock instead of the victim's.
         apply_weapon(attacker, victim, token, Recipient::Attacker);
         return;
     }
     apply_weapon(attacker, victim, token, Recipient::Victim);
 }
 
-/// Who a (non-Swap/Susan) weapon's effect lands on once Mirror is resolved.
+/// Which player a (non-Swap/Susan) weapon's effect lands on once Mirror has been
+/// resolved — the victim normally, or back onto the attacker when a curse
+/// backfired it.
 #[derive(Clone, Copy)]
 enum Recipient {
+    /// The launcher (a backfired weapon).
     Attacker,
+    /// The intended target.
     Victim,
 }
 
+/// Apply `token` after Mirror resolution: the symmetric exchanges act on both
+/// boards at once; everything else is queued onto whichever player `to` names.
 fn apply_weapon(attacker: &mut Game, victim: &mut Game, token: WeaponToken, to: Recipient) {
     match token {
-        // Swap/Susan are symmetric exchanges (never reach here while cursed —
-        // both are on the nullify list — so `to` is always Victim for them).
+        // Swap/Susan exchange between the two players, so they ignore `to`.
+        // (They never arrive here while the attacker is cursed — both are on the
+        // nullify list — so a backfired exchange can't occur.)
         WeaponToken::Swap => attacker.swap_board_with(victim),
         WeaponToken::Susan => attacker.swap_arsenal_with(victim),
         _ => match to {
@@ -101,9 +116,12 @@ fn apply_weapon(attacker: &mut Game, victim: &mut Game, token: WeaponToken, to: 
 /// state via [`Versus::game`]; it never has to reimplement the weapon relay.
 #[derive(Clone, Debug)]
 pub struct Versus {
+    /// Side A's game.
     a: Game,
+    /// Side B's game.
     b: Game,
-    /// 0 = ongoing, 1 = A won (B topped out), 2 = B won (A topped out).
+    /// 0 = ongoing, 1 = A won (B topped out), 2 = B won (A topped out). Latched
+    /// once set, so the first side to top out decides the match.
     result: i32,
     /// Set whenever this tick produced something a CLIENT can't predict from its
     /// own inputs — a cross-player weapon delivery, a funds tax/steal, or a bazaar
@@ -118,7 +136,7 @@ pub struct Versus {
 
 impl Versus {
     /// New match. The two sides get distinct seeds so their piece streams differ
-    /// (mirrors the player/AI split in [`bt_ai::VsComputer`]).
+    /// (mirrors the player/AI split in `bt_ai::VsComputer`).
     pub fn new(seed_a: u64, seed_b: u64) -> Versus {
         Versus {
             a: Game::new(seed_a),
@@ -145,6 +163,8 @@ impl Versus {
         }])
     }
 
+    /// Read-only access to one side's game (for rendering and authoritative
+    /// snapshots).
     pub fn game(&self, side: Side) -> &Game {
         match side {
             Side::A => &self.a,
@@ -166,6 +186,7 @@ impl Versus {
         self.result
     }
 
+    /// Whether a side has topped out and the match is decided.
     pub fn is_over(&self) -> bool {
         self.result != 0
     }
@@ -196,9 +217,10 @@ impl Versus {
             match e {
                 GameEvent::WeaponLaunched(t) => {
                     if is_spy(t) {
-                        // A spy reveals the opponent to the LAUNCHER (a host concern),
-                        // it is NOT delivered to the opponent — unless the launcher
-                        // is mirror-cursed, in which case it fizzles (D6).
+                        // A spy reveals the opponent to the LAUNCHER (a host
+                        // concern), never delivered to the opponent — unless the
+                        // launcher is mirror-cursed, in which case it fizzles
+                        // like any reflected info weapon.
                         if !self.a.weapon_active(WeaponToken::Mirror) {
                             self.spy_launch[0].push(t);
                         }

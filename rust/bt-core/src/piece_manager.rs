@@ -1,13 +1,18 @@
 //! Piece selection — the faithful analogue of `BTPieceManager`
 //! (`usr/src/game/BTPieceManager.{H,C}`).
 //!
-//! Holds the per-piece "keep probabilities" and selects the next piece by
-//! rejection sampling, honoring the weapons that change the piece stream
-//! (Feared Weird, Four-by-Four, No Dice, So Long, Have a Nice Day, Broken).
+//! The next piece is chosen by rejection sampling against a per-piece "keep
+//! probability" table: roll a uniform id, keep it with probability
+//! `keep_prob[id]`, re-roll otherwise. Expressing the distribution as a table of
+//! probabilities is what makes the stream-altering weapons trivial — each just
+//! rewrites a few entries (zeroing the standard pieces and enabling the weird
+//! ones for Feared Weird, zeroing the die for No Dice, and so on) and selection
+//! is unchanged.
 //!
-//! ## Contract (do not change these public signatures; fill in the bodies):
-//!   * [`PieceManager::new`], [`PieceManager::reset`], [`PieceManager::create`],
-//!     [`PieceManager::weapon_on`], [`PieceManager::weapon_off`].
+//! Selection is RNG-driven but the RNG is passed IN: this keeps the manager a
+//! pure function of `(state, rng)` so a replay or keyframe re-run produces the
+//! identical stream. The exact draw order matters and is documented on
+//! [`PieceManager::create`].
 
 use crate::piece::{Piece, PieceKind};
 use crate::rng::Rng;
