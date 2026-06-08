@@ -429,7 +429,10 @@ impl Game {
 
     // ---- input -------------------------------------------------------------
 
-    /// `BTGame::moveLeft`.
+    /// Shift the piece one cell toward `left_x` (which Upbyside flips). A move
+    /// made during the lock delay bumps the slide counter, which is how an
+    /// airslide tuck is later distinguished from a piece that simply came to rest
+    /// (`BTGame::moveLeft`).
     pub fn move_left(&mut self) {
         if self.paused || self.phase == Phase::Over {
             return;
@@ -445,7 +448,7 @@ impl Game {
         }
     }
 
-    /// `BTGame::moveRight`.
+    /// Mirror of [`Game::move_left`] toward `right_x` (`BTGame::moveRight`).
     pub fn move_right(&mut self) {
         if self.paused || self.phase == Phase::Over {
             return;
@@ -461,7 +464,8 @@ impl Game {
         }
     }
 
-    /// `BTGame::rotate`.
+    /// Rotate the falling piece in its forward direction (a blocked rotation is a
+    /// no-op) (`BTGame::rotate`).
     pub fn rotate(&mut self) {
         if self.paused || self.phase == Phase::Over {
             return;

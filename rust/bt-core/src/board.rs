@@ -139,7 +139,8 @@ impl Board {
         // else: fell off the board — discard (C++ `delete new_box`).
     }
 
-    /// `BTBoardManager::setIdiot`.
+    /// Raise the idiot (heckle) flag with `reason`; the game drains it after the
+    /// lock to emit a [`crate::GameEvent::Idiot`] (`BTBoardManager::setIdiot`).
     pub fn set_idiot(&mut self, reason: i16) {
         self.idiot = true;
         self.reason = reason;
