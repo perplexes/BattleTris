@@ -10,11 +10,12 @@
 /// The 34 weapons, identified by token.
 ///
 /// The discriminants are load-bearing, not cosmetic: a token's `i32` value is
-/// its index into the keep-probability table, the arsenal protocol, the
-/// active-flag array, and [`weapon_table`]. They must stay `0..=33` in exactly
-/// this order, matching the wire protocol every consumer shares. Full
-/// flavor/price/duration for each lives in [`weapon_table`]; the one-liners here
-/// name the gameplay effect so the variant is legible at a call site.
+/// its index into the active-flag array, the per-weapon duration array, and
+/// [`weapon_table`], and it is the token's identity on the arsenal/wire protocol.
+/// They must stay `0..=33` in exactly this order, matching the protocol every
+/// consumer shares. Full flavor/price/duration for each lives in
+/// [`weapon_table`]; the one-liners here name the gameplay effect so the variant
+/// is legible at a call site.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(i32)]
 pub enum WeaponToken {
@@ -52,11 +53,11 @@ pub enum WeaponToken {
     Carter = 15,
     /// Negates the opponent's funds (Reagan Era).
     Reagan = 16,
-    /// Cheapest, least reliable spy — reveals the opponent's board/funds.
+    /// Cheapest spy, shortest reveal of the opponent's board/funds (William Ames).
     Ames = 17,
-    /// Mid-cost spy with longer reveal (Ace of Spies).
+    /// Mid-cost spy, longer reveal (Ace of Spies).
     Ace = 18,
-    /// Most expensive, most reliable spy (The Condor).
+    /// Priciest spy, longest reveal (The Condor).
     Condor = 19,
     /// Gives the opponent a smiley piece (Have a Nice Day).
     NiceDay = 20,
@@ -74,7 +75,8 @@ pub enum WeaponToken {
     Susan = 26,
     /// Halves the opponent's drop speed (Meadow).
     Meadow = 27,
-    /// Reflects weapons launched while it is active back on the launcher.
+    /// Backfires most weapons the launcher fires while cursed onto the launcher;
+    /// some simply fizzle (see `mirror_nullifies`).
     Mirror = 28,
     /// Cloaks every block on the opponent's board (Twilight Zone).
     Twilight = 29,

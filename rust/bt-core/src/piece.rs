@@ -329,9 +329,10 @@ impl Piece {
     /// Rotate the piece, returning false (and leaving it unchanged) if the
     /// rotated shape would collide. `reverse` rotates the other way.
     ///
-    /// Most pieces fit inside a square and rotate by transposing that square.
-    /// Wall, Star, and WeirdLong have shapes that no square transform reproduces,
-    /// so each has its own hand-built per-orientation transition
+    /// Most pieces fit inside a square and rotate by the generic 90° transform of
+    /// that square (a transpose with one axis reversed). Wall, Star, and WeirdLong
+    /// have shapes that no such square transform reproduces, so each has its own
+    /// hand-built per-orientation transition
     /// (`BTWallPiece`/`BTStarPiece`/`BTWeirdLongPiece::rotate`).
     pub fn rotate(&mut self, board: &Board, reverse: bool) -> bool {
         match self.kind {

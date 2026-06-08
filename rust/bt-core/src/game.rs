@@ -26,9 +26,9 @@ use crate::weapons::{weapon_table, ActiveFlags, WeaponToken, BT_MAX_WEAPONS};
 ///
 /// It holds both this player's own totals AND a mirror of the opponent's
 /// (`op_*`). The mirror is kept current by the relay so this player's local
-/// logic — the bazaar trigger (combined lines), Lawyers' Delite (reacting to the
-/// opponent's lines), and the funds taxes — can read the opponent's standing
-/// without reaching across into the other game.
+/// logic — the bazaar trigger (combined lines) and Lawyers' Delite (reacting to
+/// the opponent's lines) — can read the opponent's standing without reaching
+/// across into the other game.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Score {
     /// This player's hard-drop bonus points.
@@ -40,7 +40,9 @@ pub struct Score {
     /// Mirror of the opponent's `lines` — combined with `lines` drives the
     /// shared bazaar countdown.
     pub op_lines: i64,
-    /// This player's funds (die/happy values × line multipliers, minus taxes).
+    /// This player's current funds balance — earned from clears (die/happy
+    /// values × line multipliers) and spent/seized/negated by the bazaar and the
+    /// economy weapons.
     pub funds: i64,
     /// Mirror of the opponent's `funds`. Display-only — never read by the
     /// simulation — so the authoritative server may withhold it from a client.
@@ -78,12 +80,13 @@ pub enum GameEvent {
     /// This player's score changed — the relay sends it to the opponent as
     /// `BT_OP_SCORE` (drives Lawyers' Delite, taxes, the bazaar trigger).
     Scored { score: i64, lines: i64, funds: i64 },
-    /// Funds this (victim) player just lost to the opponent, which the relay must
-    /// CREDIT to the attacker: Mondale's 30% cut of newly-banked funds, or
-    /// Keating's full seizure. The exact lost amount is reported (the relay has
-    /// full information on both boards) so the transfer conserves money — the
-    /// attacker gains precisely what the victim lost. The attacker is always this
-    /// player's opponent, so the relay routes it to the other side.
+    /// A signed funds transfer from this (victim) player to the opponent, which
+    /// the relay adds to the attacker's balance: Mondale's 30% cut of
+    /// newly-banked funds, or Keating's full seizure. It conserves money — the
+    /// attacker's balance changes by exactly what this player's did — and is
+    /// signed, so seizing a player who is in the red (e.g. after a Reagan)
+    /// transfers a negative amount. The attacker is always this player's
+    /// opponent, so the relay routes it to the other side.
     FundsStolen(i64),
     /// Combined lines crossed a multiple of 20 — open the weapons bazaar
     /// (`BT_START_BAZ`).
@@ -1170,9 +1173,9 @@ impl Game {
             WeaponToken::Keating => {
                 // "...all taken away ... and given to you." Zero the victim's
                 // funds and hand the seized amount to the attacker via the relay.
-                // The seizure snapshots the victim's funds at flush (the next
-                // lock), so funds the victim banks in that one-piece window are
-                // safe — a small, deliberate window since weapons land at lock.
+                // The seizure reads the balance at flush (the next lock), which is
+                // AFTER that lock's clear has already been credited — so funds the
+                // victim banks on the triggering piece are included in the haul.
                 let stolen = self.score.funds;
                 self.score.funds = 0;
                 if stolen != 0 {

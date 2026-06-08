@@ -10,8 +10,11 @@
 //!
 //! The order and KIND of draw matters as much as the values, because the engine
 //! consumes them in a fixed order that any faithful re-run must match:
-//!   * piece selection rolls `rand()` for the id, then `drand48()` against the
-//!     keep probability, plus `lrand48()` for the Broken Record reroll.
+//!   * piece selection (default): the rejection loop rolls `rand()` for the id,
+//!     then `drand48()` against the keep probability, repeating until accepted.
+//!   * piece selection under Broken Record: an `lrand48()` gate is drawn FIRST
+//!     each time to decide whether to repeat the last piece or fall into the
+//!     rejection loop above.
 //!   * a die's pips come from `rand()`.
 //!   * board weapon effects draw `rand()` for positions and coin flips.
 //!

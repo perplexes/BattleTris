@@ -25,17 +25,18 @@ pub const BT_ELO_START: i64 = 1200;
 // Colors / box ids   (BTConstants.H:29-68)
 //
 // A box's render id IS its color for ordinary boxes, so colors and box ids
-// share one numeric space. The bright colors occupy `0..=9`; each has a "dark"
-// twin exactly `BT_MAX_DIF_COLORS` (9) higher, so a single offset converts a
-// color to its shaded variant. Non-color box kinds (structure, faces, dice)
-// follow above the color range. The renderer keys sprites off these ids; the
-// rules engine treats them as opaque tags.
+// share one numeric space. `0` is black and `9` is the neutral garbage fill;
+// the eight bright play colors `1..=8` each have a "dark" twin exactly
+// `BT_MAX_DIF_COLORS` (9) higher (so `10..=17`), letting a single offset shade a
+// color. Non-color box kinds (structure, faces, dice) follow above the color
+// range. The renderer keys sprites off these ids; the rules engine treats them
+// as opaque tags.
 // ---------------------------------------------------------------------------
-/// Span of the bright color palette, and the stride to each color's dark twin.
+/// The offset from a bright color id to its dark twin (`BT_GRAY = BT_IVORY + 9`).
 pub const BT_MAX_DIF_COLORS: i32 = 9;
 
-/// Sentinel color for a box that renders nothing — used by the Bug weapon's
-/// hidden block and by board reconstruction where the true color is unknown.
+/// Sentinel color for a box that renders nothing — the Bug weapon drops a block
+/// of this color so the victim can't see it.
 pub const BT_INVISIBLE: i32 = -1;
 pub const BT_BLACK: i32 = 0;
 pub const BT_IVORY: i32 = 1;
@@ -81,7 +82,9 @@ pub const BT_DIE_4: i32 = 27;
 pub const BT_DIE_5: i32 = 28;
 pub const BT_DIE_6: i32 = 29;
 
-/// Count of distinct box kinds — the upper bound on any render id.
+/// One past the highest box render id — the upper bound that sizes any
+/// per-box-id array. (The id space has gaps, so this exceeds the number of
+/// distinct kinds.)
 pub const BT_MAX_BOXES: i32 = 30;
 
 // Box geometry in pixels. The rules engine is resolution-independent; these
@@ -140,8 +143,9 @@ pub const BT_DEFAULT_Y: i32 = 0;
 // Pieces   (BTConstants.H:101-126)
 // ---------------------------------------------------------------------------
 // Every piece carries an 8x8 local grid even though no piece fills it. The
-// uniform extent lets one rotation routine and one collision test serve all
-// pieces, from the single-cell die to the eight-wide Long Dong.
+// uniform extent gives every piece — from the single-cell die to the eight-wide
+// Long Dong — common cell storage and one shared collision test (rotation is
+// generic for most pieces, bespoke for Wall/Star/WeirdLong).
 pub const BT_PIECE_WIDTH: usize = 8;
 pub const BT_PIECE_HEIGHT: usize = 8;
 
@@ -162,8 +166,9 @@ pub const BT_BOX_PIECE: i32 = 7;
 pub const BT_DIE_PIECE: i32 = 8;
 pub const BT_HAP_PIECE: i32 = 9;
 
-/// The boundary above which ids are the "weird" pieces — Feared Weird turns the
-/// stream on by zeroing the standard block and enabling everything past here.
+/// The boundary just below the "weird" pieces — Feared Weird turns the stream on
+/// by zeroing the standard block and enabling the weird ids
+/// [`BT_DOG_PIECE`]..=[`BT_WLONG_PIECE`] (the 4x4 and Long Dong stay off).
 pub const BT_WEIRD_OFFS: i32 = 9;
 pub const BT_DOG_PIECE: i32 = 10;
 pub const BT_RDOG_PIECE: i32 = 11;
@@ -181,16 +186,17 @@ pub const BT_MAX_PIECES: i32 = 18;
 // Keep probabilities   (BTPieceManager.C:16-19)
 //
 // Selection rolls a uniform id then keeps it with probability `keep_prob[id]`,
-// re-rolling otherwise. A piece's rarity is therefore its keep probability, and
-// disabling a piece is just setting its probability to 0 — which is how the
-// piece-stream weapons work.
+// re-rolling otherwise. So a piece's share of the stream is its keep weight
+// relative to the total enabled keep weight (a higher value = more common),
+// and disabling a piece is just zeroing its weight — which is how the piece-
+// stream weapons work.
 /// Keep probability for the seven standard pieces.
 pub const BT_DEFAULT_KEEP_PROB: f64 = 0.21;
-/// Keep probability for the rare treats (smiley, Long Dong) — uncommon, but they
-/// do turn up.
+/// Keep probability for the rare treats (smiley, Long Dong) — far below the
+/// standard weight, so they turn up only occasionally.
 pub const BT_EXOTIC_KEEP_PROB: f64 = 0.02;
-/// The die is always kept once rolled, so its frequency is purely its 1-in-18
-/// roll probability.
+/// The die is always kept once rolled (weight 1.0) — the heaviest weight, so the
+/// die is the single most common box once the standard pieces are in the mix.
 pub const BT_DIE_KEEP_PROB: f64 = 1.0;
 /// Broken Record reroll divisor: a Broken-cursed stream breaks its repeat only
 /// about 1 draw in this many, so the same piece keeps coming.

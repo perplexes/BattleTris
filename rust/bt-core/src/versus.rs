@@ -117,9 +117,7 @@ fn apply_weapon(attacker: &mut Game, victim: &mut Game, token: WeaponToken, to: 
 /// state via [`Versus::game`]; it never has to reimplement the weapon relay.
 #[derive(Clone, Debug)]
 pub struct Versus {
-    /// Side A's game.
     a: Game,
-    /// Side B's game.
     b: Game,
     /// 0 = ongoing, 1 = A won (B topped out), 2 = B won (A topped out). Latched
     /// once set, so the first side to top out decides the match.
