@@ -1,20 +1,21 @@
 //! Server-authoritative online match (a "bout").
 //!
-//! This is the server side of the client-server migration. The server owns the
-//! authoritative simulation for a matched pair — a [`bt_core::Versus`] holding
-//! both boards — and is the single source of truth. Clients send INPUTS; the
-//! server applies them to the authoritative match, ticks the deterministic
-//! engine on its own clock, and ships authoritative [`Snapshot`]s back. Clients
-//! predict locally and reconcile against those snapshots.
+//! The server owns the authoritative simulation for a matched pair — a
+//! [`bt_core::Versus`] holding both boards — and is the single source of truth.
+//! Clients send INPUTS; the server applies them to the authoritative match, ticks
+//! the deterministic engine on its own clock, and ships authoritative
+//! [`Snapshot`](crate::bout::Snapshot)s back. Clients predict locally and
+//! reconcile against those snapshots.
 //!
-//! Two properties fall out for free, which is exactly why the user chose this
-//! over the (faithful) P2P relay:
+//! Two properties fall out of putting the authority on the server rather than
+//! relaying peer-to-peer:
 //!   * **Anti-cheat** — a client can only send legal *inputs*
-//!     ([`is_legal_client_input`]); it can't inject weapons/funds/board state.
+//!     ([`is_legal_client_input`](crate::bout::is_legal_client_input)); it can't
+//!     inject weapons/funds/board state.
 //!     The server resolves every cross-player effect (Mirror, Swap, taxes).
 //!   * **A totally-ordered event log** — the server sees every input in order,
-//!     so an online match can be recorded as a [`bt_replay::Replay`] (closing
-//!     the long-standing "online games aren't replayable" gap, D5).
+//!     so an online match is recordable as a [`bt_replay::Replay`]: the seeds
+//!     plus that one ordered stream replay the whole bout deterministically.
 //!
 //! Transport wiring (the `/ws` handoff from matchmaking, snapshot broadcast
 //! cadence, client prediction/reconciliation) layers on top of this core.
@@ -90,11 +91,11 @@ pub struct SelfStatus {
 }
 
 /// What a player is allowed to see about their OPPONENT by default — only
-/// score/lines for the opponent panel. NOT the board and NOT funds: in the
-/// original those are revealed only by a spy (Ames "displays your opponent's
-/// screen and your opponent's funds"). The spy will be a server-authorized
-/// extension to this view — which is what makes the old unauthenticated
-/// spyRequest (D4) moot.
+/// score/lines for the opponent panel. NOT the board and NOT funds: those are
+/// revealed only by a spy (Ames "displays your opponent's screen and your
+/// opponent's funds"). The spy is a server-authorized extension to this view
+/// (the degraded `spy_board` on [`Snapshot`]), so a client can never see the
+/// opponent's board by simply asking for it.
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct OppView {
     pub score: i64,
@@ -146,9 +147,9 @@ fn spy_hide_pct(token: WeaponToken) -> u32 {
 }
 
 /// Degrade a render-id grid (`Game::render_ids`, empty = -2) to a spy's accuracy
-/// by HIDING a deterministic ~hide% of non-empty cells (server-side, so a
-/// modified client can't read the cells the spy didn't reveal — this is what
-/// makes the old unauthenticated spy request, D4, moot). Stable per position.
+/// by HIDING a deterministic ~hide% of non-empty cells. Doing it server-side
+/// means a modified client never receives the cells the spy didn't earn — the
+/// reveal is gated by the spy the player actually bought. Stable per position.
 fn degrade_board(mut grid: Vec<i32>, token: WeaponToken) -> Vec<i32> {
     let hide = spy_hide_pct(token);
     if hide == 0 {
@@ -170,16 +171,16 @@ pub struct Bout {
     versus: Versus,
     tick: u64,
     /// The two seeds, kept so the match can be exported as a deterministic
-    /// [`VersusReplay`] (the totally-ordered input stream + seeds, closing D5).
+    /// [`VersusReplay`] (the seeds + the totally-ordered input stream replay it).
     seed_a: u64,
     seed_b: u64,
     /// Every applied client input, stamped with the tick — the replay's frames.
     frames: Vec<VersusFrame>,
-    /// Last applied input sequence number per side (A = [0], B = [1]).
+    /// Last applied input sequence number per side (A = index 0, B = index 1).
     ack: [u64; 2],
     /// Active spy per side: `(token, lines remaining)`. A spy reveals the
     /// opponent's board to this side until the OPPONENT clears `duration` lines
-    /// (BTRecon's `spy_on_`). A = [0], B = [1].
+    /// (BTRecon's `spy_on_`). A = index 0, B = index 1.
     spy: [Option<(WeaponToken, i32)>; 2],
     /// The opponent's line count last seen per side, to measure the spy's
     /// line-clear decrement.
@@ -258,8 +259,8 @@ impl Bout {
         // Bazaar BARRIER: while EITHER side is shopping the whole match is frozen, so
         // even the side that left first can't keep moving/rotating/launching. Only
         // shopping actions pass (and they only do anything for the side still in the
-        // bazaar). Without this the bot — which leaves the bazaar instantly — kept
-        // nudging its piece for free while the opponent shopped.
+        // bazaar). Without this gate a side that leaves the bazaar instantly (e.g. the
+        // bot) could keep nudging its piece for free while the opponent still shops.
         let barrier = self.versus.game(side).is_in_bazaar()
             || self.versus.game(side.other()).is_in_bazaar();
         if barrier && !is_bazaar_input(input) {
@@ -344,6 +345,9 @@ impl Bout {
         self.versus.result()
     }
 
+    /// Whether the match reached a natural finish (a side topped out). The tick
+    /// loop ends on this; a forfeit/disconnect ends the loop WITHOUT this being
+    /// true, which is how settlement tells a real top-out from a forfeit.
     pub fn is_over(&self) -> bool {
         self.versus.is_over()
     }
@@ -482,6 +486,9 @@ impl Bout {
     }
 }
 
+/// Tests for the authoritative-bout core: property tests that the input
+/// allow-list rejects every relay-internal action and accepts every legal one,
+/// plus the ack/barrier/reattach/replay-export and spy-degradation invariants.
 #[cfg(test)]
 mod tests {
     use super::*;

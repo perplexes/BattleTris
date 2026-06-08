@@ -7,11 +7,11 @@
 //! The server runs the only authoritative sim; each client keeps a LOCAL
 //! [`bt_core::Game`] seeded from the same piece stream, predicts its own inputs
 //! immediately (so play feels instant), and reconciles to the server's keyframes.
-//! That prediction/reconciliation logic used to live TWICE — once in hand-written
-//! browser JS (`main.js`) and once in the bot's Rust — and every painful desync
-//! bug (the "snap-back", the bazaar barrier, rejoin) lived in the untested JS copy.
-//! [`Predictor`] is that logic, once, so the invariants are pinned by the proptests
-//! here and the two clients are provably consistent.
+//! That prediction/reconciliation logic is delicate — replaying unacked inputs
+//! on top of a keyframe, gating inputs at the bazaar barrier — so it lives in ONE
+//! place, [`Predictor`], driven identically by both clients. Its invariants are
+//! pinned by the proptests here; sharing the single implementation is what keeps
+//! the browser and the bot consistent.
 //!
 //! # The model
 //!
@@ -105,11 +105,11 @@ impl Predictor {
     /// Predict a local input and, when appropriate, return the `(seq, Input)` to send
     /// to the server. Returns `None` when the input is suppressed:
     ///
-    /// - a non-shopping input while a bazaar barrier is up (the server would reject
-    ///   it — the central gate that keeps a frozen match from being driven), or
+    /// - a gameplay input (anything but Buy/Sell/LeaveBazaar) while a bazaar barrier
+    ///   is up — the central gate that keeps a frozen match from being driven, or
     /// - a `BuyWeapon`/`SellWeapon` the local engine rejected (insufficient funds /
-    ///   not shopping): only an *accepted* buy is forwarded, so the prediction and the
-    ///   wire stay in lockstep instead of streaming inputs the server will reject.
+    ///   not shopping): only an *accepted* buy/sell is forwarded, so the prediction and
+    ///   the wire stay in lockstep instead of sending a shop action the server can't honor.
     ///
     /// `LeaveBazaar` is forwarded but NOT applied locally: the bazaar is a server-side
     /// barrier that clears (via the next keyframe) only once BOTH sides are done;
@@ -171,7 +171,9 @@ impl Predictor {
     }
 }
 
-/// Buy/Sell are the only inputs valid inside the bazaar barrier.
+/// The shopping inputs (Buy/Sell) — the gameplay-affecting actions allowed while
+/// the bazaar barrier is up. `LeaveBazaar` is also valid under the barrier but is
+/// handled separately (forwarded, never applied locally), so it is not "shopping".
 fn is_shopping(input: &Input) -> bool {
     matches!(input, Input::BuyWeapon(_) | Input::SellWeapon(_))
 }
@@ -205,9 +207,9 @@ fn replay_input(game: &mut Game, input: &Input) {
 /// The exact wire frame for an input: `{"type":"input","seq":N,"input":<repr>}`,
 /// where `<repr>` is `Input`'s serde form (`"MoveLeft"`, `{"LaunchWeapon":3}`, …).
 ///
-/// Built in one place so the browser and the bot can never disagree on the wire — the
-/// hand-rolled JS reprs (`{LaunchWeapon: arg}`) that had to be kept in sync with serde
-/// by hand are gone; both clients call this.
+/// Built in one place — and reusing `Input`'s own serde — so the browser and the
+/// bot can never disagree on the wire: both clients call this rather than each
+/// hand-rolling a JSON shape that has to track serde by hand.
 pub fn input_frame(seq: u64, input: &Input) -> String {
     #[derive(Serialize)]
     struct InputFrame<'a> {

@@ -7,7 +7,13 @@
 //! `available`, and `challenge`, so a client can't impersonate another player by
 //! sending a bare `name`.
 //!
-//! Deliberately hand-rolled rather than pulling in `jsonwebtoken`: HS256 is just
+//! This is a session/lobby credential, not an account system: there is no
+//! password and the only identity claim is a display name (the `iat` timestamp
+//! is informational and unenforced). It exists purely to make the name on the
+//! wire unforgeable — anything heavier (real accounts, expiry, revocation) is
+//! deliberately out of scope, which is what lets it stay this small.
+//!
+//! Hand-rolled rather than pulling in `jsonwebtoken`: HS256 is just
 //! `base64url(header).base64url(payload)` HMAC'd, and we only ever issue + verify
 //! our own tokens, so the surface is small and fully unit-tested here. Keeps the
 //! server's crypto deps to the RustCrypto primitives (`hmac` + `sha2`).
@@ -18,14 +24,20 @@ use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
 use sha2::Sha256;
 
+/// HMAC-SHA256, the one MAC this crate signs and verifies with.
 type HmacSha256 = Hmac<Sha256>;
 
-/// Max accepted player-name length (matches the client's `BT_NICKNAMELEN`).
+/// Max accepted player-name length (matches the client's `BT_NICKNAMELEN`), so a
+/// name that round-trips through a token can't exceed what the UI allotted for
+/// it.
 pub const MAX_NAME_LEN: usize = 32;
 
-/// The signing secret. `BT_JWT_SECRET` if set; otherwise 32 random bytes drawn
-/// once at process start (so tokens stay valid for the life of the process but
-/// don't survive a restart — fine for a lobby session token).
+/// The signing secret, resolved once and cached for the process. Prefers the
+/// `BT_JWT_SECRET` env var so a multi-machine deployment (lobby + region bots)
+/// can share one secret and verify each other's tokens — and so tokens survive a
+/// restart. Without it, falls back to 32 random bytes drawn once at startup, so
+/// tokens are then valid only for the life of this process; acceptable because
+/// they are merely lobby session credentials.
 pub fn secret() -> Vec<u8> {
     static SECRET: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
     SECRET
@@ -62,18 +74,25 @@ pub fn sanitize_name(raw: &str) -> Option<String> {
     Some(capped.to_string())
 }
 
+/// The base64url HMAC-SHA256 of `signing_input` — the JWT signature segment, for
+/// the issue path. (Verify recomputes the MAC inline so it can compare in
+/// constant time with `verify_slice`.)
 fn sign(secret: &[u8], signing_input: &str) -> String {
     let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key length");
     mac.update(signing_input.as_bytes());
     URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
 }
 
-/// Mint a token for an already-sanitized `name` using the process secret.
+/// Mint a token for `name` using the process secret — the entry point the
+/// `/api/identity` handler calls. Callers pass a [`sanitize_name`]d name; verify
+/// re-sanitizes anyway, so an over-long name still round-trips to its capped form
+/// rather than being rejected.
 pub fn issue_token(name: &str) -> String {
     issue_token_with(&secret(), name, now_secs())
 }
 
-/// Mint a token with an explicit secret + issued-at (the testable core).
+/// Mint a token with an explicit secret + issued-at. Split out from
+/// [`issue_token`] so tests can pin both for deterministic assertions.
 pub fn issue_token_with(secret: &[u8], name: &str, iat: i64) -> String {
     let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
     let payload = URL_SAFE_NO_PAD.encode(json!({ "name": name, "iat": iat }).to_string());
@@ -82,23 +101,34 @@ pub fn issue_token_with(secret: &[u8], name: &str, iat: i64) -> String {
     format!("{signing_input}.{sig}")
 }
 
-/// Verify a token against the process secret; returns the signed name if valid.
+/// Verify a token against the process secret; returns the signed name if valid,
+/// `None` on anything malformed or forged. This is what the websocket calls to
+/// trust the name on `queue` / `available` / `challenge`.
 pub fn verify_token(token: &str) -> Option<String> {
     verify_token_with(&secret(), token)
 }
 
-/// Verify a token against an explicit secret (the testable core). Constant-time
-/// signature comparison via `Mac::verify_slice`. Returns the signed `name`.
+/// Verify a token against an explicit secret. Split out from [`verify_token`] so
+/// tests can pin the secret. Returns the signed `name`, or `None` if the token
+/// is malformed, MACs to a different key, or declares an algorithm we don't
+/// issue.
 pub fn verify_token_with(secret: &[u8], token: &str) -> Option<String> {
+    // A JWT is three dot-separated segments. `splitn(3, '.')` stops splitting
+    // after the first two dots, so a token with extra segments keeps its whole
+    // tail in `sig_b64` (e.g. "c.d") — which then fails the base64 decode below,
+    // since '.' isn't a base64url character. The `parts.next()` guard is a
+    // defensive belt-and-suspenders; with `splitn(3)` it cannot actually fire.
     let mut parts = token.splitn(3, '.');
     let header = parts.next()?;
     let payload = parts.next()?;
     let sig_b64 = parts.next()?;
     if parts.next().is_some() {
-        return None; // more than three segments — malformed
+        return None; // unreachable under splitn(3); kept for intent
     }
 
-    // Recompute the MAC over header.payload and compare in constant time.
+    // Recompute the MAC over header.payload and let `verify_slice` compare it to
+    // the presented signature in constant time — a byte-by-byte `==` would leak,
+    // via timing, how many leading bytes a forged signature got right.
     let signing_input = format!("{header}.{payload}");
     let sig = URL_SAFE_NO_PAD.decode(sig_b64).ok()?;
     let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key length");
@@ -124,6 +154,9 @@ pub fn verify_token_with(secret: &[u8], token: &str) -> Option<String> {
     sanitize_name(name)
 }
 
+/// Current Unix time in seconds, for the token's `iat` claim. Clamps a
+/// pre-epoch clock to 0 rather than erroring — `iat` is informational here, not
+/// enforced on verify, so a bad value can't break authentication.
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

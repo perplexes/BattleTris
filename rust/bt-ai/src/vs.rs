@@ -75,10 +75,10 @@ impl VsComputer {
         // Ernie's first move is throttled like every other one: the original
         // `BTComputer` schedules it one `delay_` after `BT_START`
         // (BTComputer.C, `addTimeout(delay_, ...)`), it does NOT place at t=0.
-        // Placing in the constructor made even a Comatose (4000ms) Ernie bank
-        // its first piece — and the score that comes with it — before the first
-        // tick, which read as "Ernie scores instantly". `ai_committed` starts
-        // false so the first `take_turn` waits `place_accum >= place_period`.
+        // So the constructor must NOT place a piece — otherwise even a Comatose
+        // (4000ms) Ernie would bank its first piece, and the score that comes
+        // with it, before the first tick. `ai_committed` starts false so the
+        // first `take_turn` waits out `place_accum >= place_period`.
         VsComputer {
             player: Game::new(seed),
             ai: Game::new(seed ^ 0x9E37_79B9_7F4A_7C15),
