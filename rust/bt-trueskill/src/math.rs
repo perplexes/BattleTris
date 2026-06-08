@@ -16,7 +16,7 @@ pub fn pdf(x: f64) -> f64 {
     (-(x * x) / 2.0).exp() / (2.0 * PI).sqrt()
 }
 
-/// Standard normal cdf `Phi(x)` — the probability mass below `x`, via `erfc`.
+/// Standard normal cdf `Phi(x)`: the probability mass below `x`, computed via `erfc`.
 #[inline]
 pub fn cdf(x: f64) -> f64 {
     0.5 * erfc(-x / std::f64::consts::SQRT_2)
@@ -105,7 +105,7 @@ pub fn inv_cdf(p: f64) -> f64 {
 /// `V` correction for a win: the mean-shift factor `pdf/cdf` of a Gaussian
 /// truncated at the win boundary. `t` is the normalized skill difference, `e` the
 /// normalized draw margin. Largest when the winner was the underdog (`t` very
-/// negative) — that is the surprising result that should move ratings most.
+/// negative), which is the surprising result that should move ratings most.
 pub fn v_win(t: f64, e: f64) -> f64 {
     let x = t - e;
     let denom = cdf(x);
@@ -122,7 +122,7 @@ pub fn v_win(t: f64, e: f64) -> f64 {
 /// How much of the player's uncertainty this result resolves; the true factor is
 /// below 1, but it is clamped because rounding in the `v`/`pdf` approximations
 /// could otherwise nudge it just outside the valid range (a negative shrink would
-/// grow variance — physically wrong).
+/// grow variance, which would be physically wrong).
 pub fn w_win(t: f64, e: f64) -> f64 {
     let x = t - e;
     let v = v_win(t, e);
