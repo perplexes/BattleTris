@@ -1,28 +1,28 @@
-//! bt-bot — a headless, networked BattleTris player.
+//! bt-bot: a headless, networked BattleTris player.
 //!
 //! It speaks the EXACT same websocket protocol a browser does (see
 //! `bt-server/src/main.rs`): it connects, announces itself "open to matches"
 //! (tagged `bot:true` + a `geo` label), auto-accepts directed challenges, and
-//! when a `matchStart` arrives it plays a real server-authoritative match —
+//! when a `matchStart` arrives it plays a real server-authoritative match
 //! driven by the same `bt-ai` placement search the vs-Computer Ernie uses.
 //!
-//! Why: it populates the lobby so a fresh visitor always has someone to play,
-//! and — deployed per-fly-region over the private 6PN network — it exercises the
+//! Why: it populates the lobby so a fresh visitor always has someone to play.
+//! Deployed per-fly-region over the private 6PN network it also exercises the
 //! netcode under real cross-geo latency (Tokyo→sjc etc.). Two personas (see
-//! [`Persona`]): aggressive **Bert** (the strong line-clearing eval + smart
+//! [`Persona`]): aggressive **Bert** (the strong line-clearing eval plus smart
 //! weapons, timing board-raisers to when its spy reveals the opponent stacked high)
 //! and easy-going **Ernie** (faithful placement, slower, no weapons). A third,
 //! **The Count** (`BT_BOT_PERSONA=count`), roams the lobby issuing directed
-//! challenges — preferring humans, exponential-backing-off anyone who declines, and
-//! dueling the regional bots when it gets bored — and dials its skill to each
+//! challenges, preferring humans, exponentially backing off anyone who declines, and
+//! dueling the regional bots when none are eligible. It dials its skill to each
 //! opponent's Elo (carried on `matchStart`) to aim for an even match.
 //!
 //! The bot keeps a LOCAL `bt-core::Game` seeded from `matchStart.seed` (the same
 //! deterministic piece stream the server runs for this side) and reconciles it
-//! to the authoritative `keyframe` bytes whenever one arrives — exactly the
+//! to the authoritative `keyframe` bytes whenever one arrives, using exactly the
 //! prediction/reconciliation model the browser client uses. Hard-drop column
 //! placement is robust to latency: the column is decided by the move/rotate
-//! inputs we send (applied in order on both sides), not by where gravity has the
+//! inputs sent (applied in order on both sides), not by where gravity has the
 //! piece when the drop lands.
 
 use std::time::Duration;
@@ -57,20 +57,20 @@ const PLACE_INTERVAL_TICKS: i32 = 26;
 /// lobby's players-online tally and the connection never idles out.
 const ACTIVE_PING: Duration = Duration::from_secs(20);
 /// If a match goes this many ticks (~14s) with no snapshot, treat it as over. This
-/// MUST exceed the server's `REJOIN_GRACE` (12s): when a human opponent drops, the
-/// server FREEZES the bout for that long waiting for them to reconnect (an accidental
-/// refresh drops straight back into the same game), and we get no snapshots while it's
-/// frozen. A shorter timeout would abandon the match mid-grace — and a snapshot gap
-/// under heavy RTT could trip it too — so we wait out the full grace (plus a margin for
-/// the resume frame + latency). A natural top-out still sends a final `snapshot` with a
-/// `result`, which ends the match cleanly; a dropped opponent ends the bout server-side
-/// without that final snapshot. The server's end-of-bout frames for that case
-/// (`opponentLeft`, `rating`) are all non-`snapshot`, which the bot ignores — so this
-/// timeout is how we eventually notice and return to the lobby.
+/// must exceed the server's `REJOIN_GRACE` (12s): when a human opponent drops, the
+/// server freezes the bout for that long waiting for them to reconnect (an accidental
+/// refresh drops straight back into the same game), and no snapshots arrive while it's
+/// frozen. A shorter timeout would abandon the match mid-grace, and a snapshot gap
+/// under heavy RTT could trip it too, so the bot waits out the full grace (plus a
+/// margin for the resume frame and latency). A natural top-out still sends a final
+/// `snapshot` with a `result`, which ends the match cleanly; a dropped opponent ends
+/// the bout server-side without that final snapshot. The server's end-of-bout frames
+/// for that case (`opponentLeft`, `rating`) are all non-`snapshot`, which the bot
+/// ignores, so this timeout is how the bot eventually notices and returns to the lobby.
 const STALE_TICKS: u32 = 875;
 /// How long to wait before reconnecting after the socket drops.
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
-/// Try to launch a weapon about this often (~1.9s) — frequent enough to spend the
+/// Try to launch a weapon about this often (~1.9s): frequent enough to spend the
 /// arsenal, spaced enough to be watchable and not waste duration weapons.
 const LAUNCH_INTERVAL_TICKS: i32 = 120;
 /// When `launch_choice` has nothing worth firing, re-check sooner than a full
@@ -114,7 +114,7 @@ fn roam_place_ticks(skill: f64) -> i32 {
 struct Target {
     is_bot: bool,
     available: bool,
-    /// Earliest time we may (re)challenge — pushed out by exponential backoff.
+    /// Earliest time we may (re)challenge, pushed out by exponential backoff.
     next_eligible: Instant,
     declines: u32,
 }
@@ -228,13 +228,13 @@ impl Roam {
 
 type Out = mpsc::UnboundedSender<Message>;
 
-/// A bot's difficulty + name. **Bert** is the aggressive adversary — the strong
-/// line-clearing eval plus smart weapons, at a brisk pace. **Ernie** (the default)
-/// is the easy-going one for new visitors: faithful Ernie's weaker placement, a
-/// slower pace, and no weapons. (Bert & Ernie. Bert's the intense one.)
+/// A bot's difficulty and name. **Bert** is the aggressive adversary: the strong
+/// line-clearing eval plus smart weapons at a brisk pace. **Ernie** (the default)
+/// is the easy-going persona for new visitors: faithful Ernie's weaker placement, a
+/// slower pace, and no weapons.
 ///
 /// Selected by `BT_BOT_PERSONA`, else the fly process-group name
-/// (`FLY_PROCESS_GROUP`), else easy-going Ernie.
+/// (`FLY_PROCESS_GROUP`), else Ernie.
 #[derive(Clone, Copy)]
 struct Persona {
     /// Name suffix, e.g. "Bert" → "Tokyo-Bert".
@@ -275,7 +275,7 @@ fn persona() -> Persona {
         _ => Persona {
             suffix: "Ernie",
             strong: false,
-            place_ticks: 44, // ~700ms — slower, more beatable
+            place_ticks: 44, // ~700ms, slower and more beatable
             weapons: false,
             roam: false,
         },
@@ -285,21 +285,21 @@ fn persona() -> Persona {
 /// Per-match local state: our predicted client plus the placement pacer and the
 /// bazaar gate.
 struct MatchState {
-    /// Our local prediction + reconciliation against the server's keyframes — the
-    /// shared [`bt_netcode::Predictor`] (owns the local sim, the unacked-input queue,
-    /// and the per-bout input seq). `sync::decide` reads `predictor.input_seq()`
-    /// (= "last sent") and `predictor.game().is_in_bazaar()` to gate when we act.
+    /// Our local prediction and reconciliation against the server's keyframes: the
+    /// shared [`bt_netcode::Predictor`], which owns the local sim, the unacked-input
+    /// queue, and the per-bout input seq. `sync::decide` reads `predictor.input_seq()`
+    /// ("last sent") and `predictor.game().is_in_bazaar()` to gate when we act.
     predictor: Predictor,
     /// This bot's difficulty/name persona.
     persona: Persona,
-    /// Skill for this match in `[0,1]` — 1.0 (Bert), 0.0 (Ernie), or rating-matched
-    /// from the opponent's Elo (The Count). Drives placement noise / pace / weapons.
+    /// Skill for this match in `[0,1]`: 1.0 (Bert), 0.0 (Ernie), or rating-matched
+    /// from the opponent's Elo (The Count). Drives placement noise, pace, and weapons.
     skill: f64,
     /// Ticks between placements this match (from `skill` for roam, else the persona).
     place_interval: i32,
     /// Whether weapons are used this match (skill-gated for roam, else the persona).
     weapons_on: bool,
-    /// xorshift seed for skill-noise (kept off the engine RNG — see best_placement_skill).
+    /// xorshift seed for skill-noise (kept off the engine RNG; see best_placement_skill).
     rng: u64,
     /// Weapons launched this match (for the end-of-match summary log).
     launched: u32,
@@ -307,38 +307,38 @@ struct MatchState {
     live_ticks: u32,
     /// Ticks until the next placement (paces the bot to a human-ish speed).
     cooldown: i32,
-    /// Authoritative "you are in the bazaar" from the latest snapshot — while
+    /// Authoritative "you are in the bazaar" from the latest snapshot. While
     /// set, play is frozen server-side, so we just leave the bazaar and wait.
     in_bazaar: bool,
     /// "Your opponent is in the bazaar" from the latest snapshot. The bazaar is a
     /// BARRIER: while either side shops the match is frozen, so we wait this out too
-    /// (don't keep placing — the server rejects it anyway, see Bout::apply_input).
+    /// (don't keep placing; the server rejects it anyway, see Bout::apply_input).
     opp_in_bazaar: bool,
     /// Did we already buy our loadout for this bazaar visit? (We keep re-sending
     /// LeaveBazaar each tick until the server confirms, but only buy once.)
     bazaar_bought: bool,
     /// Ticks until the next weapon-launch attempt.
     launch_cooldown: i32,
-    /// Ticks of remaining "spy intel" — refreshed whenever a `spy_board` arrives;
-    /// while > 0 we have a live read on the opponent's board (`opp_high`).
+    /// Ticks of remaining spy intel, refreshed whenever a `spy_board` arrives.
+    /// While > 0 we have a live read on the opponent's board (`opp_high`).
     spy_fresh: u32,
     /// Latest read of "opponent stacked high" from a spy reveal (false when blind).
     opp_high: bool,
-    /// Set when a snapshot reports a result (win/loss) — the match is over.
+    /// Set when a snapshot reports a result (win/loss): the match is over.
     done: bool,
     /// Ticks since the last snapshot; if it crosses [`STALE_TICKS`] the opponent
     /// has gone silent (forfeit/disconnect) and we end the match our side.
     idle_ticks: u32,
-    /// The last input seq the SERVER has acknowledged processing for us — the snapshot
-    /// `ack`. (It means "I've seen your inputs through seq N", not necessarily "applied":
-    /// the server acks a fresh legal input even when a bazaar barrier then drops it.)
-    /// While this trails `predictor.input_seq()` (the seq of our most recently sent input
-    /// this bout) we have inputs still in flight, and the bot waits — so its local
-    /// prediction can't run ahead of the authoritative sim. This is the general "never
-    /// act before the server has caught up" gate; the bazaar's predicted-leave freeze has
-    /// its own dedicated guard on top (`sync::decide`'s `auth_baz && local_baz`). The
-    /// "last sent" half of this gate is the [`Predictor`]'s per-bout `input_seq` (reset
-    /// to 0 with each new bout).
+    /// The last input seq the server has acknowledged processing for us: the snapshot
+    /// `ack`. It means "I've seen your inputs through seq N", not necessarily "applied":
+    /// the server acks a fresh legal input even when a bazaar barrier then drops it.
+    /// While this trails `predictor.input_seq()` (the seq of the most recently sent
+    /// input this bout), the bot has inputs still in flight and waits, so its local
+    /// prediction cannot run ahead of the authoritative sim. This is the general
+    /// "never act before the server has caught up" gate; the bazaar's predicted-leave
+    /// freeze has its own dedicated guard on top (`sync::decide`'s `auth_baz && local_baz`).
+    /// The "last sent" half of this gate is the [`Predictor`]'s per-bout `input_seq`
+    /// (reset to 0 with each new bout).
     acked: u64,
 }
 
@@ -403,7 +403,7 @@ fn identity(p: &Persona) -> (String, String) {
     };
     let name = std::env::var("BT_BOT_NAME").unwrap_or_else(|_| {
         if p.roam {
-            p.suffix.to_string() // "The Count" — one roamer, not region-tagged
+            p.suffix.to_string() // "The Count": one roamer, not region-tagged
         } else {
             format!("{city}-{}", p.suffix)
         }
@@ -424,9 +424,9 @@ async fn main() {
     );
     if std::env::var("BT_JWT_SECRET").map(|s| s.is_empty()).unwrap_or(true) {
         eprintln!(
-            "warning: BT_JWT_SECRET is unset — the minted token will only be \
+            "warning: BT_JWT_SECRET is unset; the minted token will only be \
              accepted by a server sharing this process's random secret. Set the \
-             SAME BT_JWT_SECRET on the server and the bots."
+             same BT_JWT_SECRET on the server and the bots."
         );
     }
     loop {
@@ -443,8 +443,8 @@ async fn main() {
 /// connect so it stays valid across server restarts.
 fn available_msg(name: &str, geo: &str, token: &str) -> Message {
     // Announce as a bot (so two bots never auto-pair) UNLESS BT_BOT_ANNOUNCE_BOT is
-    // set falsey — a testing escape hatch to run a bot as a sparring "human" that
-    // DOES auto-pair against another bot (e.g. a local Bert-vs-Ernie match).
+    // set falsey: a testing escape hatch to run a bot as a sparring "human" that
+    // auto-pairs against another bot (e.g. a local Bert-vs-Ernie match).
     let bot = std::env::var("BT_BOT_ANNOUNCE_BOT")
         .map(|v| !matches!(v.as_str(), "false" | "0" | "no"))
         .unwrap_or(true);
@@ -508,7 +508,7 @@ async fn run_session(
                     drive_tick(state, &out);
                     if state.done {
                         println!(
-                            "match over — {name}: {} lines cleared, {} weapons launched",
+                            "match over: {name}: {} lines cleared, {} weapons launched",
                             state.predictor.game().score().lines, state.launched
                         );
                         ms = None;
@@ -552,7 +552,7 @@ fn handle_text(
         Err(_) => return,
     };
     match v.get("type").and_then(|t| t.as_str()) {
-        // Someone challenged us — always accept.
+        // Someone challenged us; always accept.
         Some("challenged") => {
             let from = v.get("from").and_then(|f| f.as_str()).unwrap_or("");
             let _ = out.send(Message::Text(
@@ -585,7 +585,7 @@ fn handle_text(
                 r.update_roster(arr);
             }
         }
-        // Our challenge was declined (or timed out) — exponential backoff on them.
+        // Our challenge was declined (or timed out); exponential backoff on them.
         Some("challengeDeclined") => {
             if let Some(r) = roam.as_mut() {
                 let by = v.get("by").and_then(|b| b.as_str()).unwrap_or("");
@@ -626,8 +626,8 @@ fn handle_text(
                 // array of bytes). Hand the whole frame to the predictor: it prunes
                 // acked inputs, restores our local sim to the keyframe, and replays the
                 // still-unacked tail on top. Routing reconciliation through this single
-                // path (shared with the browser) — rather than a direct game-state
-                // restore here — is what keeps the bot and browser sims from drifting.
+                // path (shared with the browser) rather than a direct game-state
+                // restore here, which is what keeps the bot and browser sims consistent.
                 let keyframe: Option<Vec<u8>> = v
                     .get("keyframe")
                     .and_then(|k| k.as_array())
@@ -652,10 +652,10 @@ fn handle_text(
 
 /// One 16ms step of an in-progress match. Per-tick bookkeeping (idle/progress/spy
 /// aging) runs first; then the sync state machine ([`sync::decide`]) picks exactly
-/// one thing to do, which we interpret here. Keeping the policy in `decide` (pure +
-/// proptested) and only the side effects here is what keeps the netcode invariants
-/// — never act ahead of the server, never leave a bazaar we only predicted entering
-/// — from drifting back into a tangle of ad-hoc booleans.
+/// one thing to do, which is interpreted here. Keeping the policy in `decide` (pure
+/// and proptested) and only the side effects here ensures the netcode invariants
+/// (never act ahead of the server, never leave a bazaar entered only by prediction)
+/// don't erode into scattered ad-hoc booleans.
 fn drive_tick(state: &mut MatchState, out: &Out) {
     if state.done {
         return;
@@ -675,7 +675,7 @@ fn drive_tick(state: &mut MatchState, out: &Out) {
             state.launched
         );
     }
-    // Spy intel ages out between keyframes — once it lapses we're blind again.
+    // Spy intel ages out between keyframes; once it lapses we're blind again.
     if state.spy_fresh > 0 {
         state.spy_fresh -= 1;
         if state.spy_fresh == 0 {
@@ -702,9 +702,9 @@ fn drive_tick(state: &mut MatchState, out: &Out) {
                 state.done = true; // the driver loop ends the match next tick
             }
         }
-        // Inputs in flight — hold until the server catches up (we never run ahead).
+        // Inputs in flight: hold until the server catches up (we never run ahead).
         BotAction::WaitAck => {}
-        // A bazaar barrier that isn't ours to initiate-clear — hold. BUT if the server
+        // A bazaar barrier that isn't ours to initiate-clear: hold. But if the server
         // authoritatively still has US in the bazaar and we've already shopped, keep
         // (idempotently) re-sending LeaveBazaar until it takes. This makes escaping a
         // bazaar we're in independent of the `bazaar_bought` re-arm ever observing an
@@ -740,7 +740,7 @@ fn play(state: &mut MatchState, out: &Out) {
         return; // wait for the authoritative result to end the match
     }
 
-    // Launch a weapon on a cadence (when this match uses weapons) — a spy first (for
+    // Launch a weapon on a cadence (when this match uses weapons): a spy first (for
     // intel), board-raisers when the opponent is high, harassment/fund-drains else.
     if state.weapons_on {
         state.launch_cooldown -= 1;
@@ -788,11 +788,11 @@ fn arsenal_of(game: &Game) -> [i32; 10] {
 }
 
 /// In the bazaar, buy a smart loadout ([`buy_plan`]) within our funds, then leave.
-/// Buys are predicted locally (applied to the sim) AND forwarded — only the ones the
-/// engine accepts, keeping the sim in sync. The LeaveBazaar is forwarded but NOT
+/// Buys are predicted locally (applied to the sim) and forwarded, but only the ones
+/// the engine accepts, keeping the sim in sync. The LeaveBazaar is forwarded but not
 /// applied locally (the local sim stays in the bazaar until a keyframe clears the
-/// barrier). The caller guarantees we're authoritatively AND locally in the bazaar
-/// before calling, so the buys + the leave all land while the server is genuinely
+/// barrier). The caller guarantees we're authoritatively and locally in the bazaar
+/// before calling, so the buys and the leave all land while the server is genuinely
 /// shopping (no entry race). This shop batch runs once per visit (`bazaar_bought`
 /// gates re-entry); a still-frozen LeaveBazaar may then be re-sent from `WaitBazaar`.
 fn shop_bazaar(state: &mut MatchState, out: &Out) {
@@ -802,12 +802,12 @@ fn shop_bazaar(state: &mut MatchState, out: &Out) {
         let carter = state.predictor.game().weapon_active(WeaponToken::Carter);
         for tok in buy_plan(funds, &arsenal, carter) {
             // `predict` applies the buy locally and returns a frame to send ONLY if the
-            // engine accepted it, so we forward exactly the buys that landed — no stream
-            // of rejected/no-op buys clogging the wire and the ack stream.
+            // engine accepted it, so we forward exactly the buys that landed, avoiding a
+            // stream of rejected/no-op buys clogging the wire and the ack stream.
             send_input(&mut state.predictor, out, Input::BuyWeapon(tok.index() as i32));
         }
     }
-    // Tell the SERVER we're done — this is what un-freezes the match. The Predictor
+    // Tell the server we're done: this is what un-freezes the match. The Predictor
     // sends LeaveBazaar but does NOT leave the local sim: the bazaar is a barrier that
     // clears (via the next keyframe) only once BOTH sides are done, so our board
     // resumes in sync rather than ticking ahead of a still-frozen server.
@@ -815,8 +815,8 @@ fn shop_bazaar(state: &mut MatchState, out: &Out) {
 }
 
 /// Whether the opponent's spied board (`render_ids`, empty cells = -2, row-major
-/// `w`×`h`) is stacked tall enough to be worth a board-raiser — its highest column
-/// fills at least [`OPP_HIGH_FRAC`] of the board.
+/// `w`×`h`) is stacked tall enough to be worth a board-raiser, meaning its highest
+/// column fills at least [`OPP_HIGH_FRAC`] of the board.
 fn opponent_is_high(grid: &[i32], w: i32, h: i32) -> bool {
     if w <= 0 || h <= 0 || grid.len() < (w * h) as usize {
         return false;
@@ -835,8 +835,8 @@ fn opponent_is_high(grid: &[i32], w: i32, h: i32) -> bool {
     (h - min_top) as f64 >= OPP_HIGH_FRAC * h as f64
 }
 
-/// Rotate + slide the current piece to `bt-ai`'s best placement, then hard-drop
-/// — sending each move as a legal `input` AND mirroring it on the local sim.
+/// Rotate and slide the current piece to `bt-ai`'s best placement, then hard-drop,
+/// sending each move as a legal `input` and mirroring it on the local sim.
 /// Mirrors `bt_ai::Computer::take_turn` but emits the moves over the wire
 /// instead of only mutating locally. All loops are bounded, so a blocked piece
 /// just drops where it is rather than spinning.

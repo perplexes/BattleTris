@@ -1,10 +1,10 @@
-//! The single-player "vs computer" match — the original `BattleTris -X` mode.
+//! The single-player "vs computer" match, implementing the original `BattleTris -X` mode.
 //!
 //! [`VsComputer`] owns the human player's [`Game`] plus Ernie's [`Game`] and
 //! relays weapons / scores between them, applies the bazaar barrier, and
 //! throttles Ernie's placement to the chosen difficulty. It is plain Rust (no
 //! wasm-bindgen), so it can be driven headlessly in tests by advancing
-//! [`VsComputer::tick`] over a virtual clock — see `tests/vs_computer.rs`.
+//! [`VsComputer::tick`] over a virtual clock (see `tests/vs_computer.rs`).
 //!
 //! `bt-wasm`'s `WasmVsComputer` is a thin wrapper that adds the JS-facing event
 //! encoding around this engine.
@@ -14,8 +14,8 @@ use bt_core::game::GameEvent;
 use bt_core::weapons::WeaponToken;
 use bt_core::Game;
 
-/// Ernie's difficulty table — the per-move delays (ms) from the original
-/// `BTComputer.C` `levels[]` (Comatose … Bionic). The challenge screen's
+/// Ernie's difficulty table: the per-move delays (ms) from the original
+/// `BTComputer.C` `levels[]` (Comatose through Bionic). The challenge screen's
 /// "Ernie slider" picks one of these; the page exposes the same choice.
 pub const AI_LEVELS: [i32; 15] = [
     4000, 3000, 2000, 1500, 1250, 1000, 750, 550, 400, 350, 300, 225, 100, 10, 0,
@@ -53,9 +53,9 @@ pub struct VsComputer {
     place_accum: i32,
     launch_accum: i32,
     /// True once Ernie has steered the current piece into its drop. `take_turn`
-    /// only fires on a *fresh* piece: it ends with `ai_begin_drop` (a fast-drop
-    /// that takes several ticks to land, not an instant placement), so without
-    /// this gate a short `place_period` would re-fire on the still-falling
+    /// only fires on a fresh piece: it ends with `ai_begin_drop` (a fast-drop
+    /// that takes several ticks to land rather than an instant placement), so
+    /// without this gate a short `place_period` would re-fire on the still-falling
     /// piece and steer it mid-flight into a self-topping tower. The original
     /// computer was event-driven (one move per settled piece); this reproduces
     /// that. Reset when the AI locks a piece (see [`VsComputer::relay`]).
@@ -75,7 +75,7 @@ impl VsComputer {
         // Ernie's first move is throttled like every other one: the original
         // `BTComputer` schedules it one `delay_` after `BT_START`
         // (BTComputer.C, `addTimeout(delay_, ...)`), it does NOT place at t=0.
-        // So the constructor must NOT place a piece — otherwise even a Comatose
+        // So the constructor must not place a piece; otherwise even a Comatose
         // (4000ms) Ernie would bank its first piece, and the score that comes
         // with it, before the first tick. `ai_committed` starts false so the
         // first `take_turn` waits out `place_accum >= place_period`.
@@ -98,8 +98,8 @@ impl VsComputer {
             return;
         }
 
-        // Bazaar barrier (`BTGame` pauses ALL timeouts on `BT_START_BAZ` and only
-        // resumes once BOTH sides have left — see BattleTris(1) and
+        // Bazaar barrier: `BTGame` pauses all timeouts on `BT_START_BAZ` and
+        // resumes only once both sides have left (see BattleTris(1) and
         // `BTComputer::checkBazaar`). Both games enter together at every 20th
         // combined line; while the human shops, the whole match is frozen so
         // Ernie can't rack up free real-time turns. Ernie does its one-shot
@@ -133,7 +133,7 @@ impl VsComputer {
         self.ai.tick(dt);
 
         // Place the current piece on a throttle so it's watchable (the chosen
-        // difficulty's per-move delay). Only steer a *fresh* piece — one we
+        // difficulty's per-move delay). Only steer a fresh piece, one we
         // haven't already committed to a drop (see `ai_committed`).
         self.place_accum += dt;
         if !self.ai_committed && self.place_accum >= self.place_period {
@@ -167,7 +167,7 @@ impl VsComputer {
                 GameEvent::Scored { score, lines, funds } => {
                     self.ai.receive_op_score(score, lines, funds)
                 }
-                // The player (victim) was taxed/robbed — pay the attacker (Ernie).
+                // The player (victim) was taxed/robbed; pay the attacker (Ernie).
                 GameEvent::FundsStolen(amount) => self.ai.add_funds(amount),
                 GameEvent::GameOver => self.result = 2,
                 _ => {}
@@ -180,9 +180,9 @@ impl VsComputer {
                 GameEvent::Scored { score, lines, funds } => {
                     self.player.receive_op_score(score, lines, funds)
                 }
-                // Ernie (victim) was taxed/robbed — pay the attacker (player).
+                // Ernie (victim) was taxed/robbed; pay the attacker (player).
                 GameEvent::FundsStolen(amount) => self.player.add_funds(amount),
-                // The AI's piece settled — ready a fresh one, and restart the
+                // The AI's piece settled: ready a fresh one and restart the
                 // per-move delay from this lock.
                 GameEvent::Locked { .. } => {
                     self.ai_committed = false;
@@ -195,9 +195,9 @@ impl VsComputer {
     }
 
     /// Route a launched weapon from `attacker` to its target via the shared
-    /// offensive-Mirror relay in [`bt_core::versus::deliver_weapon`] — the exact
-    /// same logic the server's authoritative human-vs-human match uses, so the
-    /// two modes can never drift apart. (Mirror is offensive: launching it curses
+    /// offensive-Mirror relay in [`bt_core::versus::deliver_weapon`], which is
+    /// the same logic the server's authoritative human-vs-human match uses so
+    /// the two modes stay consistent. (Mirror is offensive: launching it curses
     /// the opponent; a cursed launcher's own weapons backfire or fizzle.)
     fn deliver(&mut self, token: WeaponToken, attacker: Side) {
         match attacker {
@@ -219,17 +219,17 @@ impl VsComputer {
         self.result
     }
 
-    /// The human player's game (read-only — for rendering / inspection).
+    /// The human player's game (read-only, for rendering and inspection).
     pub fn player(&self) -> &Game {
         &self.player
     }
 
-    /// The human player's game (mutable — the host drives input through this).
+    /// The human player's game (mutable; the host drives input through this).
     pub fn player_mut(&mut self) -> &mut Game {
         &mut self.player
     }
 
-    /// Ernie's game (read-only — the optional spectator view).
+    /// Ernie's game (read-only, for the optional spectator view).
     pub fn ai(&self) -> &Game {
         &self.ai
     }
@@ -345,7 +345,7 @@ mod cross_player_tests {
 
         vs.deliver(WeaponToken::Swap, Side::Player); // Swap is on the nullify list
 
-        assert_eq!(cell_count(&vs.player), p0, "cursed Swap fizzles — player board unchanged");
+        assert_eq!(cell_count(&vs.player), p0, "cursed Swap fizzles; player board unchanged");
         assert_eq!(cell_count(&vs.ai), a0, "Ernie's board untouched");
     }
 
@@ -377,7 +377,7 @@ mod cross_player_tests {
         let mut vs = VsComputer::new(1, 0);
         curse(&mut vs, Side::Player);
 
-        // Cursed, the player's spy is one of the nullify-9 — it fizzles entirely.
+        // Cursed, the player's spy is one of the nullify-9 and fizzles entirely.
         vs.deliver(WeaponToken::Ames, Side::Player);
         lock(&mut vs.ai);
         lock(&mut vs.player);

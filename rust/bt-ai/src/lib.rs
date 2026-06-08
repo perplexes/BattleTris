@@ -1,20 +1,20 @@
-//! `bt-ai` — the BattleTris computer opponent, "Ernie".
+//! `bt-ai`: the BattleTris computer opponent, "Ernie".
 //!
 //! A faithful Rust port of `BTComputer` + `BTCBoard` from
 //! `usr/src/game/BTComputer.{H,C}` and `BTCBoard.{H,C}`.
 //!
 //! ## Design summary
 //!
-//! * [`eval_board`] — board heuristic. Ports `BTCBoard::eval` with its five
+//! * [`eval_board`]: board heuristic. Ports `BTCBoard::eval` with its five
 //!   dominant terms: variance (column-height roughness), covered-hole penalty,
 //!   open/closed hole penalty, height penalty, and line bonus. Lower = better.
 //!
-//! * [`best_placement`] — exhaustive orientation × column search. For each
+//! * [`best_placement`]: exhaustive orientation × column search. For each
 //!   candidate `(orientation, x)` it clones the board, rotates, slides, drops
 //!   the piece, calls `eval_board`, and keeps the minimum. Equivalent to the
 //!   `decide()` / `checkMove()` / `computeValue()` loop in BTComputer.C.
 //!
-//! * [`Computer`] — drives a [`bt_core::Game`] turn-by-turn: `take_turn`
+//! * [`Computer`]: drives a [`bt_core::Game`] turn-by-turn. `take_turn`
 //!   queries the current piece, finds the best placement, then steers the game
 //!   with `rotate()` / `move_left()` / `move_right()` / `ai_begin_drop()`.
 //!
@@ -30,7 +30,7 @@
 //! * `COVERED_HOLE_PENALTY` = 3 000
 //! * `HEIGHT_PENALTY`       = 30 000
 //! * `LINE_BONUS`           = 5 000
-//! * `HAPPY_BONUS`          = 20 000   (unused — we skip happy-piece logic)
+//! * `HAPPY_BONUS`          = 20 000   (unused; happy-piece logic is not ported)
 //! * `VARIANCE_PENALTY`     = 50
 //! * `HOLE_DECAY`           = 0.50
 
@@ -43,7 +43,7 @@ pub use vs::{VsComputer, AI_LAUNCH_PERIOD_MS, AI_LEVELS};
 pub mod weapons;
 
 // ---------------------------------------------------------------------------
-// Penalty constants — from BTComputer.C
+// Penalty constants, from BTComputer.C
 // ---------------------------------------------------------------------------
 
 /// Penalty per open hole (empty square that can be reached from the side
@@ -71,7 +71,7 @@ const VARIANCE_PENALTY: f64 = 50.0;
 /// Exponential decay per row of depth for the covered-hole term.
 const HOLE_DECAY: f64 = 0.50;
 
-/// Spawn-row midline (BT_MIDLINE in BTComputer.C) — if the board top is
+/// Spawn-row midline (BT_MIDLINE in BTComputer.C). When the board top is
 /// above this row the line bonus formula switches branches.
 const MIDLINE: i32 = 14;
 
@@ -79,25 +79,25 @@ const MIDLINE: i32 = 14;
 // eval_board
 // ---------------------------------------------------------------------------
 
-/// Board heuristic: **lower is better**.
+/// Board heuristic (lower is better).
 ///
 /// Faithful port of `BTCBoard::eval` (BTCBoard.C). Works in two passes:
 ///
-/// **Pass 1 — column heights and line detection.**
+/// Pass 1: column heights and line detection.
 /// Scans every cell, records per-column top rows, simulates line clears
 /// (without actually mutating the board), and counts lines that would be
 /// cleared.
 ///
-/// **Pass 2 — hole detection.**
-/// An empty cell is a *hole* if there is at least one filled cell directly
-/// above it in the same column. A hole is *covered* if the piece (not modelled
-/// here — we work post-landing) overlaps its column. We approximate the
-/// covered-hole term by accumulating decay × filled-cells-above for each hole.
-/// Open vs. closed classification: a hole is *open* if it has an unobstructed
+/// Pass 2: hole detection.
+/// An empty cell is a hole if there is at least one filled cell directly
+/// above it in the same column. A hole is covered if the piece (not modelled
+/// here, as we work post-landing) overlaps its column. The covered-hole term
+/// accumulates decay × filled-cells-above for each hole.
+/// Open vs. closed classification: a hole is open if it has an unobstructed
 /// horizontal escape to the left or right column edge without passing through
-/// filled cells; otherwise it is *closed* (more expensive).
+/// filled cells; otherwise it is closed (more expensive).
 ///
-/// **Terms assembled:**
+/// Terms assembled:
 /// ```text
 /// value = variance + cov_hole_pen + hole_pen + height_pen - line_bonus
 /// ```
@@ -124,7 +124,7 @@ pub fn eval_board(board: &Board) -> f64 {
     // The original computes sum of squared differences between adjacent
     // column tops (including repeating the last column once):
     //
-    //   prev_height = ptops_[1]   (note: *index 1*, not 0 — faithful to C++)
+    //   prev_height = ptops_[1]   (note: *index 1*, not 0; faithful to C++)
     //   for j in 0..BT_BOARD_WTH:
     //       temp2 = abs(ptops_[j] - prev_height)^2
     //       temp  += temp2
@@ -204,7 +204,7 @@ pub fn eval_board(board: &Board) -> f64 {
                         open = true; // reached left wall via empty cells
                         break;
                     }
-                    // if tops[lx] >= y there's no block above here — it's a
+                    // if tops[lx] >= y there's no block above here; it's a
                     // gap that connects to open space
                     if tops[lx as usize] > y {
                         open = true;
@@ -283,14 +283,15 @@ pub fn eval_board(board: &Board) -> f64 {
     variance + cov_hole_pen + hole_pen + height_pen - line_bonus
 }
 
-/// Strong, line-clearing board evaluation for the ONLINE BOTS — NOT the faithful
-/// single-player Ernie (which deliberately hoards Tetrises and so clears poorly).
+/// Strong, line-clearing board evaluation for the online bots. The single-player
+/// Ernie uses `eval_board` instead; this function is kept separate so Ernie's
+/// heuristic is not changed.
 /// The classic Lee 4-feature heuristic with its well-known tuned weights:
 /// aggregate column height, rows cleared by this placement, covered holes, and
-/// surface bumpiness. **Higher is better** (opposite sign convention to
-/// `eval_board`). 1-ply, but it stacks flat and clears lines steadily.
+/// surface bumpiness. Higher is better (opposite sign convention to `eval_board`).
+/// 1-ply, but it stacks flat and clears lines steadily.
 ///
-/// `lines_cleared` is how many rows this placement completed — it MUST be counted
+/// `lines_cleared` is how many rows this placement completed. It must be counted
 /// before `check_lines()` removes them (the board passed here is already cleared).
 pub fn eval_board_strong(board: &Board, lines_cleared: i32) -> f64 {
     let w = board.width;
@@ -362,15 +363,15 @@ pub struct Placement {
 /// ## Tie-breaking
 /// The C++ `checkMove` DFS starts at `def_x_` (centre) and expands outward, so
 /// ties resolve in favour of the centre column. We reproduce that centre bias by
-/// visiting candidates centre-out — 5, 6, 4, 7, 3, 8, 2, 9, 1, 0, extended with
-/// negative offsets — and keeping the FIRST best on ties (strict `<`). What we
-/// pin is the centre-out priority, not the C++ DFS's exact intra-cell direction
-/// order; the centre column wins ties either way.
+/// visiting candidates centre-out (5, 6, 4, 7, 3, 8, 2, 9, 1, 0, extended with
+/// negative offsets) and keeping the first best on ties (strict `<`). The
+/// centre-out priority is pinned; the C++ DFS's exact intra-cell direction
+/// order is not, but the centre column wins ties either way.
 pub fn best_placement(board: &Board, piece: &Piece) -> Placement {
     let mut best_score = f64::MAX;
     let mut best = Placement { x: piece.x, orientation: 0 };
-    // Strict less-than preserves first-found (centre) on ties — faithful to
-    // `checkMove`'s centre-out DFS. eval_board: LOWER is better.
+    // Strict less-than preserves first-found (centre) on ties, faithful to
+    // `checkMove`'s centre-out DFS. eval_board: lower is better.
     for_each_landing(board, piece, |pl, b, _lines| {
         let score = eval_board(b);
         if score < best_score {
@@ -382,7 +383,7 @@ pub fn best_placement(board: &Board, piece: &Piece) -> Placement {
 }
 
 /// Like [`best_placement`] but uses the strong, line-clearing [`eval_board_strong`]
-/// (HIGHER is better) — for the ONLINE BOTS, leaving faithful Ernie untouched.
+/// (higher is better). Used by the online bots; `best_placement` covers Ernie.
 pub fn best_placement_strong(board: &Board, piece: &Piece) -> Placement {
     let mut best_score = f64::MIN;
     let mut best = Placement { x: piece.x, orientation: 0 };
@@ -397,13 +398,13 @@ pub fn best_placement_strong(board: &Board, piece: &Piece) -> Placement {
 }
 
 /// How much noise a skill of 0 adds to each candidate's strong-eval score. Tuned so
-/// skill≈0 plays roughly like (or a touch below) faithful Ernie and skill 1 is the
-/// full strong eval — a smooth difficulty dial for the rating-matched roaming bot.
+/// skill≈0 plays roughly like (or a touch below) faithful Ernie and skill 1 uses the
+/// full strong eval, giving a smooth difficulty dial for the rating-matched roaming bot.
 const SKILL_NOISE_SCALE: f64 = 8.0;
 
-/// A tiny xorshift step → a float in `[0,1)`. Used ONLY for the skill-noise above, so
-/// it stays out of the engine's deterministic piece RNG (mixing them would desync
-/// the bot's predicted board from the server's). Seed must be non-zero.
+/// A tiny xorshift step producing a float in `[0,1)`. Used only for the skill-noise
+/// above, kept separate from the engine's deterministic piece RNG so mixing them
+/// cannot desync the bot's predicted board from the server's. Seed must be non-zero.
 fn xorshift01(state: &mut u64) -> f64 {
     let mut x = *state;
     x ^= x << 13;
@@ -416,7 +417,7 @@ fn xorshift01(state: &mut u64) -> f64 {
 /// Skill-scaled placement for a rating-matched bot. `skill` ∈ `[0,1]`: 1.0 returns the
 /// strong best; lower skill adds proportional noise to each candidate's score so the
 /// bot increasingly settles for a plausible-but-worse landing (a weaker opponent).
-/// `rng` is a caller-owned xorshift seed, NOT the engine RNG.
+/// `rng` is a caller-owned xorshift seed, separate from the engine RNG.
 pub fn best_placement_skill(board: &Board, piece: &Piece, skill: f64, rng: &mut u64) -> Placement {
     let skill = skill.clamp(0.0, 1.0);
     if skill >= 0.999 {
@@ -440,14 +441,14 @@ pub fn best_placement_skill(board: &Board, piece: &Piece, skill: f64, rng: &mut 
 /// centre-out order (`def_x_=5`, right-before-left), calling
 /// `visit(placement, &landed_board, lines_cleared)` for each. `landed_board` has the
 /// piece locked and full rows already cleared; `lines_cleared` is how many rows that
-/// placement completed, counted BEFORE the clear (the faithful eval re-counts
-/// post-clear → 0, so only the strong eval consumes it). Shared by both
+/// placement completed, counted before the clear (the faithful eval re-counts
+/// post-clear to 0, so only the strong eval consumes it). Shared by both
 /// `best_placement` and `best_placement_strong`.
 fn for_each_landing(board: &Board, piece: &Piece, mut visit: impl FnMut(Placement, &Board, i32)) {
     let spawn_y = 0i32;
 
-    // Candidate columns, centre-out from `def_x_=5` — the centre bias that
-    // `checkMove`'s outward DFS gives ties.
+    // Candidate columns, centre-out from `def_x_=5`, matching the centre bias
+    // `checkMove`'s outward DFS gives on ties.
     let centre = board.width / 2; // = 5 for the standard board
     let search_min = -(bt_core::constants::BT_PIECE_WIDTH as i32 - 1);
     let search_max = board.width; // exclusive
@@ -463,7 +464,7 @@ fn for_each_landing(board: &Board, piece: &Piece, mut visit: impl FnMut(Placemen
         if added.is_empty() {
             break;
         }
-        // Right before left at each distance — a fixed, deterministic tie-break
+        // Right before left at each distance: a fixed, deterministic tie-break
         // order (the centre column is still visited first, so centre wins ties).
         for x in added.iter().rev() {
             if *x >= search_min && *x < search_max {
@@ -550,8 +551,8 @@ impl Computer {
     ///    `best.orientation` (capped at `orientations` iterations).
     /// 2. Calls `game.move_left()` / `game.move_right()` until the piece's `x`
     ///    matches `best.x` (capped to avoid infinite loops).
-    /// 3. Calls `game.ai_begin_drop()` to hard-drop — the computer's flat
-    ///    `BT_BOARD_HGT / 2` placement score (BTComputer.C:1255), NOT the
+    /// 3. Calls `game.ai_begin_drop()` to hard-drop. This uses the computer's flat
+    ///    `BT_BOARD_HGT / 2` placement score (BTComputer.C:1255), not the
     ///    human's variable hard-drop bonus.
     ///
     /// No-ops if `game.is_game_over()` or there is no current piece.
@@ -599,7 +600,7 @@ impl Computer {
 
         // --- Hard drop ---
         // Use the computer's placement scoring (flat BT_BOARD_HGT/2), not the
-        // human hard-drop bonus the human `begin_drop` would award.
+        // variable hard-drop bonus that the human `begin_drop` would award.
         game.ai_begin_drop();
     }
 }
@@ -641,7 +642,7 @@ mod tests {
         holey.set(5, 20, Some(bt_core::Cell::color(2)));
         holey.set(5, 21, Some(bt_core::Cell::color(2)));
         holey.set(5, 22, Some(bt_core::Cell::color(2)));
-        // Row 23 col 5 stays empty — that's the hole.
+        // Row 23 col 5 stays empty: that's the hole.
         holey.set(5, 24, Some(bt_core::Cell::color(2))); // already set above
 
         // Clean board should score better (lower).
@@ -713,8 +714,8 @@ mod tests {
             let (e, ep) = play_solo(false, seed, 250);
             println!("seed {seed}: strong {s} lines / {sp} placed    ernie {e} lines / {ep} placed");
             // The strong (Lee) eval must never top itself out in solo and must clear
-            // lines steadily — this is the robustness faithful Ernie lacks (it tops
-            // out on several seeds, which reads as "doesn't clear lines well").
+            // lines steadily. Faithful Ernie tops out on several of these seeds,
+            // confirming it clears lines less reliably than the strong eval.
             assert_eq!(sp, 250, "strong eval topped out on seed {seed} ({sp} placed)");
             assert!(s >= 50, "strong eval cleared too few lines on seed {seed}: {s}");
             strong_total += s;
@@ -879,18 +880,15 @@ mod tests {
 
     /// The AI-driven game should survive at least as long as a passive
     /// (no-input) game over the same seed, measured in pieces locked.
-    ///
-    /// We compare:
-    ///   - **AI game**: Computer::take_turn() each piece, then tick to lock.
-    ///   - **Passive game**: pieces just fall with no input (tick only).
-    ///
-    /// The AI must last at least as many locked pieces as the passive run.
+    /// The AI run calls `Computer::take_turn()` each piece then ticks to lock;
+    /// the passive run lets pieces fall with no input. The AI must lock at least
+    /// as many pieces as the passive run.
     #[test]
     fn ai_outlasts_passive() {
         const SEED: u64 = 42;
 
         let (passive_pieces, _) = run_game(Game::new(SEED), |_game| {
-            // No input — pieces fall freely.
+            // No input; pieces fall freely.
         });
 
         let mut ernie = Computer::new();
@@ -926,8 +924,8 @@ mod tests {
 
     /// Pin the board-eval penalty/bonus weights to the original's `levels`-time
     /// `BTCPenalties` (set in `BTComputer::BTComputer`, BTComputer.C:45-54). The
-    /// eval *structure* here is a faithful-in-spirit approximation, but these
-    /// weights are the exact numbers the 1994 AI used — drift in them silently
+    /// eval structure here is a faithful-in-spirit approximation, but these
+    /// weights are the exact numbers the 1994 AI used. Drift in them silently
     /// changes how Ernie plays.
     #[test]
     fn eval_penalty_weights_match_btcomputer() {
@@ -940,8 +938,8 @@ mod tests {
         assert_eq!(MIDLINE, 14, "BT_MIDLINE (BTComputer.C:39)");
     }
 
-    /// Ernie's difficulty ladder — the per-move delays (ms) from
-    /// `BTComputer.C:86-102` `levels[]`, Comatose (4000) … Bionic (0).
+    /// Ernie's difficulty ladder: the per-move delays (ms) from
+    /// `BTComputer.C:86-102` `levels[]`, Comatose (4000) through Bionic (0).
     #[test]
     fn difficulty_ladder_matches_btcomputer() {
         assert_eq!(
