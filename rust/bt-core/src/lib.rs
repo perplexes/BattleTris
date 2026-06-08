@@ -1,16 +1,16 @@
-//! `bt-core` — a faithful, deterministic port of the BattleTris game logic.
+//! `bt-core`: a faithful, deterministic port of the BattleTris game logic.
 //!
 //! Ported from the 1994 C++ source under `usr/src/game/` (Bryan Cantrill et
-//! al.). No platform, UI, or network dependencies — this crate is the pure
+//! al.). No platform, UI, or network dependencies; this crate is the pure
 //! rules engine consumed by the WASM front-end, the AI, and the netcode.
 //!
 //! Module map mirrors the original classes:
-//!   * [`constants`] — `BTConstants.H` etc.
-//!   * [`cell`]      — `BTBox` + subclasses
-//!   * [`piece`]     — `BTPiece` + subclasses
-//!   * [`board`]     — `BTBoardManager`
-//!   * [`weapons`]   — `BTWeaponToken`, `BTActive[]`, `BTWeapon`
-//!   * [`rng`]       — `rand` / `drand48` / `lrand48`
+//!   * [`constants`]  (`BTConstants.H` etc.)
+//!   * [`cell`]       (`BTBox` + subclasses)
+//!   * [`piece`]      (`BTPiece` + subclasses)
+//!   * [`board`]      (`BTBoardManager`)
+//!   * [`weapons`]    (`BTWeaponToken`, `BTActive[]`, `BTWeapon`)
+//!   * [`rng`]        (`rand` / `drand48` / `lrand48`)
 
 pub mod arsenal;
 pub mod board;

@@ -1,7 +1,7 @@
 //! Weapon tokens, active-weapon flags, and the weapon database.
 //!
 //! `WeaponToken` is ported verbatim from the `BTWeaponToken` enum in
-//! `usr/src/game/BTProtocol.H` (order and discriminants matter — they index the
+//! `usr/src/game/BTProtocol.H` (order and discriminant values matter: they index the
 //! active-flag array, the per-weapon duration array, and [`weapon_table`], and
 //! identify the token on the arsenal/wire protocol).
 //!
@@ -10,13 +10,13 @@
 
 /// The 34 weapons, identified by token.
 ///
-/// The discriminants are load-bearing, not cosmetic: a token's `i32` value is
-/// its index into the active-flag array, the per-weapon duration array, and
-/// [`weapon_table`], and it is the token's identity on the arsenal/wire protocol.
-/// They must stay `0..=33` in exactly this order, matching the protocol every
-/// consumer shares. Full flavor/price/duration for each lives in
-/// [`weapon_table`]; the one-liners here name the gameplay effect so the variant
-/// is legible at a call site.
+/// A token's `i32` value is its index into the active-flag array, the
+/// per-weapon duration array, and [`weapon_table`], and it is the token's
+/// identity on the arsenal/wire protocol. The discriminants stay `0..=33` in
+/// this order because every consumer shares that protocol. Full
+/// flavor/price/duration for each weapon lives in [`weapon_table`]; the
+/// one-liners here name the gameplay effect so the variant is legible at a
+/// call site.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(i32)]
 pub enum WeaponToken {
@@ -70,7 +70,7 @@ pub enum WeaponToken {
     Bug = 23,
     /// Squeezes the opponent's board to a narrow neck (Bottle neck).
     Bottle = 24,
-    /// Removes the opponent's slide window — pieces lock instantly (Slide Denied).
+    /// Removes the opponent's slide window; pieces lock instantly (Slide Denied).
     NoSlide = 25,
     /// Exchanges the two arsenals (cross-player Lazy Susan; never queued).
     Susan = 26,
@@ -91,7 +91,7 @@ pub enum WeaponToken {
     Gimp = 33,
 }
 
-/// Number of weapon tokens — the length of every per-weapon array, so all of
+/// Number of weapon tokens. This is the length of every per-weapon array, so all of
 /// [`WeaponToken::ALL`], the active-flag counts, and [`weapon_table`] stay in
 /// lockstep.
 pub const BT_MAX_WEAPONS: usize = 34;
@@ -110,14 +110,13 @@ impl WeaponToken {
         ]
     };
 
-    /// The token's array index — its discriminant as a `usize`. The one place
-    /// the load-bearing discriminant is consumed as a subscript.
+    /// The token's array index (its discriminant as a `usize`).
     #[inline]
     pub fn index(self) -> usize {
         self as i32 as usize
     }
 
-    /// The token for index `i`, or `None` if out of range — the guard that turns
+    /// The token for index `i`, or `None` if out of range. This is the guard that turns
     /// an untrusted wire/keyframe integer into a valid token.
     pub fn from_index(i: i32) -> Option<WeaponToken> {
         if (0..BT_MAX_WEAPONS as i32).contains(&i) {
@@ -128,14 +127,14 @@ impl WeaponToken {
     }
 }
 
-/// Which weapons are currently in effect — the `BTActive[]` array.
+/// Which weapons are currently in effect, the `BTActive[]` array.
 ///
-/// Active is a per-weapon flag, not a stack: a weapon is on or off, so launching
-/// the same weapon twice and expiring it once must leave it off. Gameplay
-/// therefore sets it as a boolean ([`ActiveFlags::set`]) and tests "in effect"
-/// with [`ActiveFlags::is_active`]. The slot is a count rather than a `bool`
-/// only so it can serialize uniformly in a keyframe and offer the more general
-/// increment primitive; the live game never relies on the magnitude.
+/// Active is a per-weapon boolean flag. A weapon is either on or off, so
+/// launching it twice and expiring it once leaves it off. Gameplay therefore
+/// sets it via [`ActiveFlags::set`] and tests it with [`ActiveFlags::is_active`].
+/// The slot stores an `i32` count (rather than `bool`) only to serialize
+/// uniformly in a keyframe and expose the more general counting primitives; the
+/// live game never relies on the magnitude.
 #[derive(Clone, Debug)]
 pub struct ActiveFlags {
     /// Per-token active state, indexed by [`WeaponToken::index`]. Nonzero = on.
@@ -162,16 +161,16 @@ impl ActiveFlags {
         self.counts[token.index()] != 0
     }
 
-    /// The raw count for `token` — the general primitive behind the boolean
+    /// The raw count for `token`, the general primitive behind the boolean
     /// view; live gameplay only ever cares whether it is nonzero.
     #[inline]
     pub fn count(&self, token: WeaponToken) -> i32 {
         self.counts[token.index()]
     }
 
-    /// Counting activate/deactivate. The live game does not use these — it sets a
-    /// boolean flag via [`ActiveFlags::set`]; these are the general counting
-    /// primitive (so a caller that genuinely needs nesting can pair them).
+    /// Counting activate/deactivate. The live game uses [`ActiveFlags::set`] for
+    /// boolean flag control; these are the general counting primitives for callers
+    /// that genuinely need nesting.
     pub fn activate(&mut self, token: WeaponToken) {
         self.counts[token.index()] += 1;
     }
@@ -188,12 +187,12 @@ impl ActiveFlags {
         self.counts[token.index()] = if on { 1 } else { 0 };
     }
 
-    /// Turn every weapon off — used on game reset.
+    /// Turn every weapon off, used on game reset.
     pub fn clear(&mut self) {
         self.counts = [0; BT_MAX_WEAPONS];
     }
 
-    /// The raw per-weapon flags — for a full-game keyframe. Pair with
+    /// The raw per-weapon flags, for a full-game keyframe. Pair with
     /// [`ActiveFlags::set_raw`].
     pub fn raw(&self) -> [i32; BT_MAX_WEAPONS] {
         self.counts
@@ -299,7 +298,7 @@ mod tests {
 
     #[test]
     fn set_is_boolean_not_a_counter() {
-        // Active is a flag, not a stack: launching the same weapon twice and
+        // Active is a boolean flag: launching the same weapon twice and
         // expiring it once must leave it inactive, so `set` clamps to 0/1.
         let mut a = ActiveFlags::new();
         a.set(WeaponToken::Speedy, true);

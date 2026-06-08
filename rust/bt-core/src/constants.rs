@@ -4,7 +4,7 @@
 //! few from `BTBoardManager.H` (bottle), `BTGame.H` (timing) and
 //! `BTPieceManager.C` (keep probabilities) and `BTScoreManager.C` (bazaar).
 //!
-//! These are the ground truth for the faithful port — do not "improve" them.
+//! These are the ground truth for the faithful port; do not "improve" them.
 
 // ---------------------------------------------------------------------------
 // Version
@@ -35,7 +35,7 @@ pub const BT_ELO_START: i64 = 1200;
 /// The offset from a bright color id to its dark twin (`BT_GRAY = BT_IVORY + 9`).
 pub const BT_MAX_DIF_COLORS: i32 = 9;
 
-/// Sentinel color for a box that renders nothing — the Bug weapon drops a block
+/// Sentinel color for a box that renders nothing. The Bug weapon drops a block
 /// of this color so the victim can't see it.
 pub const BT_INVISIBLE: i32 = -1;
 pub const BT_BLACK: i32 = 0;
@@ -60,17 +60,17 @@ pub const BT_DORANGE: i32 = BT_ORANGE + BT_MAX_DIF_COLORS;
 pub const BT_DGREEN: i32 = BT_GREEN + BT_MAX_DIF_COLORS;
 pub const BT_DCYAN: i32 = BT_CYAN + BT_MAX_DIF_COLORS;
 pub const BT_DPURPLE: i32 = BT_PURPLE + BT_MAX_DIF_COLORS;
-/// One past the last (dark) color id — the upper bound of the color space,
+/// One past the last (dark) color id, the upper bound of the color space,
 /// above which the non-color box ids ([`BT_STRUCT`] onward) live.
 pub const BT_MAX_COLORS: i32 = BT_NEUTRAL + BT_MAX_DIF_COLORS;
 
-/// Bottle-neck structure box — an immovable wall, distinct from any color.
+/// Bottle-neck structure box. An immovable wall, distinct from any color.
 pub const BT_STRUCT: i32 = 20;
 
 /// An un-landed smiley (worth funds); becomes [`BT_UNHAPPY`] once it locks
 /// without completing a line.
 pub const BT_HAPPY: i32 = 21;
-/// A frown — a smiley that landed without paying out.
+/// A frown: a smiley that landed without paying out.
 pub const BT_UNHAPPY: i32 = 22;
 pub const BT_GIMP_ID: i32 = 23;
 
@@ -82,7 +82,7 @@ pub const BT_DIE_4: i32 = 27;
 pub const BT_DIE_5: i32 = 28;
 pub const BT_DIE_6: i32 = 29;
 
-/// One past the highest box render id — the upper bound that sizes any
+/// One past the highest box render id, the upper bound that sizes any
 /// per-box-id array. (The id space has gaps, so this exceeds the number of
 /// distinct kinds.)
 pub const BT_MAX_BOXES: i32 = 30;
@@ -119,7 +119,7 @@ pub const BT_BOARD_HGT: i32 = 28;
 // ---------------------------------------------------------------------------
 // Timing (milliseconds)   (BTConstants.H:92-94, BTGame.C)
 // ---------------------------------------------------------------------------
-/// Gravity interval once fast-drop is engaged — near-instant descent.
+/// Gravity interval once fast-drop is engaged (near-instant descent).
 pub const BT_FAST_DROP_TIME: i32 = 10;
 /// Baseline gravity interval between automatic one-row falls. Weapons scale
 /// this (Speedy halves it, Meadow doubles it).
@@ -143,8 +143,8 @@ pub const BT_DEFAULT_Y: i32 = 0;
 // Pieces   (BTConstants.H:101-126)
 // ---------------------------------------------------------------------------
 // Every piece carries an 8x8 local grid even though no piece fills it. The
-// uniform extent gives every piece — from the single-cell die to the eight-wide
-// Long Dong — common cell storage and one shared collision test (rotation is
+// uniform extent gives every piece (from the single-cell die to the eight-wide
+// Long Dong) common cell storage and one shared collision test (rotation is
 // generic for most pieces, bespoke for Wall/Star/WeirdLong).
 pub const BT_PIECE_WIDTH: usize = 8;
 pub const BT_PIECE_HEIGHT: usize = 8;
@@ -153,7 +153,7 @@ pub const BT_PIECE_HEIGHT: usize = 8;
 // dense and 1-based (index 0 is unused). The blocks below partition the ids
 // into the families that selection and the weapons treat as a group.
 
-// Standard pieces — the seven that make up the default stream.
+// Standard pieces: the seven that make up the default stream.
 pub const BT_EL_PIECE: i32 = 1;
 pub const BT_REL_PIECE: i32 = 2;
 pub const BT_SL_RT_PIECE: i32 = 3;
@@ -166,7 +166,7 @@ pub const BT_BOX_PIECE: i32 = 7;
 pub const BT_DIE_PIECE: i32 = 8;
 pub const BT_HAP_PIECE: i32 = 9;
 
-/// The boundary just below the "weird" pieces — Feared Weird turns the stream on
+/// The boundary just below the "weird" pieces. Feared Weird turns the stream on
 /// by zeroing the standard block and enabling the weird ids
 /// [`BT_DOG_PIECE`]..=[`BT_WLONG_PIECE`]. (It leaves the 4x4 off and does not
 /// touch Long Dong, which keeps its existing exotic keep weight.)
@@ -189,14 +189,14 @@ pub const BT_MAX_PIECES: i32 = 18;
 // Selection rolls a uniform id then keeps it with probability `keep_prob[id]`,
 // re-rolling otherwise. So a piece's share of the stream is its keep weight
 // relative to the total enabled keep weight (a higher value = more common),
-// and disabling a piece is just zeroing its weight — which is how the piece-
+// and disabling a piece is just zeroing its weight, which is how the piece-
 // stream weapons work.
 /// Keep probability for the seven standard pieces.
 pub const BT_DEFAULT_KEEP_PROB: f64 = 0.21;
-/// Keep probability for the rare treats (smiley, Long Dong) — far below the
+/// Keep probability for the rare treats (smiley, Long Dong), far below the
 /// standard weight, so they turn up only occasionally.
 pub const BT_EXOTIC_KEEP_PROB: f64 = 0.02;
-/// The die is always kept once rolled (weight 1.0) — the heaviest weight, so the
+/// The die is always kept once rolled (weight 1.0), the heaviest weight, so the
 /// die is the single most common piece once the standard pieces are in the mix.
 pub const BT_DIE_KEEP_PROB: f64 = 1.0;
 /// Broken Record reroll divisor: a Broken-cursed stream breaks its repeat only
@@ -210,7 +210,7 @@ pub const BT_BROKEN_PROB: i64 = 10;
 // the engine flagged the last lock; the board sets one as a side effect of
 // landing / line-checking.
 // ---------------------------------------------------------------------------
-/// Enclosed an empty square — boxes on its left, right and logical top, at least
+/// Enclosed an empty square: boxes on its left, right and logical top, at least
 /// one of them just placed this turn.
 pub const BT_BAD_MOVE: i16 = 0;
 /// The stack is dangerously high.
@@ -236,7 +236,7 @@ pub const BT_BOTTLE_X: i32 = 3;
 pub const BT_BOTTLE_Y: i32 = 4;
 
 /// The bazaar opens each time the two players' COMBINED line count crosses a
-/// multiple of this — tying shopping to shared progress so both stop together.
+/// multiple of this, tying shopping to shared progress so both stop together.
 pub const BT_LINES_TIL_BAZ: i32 = 20;
 
 /// Mondale '96 skims this fraction of the victim's newly banked funds to the

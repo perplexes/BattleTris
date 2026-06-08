@@ -1,4 +1,4 @@
-//! Falling pieces — the faithful analogue of `BTPiece` and its subclasses in
+//! Falling pieces, the faithful analogue of `BTPiece` and its subclasses in
 //! `usr/src/game/BTPiece.{H,C}`.
 //!
 //! A piece is its own little grid plus a board position. It carries an 8x8 cell
@@ -6,8 +6,8 @@
 //! board origin `(x, y)`, a `color`, a rotation extent `rot` (0 = cannot rotate,
 //! otherwise the side length of the rotated sub-square), and the
 //! `orientation`/`orientations`/`state` rotation bookkeeping. Keeping the piece
-//! self-contained — it carries its cells rather than living embedded in the
-//! board — is what lets it be moved, rotated, and collision-tested against the
+//! self-contained (it carries its cells rather than living embedded in the
+//! board), so it can be moved, rotated, and collision-tested against the
 //! board cheaply before it locks.
 //!
 //! This module is deliberately RNG-free: the only randomness a piece needs is a
@@ -67,7 +67,7 @@ impl PieceKind {
         }
     }
 
-    /// The kind for a `BT_*_PIECE` id, or `None` if `id` is out of range — the
+    /// The kind for a `BT_*_PIECE` id, or `None` if `id` is out of range. This is the
     /// guard that turns a raw id (from selection or a keyframe) into a kind.
     pub fn from_id(id: i32) -> Option<PieceKind> {
         Some(match id {
@@ -282,7 +282,7 @@ impl Piece {
 
     /// Whether the piece would fit if its origin were at board `(x, y)`. Tests
     /// every occupied local cell against the board, where out-of-bounds counts as
-    /// occupied — so this rejects both overlaps and moves off the walls/floor in
+    /// occupied, rejecting both overlaps and moves off the walls/floor in
     /// one check (`BTPiece::canMoveTo`).
     pub fn can_move_to(&self, board: &Board, x: i32, y: i32) -> bool {
         for i in 0..BT_PIECE_WIDTH {
@@ -295,7 +295,7 @@ impl Piece {
         true
     }
 
-    /// `BTPiece::moveTo` — move if legal; returns false (and does nothing) if
+    /// `BTPiece::moveTo`: move if legal; returns false (and does nothing) if
     /// blocked.
     pub fn move_to(&mut self, board: &Board, x: i32, y: i32) -> bool {
         if self.can_move_to(board, x, y) {
@@ -307,7 +307,7 @@ impl Piece {
         }
     }
 
-    /// Whether the piece could rotate at board `(x, y)` — the rotated footprint
+    /// Whether the piece could rotate at board `(x, y)`. The rotated footprint
     /// is collision-tested before any rotation commits. A `rot` of 0 means the
     /// piece has no rotation, so it can never rotate (`BTPiece::canRotate`).
     pub fn can_rotate(&self, board: &Board, x: i32, y: i32) -> bool {
@@ -343,7 +343,7 @@ impl Piece {
         }
     }
 
-    // `i`/`j` here are the rotation COORDINATES, not mere indices: they drive the
+    // `i`/`j` here are rotation COORDINATES used to drive the
     // `self.cells[j][rot-1-i]` transform and `board.occupied(self.x + i, self.y + j)`.
     // An iterator rewrite would obscure the 2D rotation math, so keep the index loops.
     #[allow(clippy::needless_range_loop)]
@@ -502,8 +502,8 @@ impl Piece {
     }
 
     /// Star's bespoke rotation. It has only two orientations (a plus and an X),
-    /// so it toggles `state` between them; rotation direction is irrelevant —
-    /// both ways land on the other orientation — hence `_reverse` is ignored.
+    /// so it toggles `state` between them. Rotation direction is irrelevant:
+    /// both ways land on the other orientation, so `_reverse` is ignored.
     fn rotate_star(&mut self, board: &Board, _reverse: bool) -> bool {
         if self.state == 0 {
             if board.occupied(self.x, self.y)
@@ -538,7 +538,7 @@ impl Piece {
             self.cells[2][1] = self.cells[2][2];
             self.cells[2][2] = None;
         }
-        // NB: faithful to BTStarPiece::rotate — it advances only `state_`,
+        // NB: faithful to BTStarPiece::rotate, which advances only `state_`,
         // never `orientation_` (unlike Wall/WeirdLong).
         self.state = (self.state + 1) % 2;
         true
@@ -547,7 +547,7 @@ impl Piece {
     /// WeirdLong's bespoke rotation. It cycles through six orientations (it is a
     /// two-segment piece whose halves pivot independently), so `state` runs
     /// `0..6` and each transition shuffles a different set of cells with its own
-    /// collision pre-check — again, no uniform square transform fits.
+    /// collision pre-check; no uniform square transform fits.
     fn rotate_weirding(&mut self, board: &Board, reverse: bool) -> bool {
         let new_state = if reverse {
             (self.state - 1 + self.orientations) % self.orientations
@@ -714,7 +714,7 @@ impl Piece {
         true
     }
 
-    /// `BTPiece::reset` — clears the grid and orientation (position handled by
+    /// `BTPiece::reset`: clears the grid and orientation (position handled by
     /// the caller / `construct`).
     pub fn reset(&mut self) {
         for i in 0..BT_PIECE_WIDTH {
@@ -726,7 +726,7 @@ impl Piece {
         self.state = 0;
     }
 
-    /// `BTPiece::landed` — copy the piece's cells into the board and run the
+    /// `BTPiece::landed`: copy the piece's cells into the board and run the
     /// board's idiot/landing bookkeeping. Mirrors `BTPiece::landed`, which
     /// fills each occupied square via `board.fill` then calls `board.landed`.
     pub fn land(&mut self, board: &mut Board) {
