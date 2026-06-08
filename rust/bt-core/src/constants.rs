@@ -59,7 +59,8 @@ pub const BT_DORANGE: i32 = BT_ORANGE + BT_MAX_DIF_COLORS;
 pub const BT_DGREEN: i32 = BT_GREEN + BT_MAX_DIF_COLORS;
 pub const BT_DCYAN: i32 = BT_CYAN + BT_MAX_DIF_COLORS;
 pub const BT_DPURPLE: i32 = BT_PURPLE + BT_MAX_DIF_COLORS;
-/// One past the last color id — where the non-color box ids begin.
+/// One past the last (dark) color id — the upper bound of the color space,
+/// above which the non-color box ids ([`BT_STRUCT`] onward) live.
 pub const BT_MAX_COLORS: i32 = BT_NEUTRAL + BT_MAX_DIF_COLORS;
 
 /// Bottle-neck structure box — an immovable wall, distinct from any color.
@@ -94,8 +95,9 @@ pub const BT_BOX_BRDR: i32 = 3;
 /// Era hit right after a Have-a-Nice-Day).
 pub const BT_HAPPY_VAL: i32 = 150;
 
-// Id offsets that separate box families when ids are packed onto the wire, so a
-// die/face/gimp id never collides with a color id in the same field.
+// Id offsets that keep box families in disjoint numeric bands (boxes 0+, dice
+// 100+, faces 200+, gimps 300+) so a packed id is unambiguous about its family.
+// Carried from `BTConstants.H` for parity; consumers that pack ids use them.
 pub const BT_BOX_ID_OFFS: i32 = 0;
 pub const BT_DIE_ID_OFFS: i32 = 100;
 pub const BT_HAPPY_ID_OFFS: i32 = 200;
@@ -124,8 +126,9 @@ pub const BT_DROP_TIME: i32 = 512;
 /// "airslide" tucks possible. No Slide reduces it to zero (instant lock).
 pub const BT_SLIDE_TIME: i32 = 150;
 
-/// Baseline probability a randomly drawn standard piece is kept rather than
-/// re-rolled — the knob that shapes the default piece distribution.
+/// The baseline keep probability, carried verbatim from `BTConstants.H` for
+/// parity. The live piece distribution is driven by [`BT_DEFAULT_KEEP_PROB`]
+/// (numerically equal); this is the source-level twin in the constants header.
 pub const BT_BASE_PROB: f64 = 0.21;
 
 // Where a fresh piece's local grid is anchored on the board before its
@@ -183,7 +186,8 @@ pub const BT_MAX_PIECES: i32 = 18;
 // piece-stream weapons work.
 /// Keep probability for the seven standard pieces.
 pub const BT_DEFAULT_KEEP_PROB: f64 = 0.21;
-/// Keep probability for the rare treats (smiley, Long Dong) — seldom, never never.
+/// Keep probability for the rare treats (smiley, Long Dong) — uncommon, but they
+/// do turn up.
 pub const BT_EXOTIC_KEEP_PROB: f64 = 0.02;
 /// The die is always kept once rolled, so its frequency is purely its 1-in-18
 /// roll probability.

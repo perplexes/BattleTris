@@ -209,6 +209,7 @@ impl Game {
 
     // ---- queries -----------------------------------------------------------
 
+    /// The board for rendering and inspection.
     pub fn board(&self) -> &Board {
         &self.board
     }
@@ -217,19 +218,24 @@ impl Game {
     pub fn board_mut(&mut self) -> &mut Board {
         &mut self.board
     }
+    /// This player's scoreboard, including the opponent mirror.
     pub fn score(&self) -> Score {
         self.score
     }
+    /// The falling piece, if one is in play.
     pub fn current_piece(&self) -> Option<&Piece> {
         self.current.as_ref()
     }
-    /// Current piece origin on the board (`x_`, `y_`).
+    /// The falling piece's board origin — kept beside the piece's own copy (see
+    /// the `x`/`y` field note), and the position collision/locking trust.
     pub fn piece_pos(&self) -> (i32, i32) {
         (self.x, self.y)
     }
+    /// Whether the player has topped out.
     pub fn is_game_over(&self) -> bool {
         self.phase == Phase::Over
     }
+    /// Whether play is locally paused.
     pub fn is_paused(&self) -> bool {
         self.paused
     }
@@ -519,6 +525,7 @@ impl Game {
 
     // ---- weapons & two-player relay ---------------------------------------
 
+    /// Whether the player is shopping; while true the game is frozen.
     pub fn is_in_bazaar(&self) -> bool {
         self.in_bazaar
     }
@@ -530,6 +537,7 @@ impl Game {
     pub fn weapon_remaining(&self, token: WeaponToken) -> i32 {
         self.remaining[token.index()]
     }
+    /// Combined lines remaining until the next bazaar opens.
     pub fn lines_til_bazaar(&self) -> i32 {
         self.lines_til_baz
     }
@@ -537,6 +545,7 @@ impl Game {
     pub fn arsenal_token(&self, i: usize) -> i32 {
         self.arsenal.token(i).map(|t| t.index() as i32).unwrap_or(-1)
     }
+    /// How many copies are stacked in arsenal slot `i`.
     pub fn arsenal_quantity(&self, i: usize) -> u16 {
         self.arsenal.quantity(i)
     }
