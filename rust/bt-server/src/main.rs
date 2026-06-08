@@ -3154,6 +3154,40 @@ mod tests {
     }
 
     #[test]
+    fn stale_token_plus_rated_name_collapses_to_empty() {
+        // The mobile-Safari "anon" trap. A returning, already-rated player whose
+        // cached identity token no longer verifies (e.g. it was minted under an
+        // earlier server secret) falls back to the bare `name`. resolve_name refuses
+        // a bare, already-rated name (the anti-hijack guard) unless it equals the
+        // connection's `prior` name — empty on a fresh socket — so the player
+        // collapses to "". `queue` then lists them as "anon"; `available` drops them
+        // from the roster entirely. The fix is client-side: always mint a FRESH token
+        // (it verifies under the current secret), so the token path resolves the name
+        // and this bare-name guard is never reached.
+        let mut app = test_app();
+        app.ratings.insert("player972".to_string(), (25.0, 8.0, 10)); // already rated
+
+        // A token signed under a DIFFERENT secret won't verify -> ignored -> falls to
+        // the bare name, which is rejected as an already-rated name -> "".
+        let stale = identity::issue_token_with(b"an-older-server-secret", "player972", 1_700_000_000);
+        assert_eq!(
+            resolve_name(&app, &json!({ "name": "player972", "token": stale }), ""),
+            "",
+            "stale token + rated bare name -> empty (the bug: shows as anon / unlisted)"
+        );
+
+        // A FRESH token (the current process secret) verifies, so the name resolves
+        // directly and the bare-name guard is bypassed. This is what the client now
+        // always sends — one fresh mint per session instead of a cached, stale token.
+        let fresh = identity::issue_token("player972");
+        assert_eq!(
+            resolve_name(&app, &json!({ "name": "player972", "token": fresh }), ""),
+            "player972",
+            "a fresh, verifiable token resolves the rated name"
+        );
+    }
+
+    #[test]
     fn start_bout_remembers_pre_match_presence_for_restore() {
         let mut app = test_app();
         // A bot (Available) challenged by a human (no presence — a pure challenger).

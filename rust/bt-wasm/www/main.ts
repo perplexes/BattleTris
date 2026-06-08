@@ -502,8 +502,14 @@ function connectLobby() {
 let identityToken: string | null = null;
 
 function loadIdentity() {
+    // Persist only the NAME across sessions — NEVER the signed token. A cached bearer
+    // token can go stale (e.g. it was minted under an earlier server secret); the
+    // server then ignores it, and because a bare (untokened) `name` can't claim an
+    // already-rated name, the player silently collapses to "anon"/unlisted. So we
+    // always mint a FRESH token from /api/identity each session (it signs under the
+    // current secret, so it verifies). Drop any token a prior build left behind.
     try {
-        identityToken = localStorage.getItem('bt_token');
+        localStorage.removeItem('bt_token');
         playerName = localStorage.getItem('bt_player_name') || playerName;
     } catch (_) {}
     // Never leave the player nameless: default to a random handle they can edit.
@@ -537,8 +543,9 @@ async function ensureIdentity() {
             body: JSON.stringify({ name: playerName }),
         });
         if (res.ok) {
+            // Kept in-memory only for this session; deliberately NOT persisted (see
+            // loadIdentity) so a stale token can never shadow the live identity.
             identityToken = (await res.json()).token;
-            try { localStorage.setItem('bt_token', identityToken!); } catch (_) {}
             setNameHint('');
         } else {
             setNameHint('Could not register that name. Try another.', true);
@@ -560,8 +567,7 @@ async function commitNameFromField() {
     playerName = raw;
     nameInput.value = raw;
     try { localStorage.setItem('bt_player_name', playerName); } catch (_) {}
-    identityToken = null;
-    try { localStorage.removeItem('bt_token'); } catch (_) {}
+    identityToken = null; // drop the old-name token; ensureIdentity re-mints for the new name
     const tok = await ensureIdentity();
     if (tok && availableToggle && availableToggle.checked) setAvailable(true);
 }
@@ -2111,8 +2117,12 @@ if (openLeaderboardBtn) openLeaderboardBtn.addEventListener('click', () => { loc
 // Initialize and start game loop
 (async () => {
     // Load identity FIRST: initGame's applyScreenFromUrl may rejoin a match from
-    // ?match=<id>, which needs our name + token ready (and populates the name field).
+    // ?match=<id>, which needs our name + a VALID token ready (and populates the name
+    // field). We no longer persist the token across sessions (it can go stale), so
+    // mint a fresh one now — before initGame can fire that rejoin — so the rejoin and
+    // any lobby presence carry a token the server will actually verify.
     loadIdentity();
+    await ensureIdentity();
 
     await initGame();
 
