@@ -60,11 +60,13 @@ const ACTIVE_PING: Duration = Duration::from_secs(20);
 /// MUST exceed the server's `REJOIN_GRACE` (12s): when a human opponent drops, the
 /// server FREEZES the bout for that long waiting for them to reconnect (an accidental
 /// refresh drops straight back into the same game), and we get no snapshots while it's
-/// frozen. The old ~2.4s would abandon the match mid-grace — and a snapshot gap under
-/// heavy RTT could trip it too; so we pause and wait out the grace (+ a margin for the
-/// resume frame + latency) instead. A natural top-out still sends a final result
-/// snapshot; an opponent who TRULY drops makes the server end the bout without a last
-/// frame, and this (longer) timeout is how we eventually notice and return to the lobby.
+/// frozen. A shorter timeout would abandon the match mid-grace — and a snapshot gap
+/// under heavy RTT could trip it too — so we wait out the full grace (plus a margin for
+/// the resume frame + latency). A natural top-out still sends a final `snapshot` with a
+/// `result`, which ends the match cleanly; a dropped opponent ends the bout server-side
+/// without that final snapshot. The server's end-of-bout frames for that case
+/// (`opponentLeft`, `rating`) are all non-`snapshot`, which the bot ignores — so this
+/// timeout is how we eventually notice and return to the lobby.
 const STALE_TICKS: u32 = 875;
 /// How long to wait before reconnecting after the socket drops.
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
@@ -100,7 +102,7 @@ const ROAM_PLACE_FAST: i32 = 22; // ~350ms
 const ROAM_WEAPON_SKILL: f64 = 0.4;
 
 /// Map an opponent's Elo (server `elo_styled`: ~700 weak, 1000 new, 1700+ strong)
-/// to a skill in [0,1] for [`best_placement_skill`] + the pace/weapon dials.
+/// to a skill in `[0,1]` for [`best_placement_skill`] + the pace/weapon dials.
 fn elo_to_skill(elo: i64) -> f64 {
     ((elo as f64 - 700.0) / 1000.0).clamp(0.0, 1.0)
 }
@@ -290,7 +292,7 @@ struct MatchState {
     predictor: Predictor,
     /// This bot's difficulty/name persona.
     persona: Persona,
-    /// Skill for this match in [0,1] — 1.0 (Bert), 0.0 (Ernie), or rating-matched
+    /// Skill for this match in `[0,1]` — 1.0 (Bert), 0.0 (Ernie), or rating-matched
     /// from the opponent's Elo (The Count). Drives placement noise / pace / weapons.
     skill: f64,
     /// Ticks between placements this match (from `skill` for roam, else the persona).
@@ -327,14 +329,16 @@ struct MatchState {
     /// Ticks since the last snapshot; if it crosses [`STALE_TICKS`] the opponent
     /// has gone silent (forfeit/disconnect) and we end the match our side.
     idle_ticks: u32,
-    /// The last input seq the SERVER has confirmed applying for us — the snapshot
-    /// `ack`. While this trails `predictor.input_seq()` (the seq of our most recently
-    /// sent input this bout) we have inputs still in flight, and the bot waits — so
-    /// its local prediction can't run ahead of the authoritative sim. That is the
-    /// general fix for "the bot did something before the server acked it" — most
-    /// visibly a predicted bazaar-leave racing the server's bazaar-entry and freezing
-    /// the whole match. The "last sent" half of that gate now comes straight from the
-    /// [`Predictor`] (per-bout `input_seq`, reset to 0 with each new bout).
+    /// The last input seq the SERVER has acknowledged processing for us — the snapshot
+    /// `ack`. (It means "I've seen your inputs through seq N", not necessarily "applied":
+    /// the server acks a fresh legal input even when a bazaar barrier then drops it.)
+    /// While this trails `predictor.input_seq()` (the seq of our most recently sent input
+    /// this bout) we have inputs still in flight, and the bot waits — so its local
+    /// prediction can't run ahead of the authoritative sim. This is the general "never
+    /// act before the server has caught up" gate; the bazaar's predicted-leave freeze has
+    /// its own dedicated guard on top (`sync::decide`'s `auth_baz && local_baz`). The
+    /// "last sent" half of this gate is the [`Predictor`]'s per-bout `input_seq` (reset
+    /// to 0 with each new bout).
     acked: u64,
 }
 
@@ -621,8 +625,9 @@ fn handle_text(
                 // The full authoritative board rides the throttled keyframe (a JSON
                 // array of bytes). Hand the whole frame to the predictor: it prunes
                 // acked inputs, restores our local sim to the keyframe, and replays the
-                // still-unacked tail on top — the single reconciliation path, shared
-                // with the browser, instead of a bare restore_bytes here.
+                // still-unacked tail on top. Routing reconciliation through this single
+                // path (shared with the browser) — rather than a direct game-state
+                // restore here — is what keeps the bot and browser sims from drifting.
                 let keyframe: Option<Vec<u8>> = v
                     .get("keyframe")
                     .and_then(|k| k.as_array())
@@ -703,11 +708,11 @@ fn drive_tick(state: &mut MatchState, out: &Out) {
         // authoritatively still has US in the bazaar and we've already shopped, keep
         // (idempotently) re-sending LeaveBazaar until it takes. This makes escaping a
         // bazaar we're in independent of the `bazaar_bought` re-arm ever observing an
-        // out-of-bazaar snapshot — a latent assumption the TLA+ model surfaced (the
-        // re-arm could miss a too-fast re-entry). Gated on `in_bazaar` (the AUTHORITATIVE
-        // flag), never on a mere local prediction, so we can't send a leave the server
-        // would eat before we're really in the bazaar (the predicted-leave freeze).
-        // We're here only when not WaitAck, so the re-leave can't race an unacked input.
+        // out-of-bazaar snapshot (which a too-fast re-entry could otherwise skip).
+        // Gated on `in_bazaar` (the AUTHORITATIVE flag), never on a mere local
+        // prediction, so we can't send a leave the server would no-op away before we're
+        // really in the bazaar (the predicted-leave freeze). We're here only when not
+        // WaitAck, so the re-leave can't race an unacked input.
         BotAction::WaitBazaar => {
             if state.in_bazaar && state.bazaar_bought {
                 send_input(&mut state.predictor, out, Input::LeaveBazaar);
@@ -782,12 +787,14 @@ fn arsenal_of(game: &Game) -> [i32; 10] {
     a
 }
 
-/// In the bazaar, buy a smart loadout ([`buy_plan`]) within our funds, then leave —
-/// each input applied locally (prediction) AND sent to the server. Only buys the
-/// engine accepts are forwarded, keeping the sim in sync and avoiding a stream of
-/// rejected inputs. The caller guarantees we're authoritatively AND locally in the
-/// bazaar before calling, so the buys + the LeaveBazaar all land while the server is
-/// genuinely shopping — no entry race, sent exactly once per visit.
+/// In the bazaar, buy a smart loadout ([`buy_plan`]) within our funds, then leave.
+/// Buys are predicted locally (applied to the sim) AND forwarded — only the ones the
+/// engine accepts, keeping the sim in sync. The LeaveBazaar is forwarded but NOT
+/// applied locally (the local sim stays in the bazaar until a keyframe clears the
+/// barrier). The caller guarantees we're authoritatively AND locally in the bazaar
+/// before calling, so the buys + the leave all land while the server is genuinely
+/// shopping (no entry race). This shop batch runs once per visit (`bazaar_bought`
+/// gates re-entry); a still-frozen LeaveBazaar may then be re-sent from `WaitBazaar`.
 fn shop_bazaar(state: &mut MatchState, out: &Out) {
     if state.predictor.game().is_in_bazaar() && state.weapons_on {
         let funds = state.predictor.game().score().funds;
@@ -795,8 +802,8 @@ fn shop_bazaar(state: &mut MatchState, out: &Out) {
         let carter = state.predictor.game().weapon_active(WeaponToken::Carter);
         for tok in buy_plan(funds, &arsenal, carter) {
             // `predict` applies the buy locally and returns a frame to send ONLY if the
-            // engine accepted it, so we forward exactly the buys that landed (no stream
-            // of rejected inputs) — the same rule as before, via the shared Predictor.
+            // engine accepted it, so we forward exactly the buys that landed — no stream
+            // of rejected/no-op buys clogging the wire and the ack stream.
             send_input(&mut state.predictor, out, Input::BuyWeapon(tok.index() as i32));
         }
     }

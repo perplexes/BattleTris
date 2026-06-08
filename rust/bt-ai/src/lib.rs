@@ -353,16 +353,19 @@ pub struct Placement {
 /// 6. `eval_board` the result.
 ///
 /// Returns the `{x, orientation}` with the lowest (best) eval score.
-/// Falls back to `{x: 0, orientation: 0}` if no placement succeeds.
+/// Falls back to `{x: piece.x, orientation: 0}` (the spawn position) if no
+/// candidate placement succeeds.
 ///
 /// This is the spirit of `BTComputer::decide()` + `computeValue()` in
 /// BTComputer.C: a full column × orientation simulation.
 ///
 /// ## Tie-breaking
-/// The C++ `checkMove` DFS starts at `def_x_` (centre) and expands outward,
-/// so ties resolve in favour of the centre column. We replicate that by
-/// iterating candidates in a centre-out order: 5, 4, 6, 3, 7, 2, 8, 1, 9, 0,
-/// extended with negative offsets. This matches `checkMove(def_x_=5, …)`.
+/// The C++ `checkMove` DFS starts at `def_x_` (centre) and expands outward, so
+/// ties resolve in favour of the centre column. We reproduce that centre bias by
+/// visiting candidates centre-out — 5, 6, 4, 7, 3, 8, 2, 9, 1, 0, extended with
+/// negative offsets — and keeping the FIRST best on ties (strict `<`). What we
+/// pin is the centre-out priority, not the C++ DFS's exact intra-cell direction
+/// order; the centre column wins ties either way.
 pub fn best_placement(board: &Board, piece: &Piece) -> Placement {
     let mut best_score = f64::MAX;
     let mut best = Placement { x: piece.x, orientation: 0 };
@@ -398,7 +401,7 @@ pub fn best_placement_strong(board: &Board, piece: &Piece) -> Placement {
 /// full strong eval — a smooth difficulty dial for the rating-matched roaming bot.
 const SKILL_NOISE_SCALE: f64 = 8.0;
 
-/// A tiny xorshift step → a float in [0,1). Used ONLY for the skill-noise above, so
+/// A tiny xorshift step → a float in `[0,1)`. Used ONLY for the skill-noise above, so
 /// it stays out of the engine's deterministic piece RNG (mixing them would desync
 /// the bot's predicted board from the server's). Seed must be non-zero.
 fn xorshift01(state: &mut u64) -> f64 {
@@ -410,7 +413,7 @@ fn xorshift01(state: &mut u64) -> f64 {
     ((x >> 11) as f64) / ((1u64 << 53) as f64)
 }
 
-/// Skill-scaled placement for a rating-matched bot. `skill` ∈ [0,1]: 1.0 returns the
+/// Skill-scaled placement for a rating-matched bot. `skill` ∈ `[0,1]`: 1.0 returns the
 /// strong best; lower skill adds proportional noise to each candidate's score so the
 /// bot increasingly settles for a plausible-but-worse landing (a weaker opponent).
 /// `rng` is a caller-owned xorshift seed, NOT the engine RNG.
@@ -443,7 +446,8 @@ pub fn best_placement_skill(board: &Board, piece: &Piece, skill: f64, rng: &mut 
 fn for_each_landing(board: &Board, piece: &Piece, mut visit: impl FnMut(Placement, &Board, i32)) {
     let spawn_y = 0i32;
 
-    // Candidate columns, centre-out, matching `checkMove(def_x_=5, …)`.
+    // Candidate columns, centre-out from `def_x_=5` — the centre bias that
+    // `checkMove`'s outward DFS gives ties.
     let centre = board.width / 2; // = 5 for the standard board
     let search_min = -(bt_core::constants::BT_PIECE_WIDTH as i32 - 1);
     let search_max = board.width; // exclusive
@@ -459,7 +463,8 @@ fn for_each_landing(board: &Board, piece: &Piece, mut visit: impl FnMut(Placemen
         if added.is_empty() {
             break;
         }
-        // Right first (matching checkMove exploring right before left from centre).
+        // Right before left at each distance — a fixed, deterministic tie-break
+        // order (the centre column is still visited first, so centre wins ties).
         for x in added.iter().rev() {
             if *x >= search_min && *x < search_max {
                 candidates.push(*x);
