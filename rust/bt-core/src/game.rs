@@ -55,8 +55,10 @@ pub struct Score {
 enum Phase {
     /// Gravity is pulling the piece down on the drop clock.
     Falling,
-    /// The piece can fall no further and is running its lock delay; sliding or
-    /// rotating off the obstacle returns it to [`Phase::Falling`].
+    /// The piece can fall no further and is running its lock delay. If it was
+    /// slid or rotated clear of the obstacle during the delay, the next lock-delay
+    /// check finds it can fall again and returns it to [`Phase::Falling`] instead
+    /// of locking.
     Sliding,
     /// The player topped out; the game is finished and inert.
     Over,
