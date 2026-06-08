@@ -6,9 +6,15 @@
 use crate::constants::BT_ARSENAL_SIZE;
 use crate::weapons::WeaponToken;
 
+/// A fixed bank of weapon slots. Parallel arrays rather than a `Vec` of
+/// `(token, count)` pairs because slot POSITION is meaningful — the UI shows a
+/// stable row of slots and Lazy Susan swaps whole arsenals — so slots must keep
+/// their index even when emptied, and the capacity is a hard cap.
 #[derive(Clone, Debug)]
 pub struct Arsenal {
+    /// Which weapon occupies each slot (`None` = empty).
     rep: [Option<WeaponToken>; BT_ARSENAL_SIZE],
+    /// How many copies of that weapon are stacked in the slot.
     quantity: [u16; BT_ARSENAL_SIZE],
 }
 
@@ -19,6 +25,7 @@ impl Default for Arsenal {
 }
 
 impl Arsenal {
+    /// An empty arsenal — every slot vacant.
     pub fn new() -> Arsenal {
         Arsenal { rep: [None; BT_ARSENAL_SIZE], quantity: [0; BT_ARSENAL_SIZE] }
     }
@@ -80,14 +87,18 @@ impl Arsenal {
         }
     }
 
+    /// The weapon in slot `index`, if any. Out-of-range indices read as empty
+    /// so callers can iterate fixed slot rows without bounds juggling.
     pub fn token(&self, index: usize) -> Option<WeaponToken> {
         self.rep.get(index).copied().flatten()
     }
 
+    /// How many copies are stacked in slot `index` (0 for empty or out of range).
     pub fn quantity(&self, index: usize) -> u16 {
         self.quantity.get(index).copied().unwrap_or(0)
     }
 
+    /// Empty every slot — used when a game resets.
     pub fn clear(&mut self) {
         self.rep = [None; BT_ARSENAL_SIZE];
         self.quantity = [0; BT_ARSENAL_SIZE];

@@ -86,6 +86,9 @@ pub struct Cell {
 }
 
 impl Cell {
+    /// An occupied square of `kind`, visible by default. Hiding is a separate
+    /// step ([`Cell::hide`]) so a cell's identity is independent of whether the
+    /// Twilight Zone is currently cloaking it.
     pub fn new(kind: CellKind) -> Self {
         Cell { kind, hidden: false }
     }
@@ -106,6 +109,8 @@ impl Cell {
     pub fn structure() -> Self {
         Cell::new(CellKind::Structure)
     }
+    /// A gimp box carrying an underlying funds `value` — the Gimp weapon skins a
+    /// box as a distraction while preserving what it was worth.
     pub fn gimp(value: i32) -> Self {
         Cell::new(CellKind::Gimp(value))
     }
@@ -129,7 +134,9 @@ impl Cell {
         self.kind.is_removable()
     }
 
-    /// `BTBox::hide()`.
+    /// Cloak this square so it renders as nothing — the Twilight Zone effect.
+    /// The cell keeps its true kind and value; only its rendered id is suppressed
+    /// ([`Cell::id`] returns -1), so clearing and funds are unaffected.
     pub fn hide(&mut self) {
         self.hidden = true;
     }

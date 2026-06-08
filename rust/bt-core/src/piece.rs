@@ -1,19 +1,19 @@
 //! Falling pieces — the faithful analogue of `BTPiece` and its subclasses in
 //! `usr/src/game/BTPiece.{H,C}`.
 //!
-//! Each piece carries an 8x8 grid of cells (`map_` in the original), an
-//! absolute board position `(x, y)`, a `color`, a rotation extent `rot`
-//! (0 = no rotation, otherwise the side length of the rotated sub-square), and
-//! `orientation`/`orientations`/`state` for rotation bookkeeping. The grid is
-//! indexed `cells[x_local][y_local]`, matching C++ `map_[i][j]`.
+//! A piece is its own little grid plus a board position. It carries an 8x8 cell
+//! grid (`map_` in the original) indexed `cells[x_local][y_local]`, an absolute
+//! board origin `(x, y)`, a `color`, a rotation extent `rot` (0 = cannot rotate,
+//! otherwise the side length of the rotated sub-square), and the
+//! `orientation`/`orientations`/`state` rotation bookkeeping. Keeping the piece
+//! self-contained — it carries its cells rather than living embedded in the
+//! board — is what lets it be moved, rotated, and collision-tested against the
+//! board cheaply before it locks.
 //!
-//! ## Contract (do not change these public signatures — other modules depend
-//! on them; only fill in the bodies):
-//!   * [`PieceKind`] + `id`/`from_id`
-//!   * [`Piece`] fields and the listed methods
-//!
-//! `construct` takes a `die_value` (1..=6) used only by [`PieceKind::Die`];
-//! callers compute it via the RNG so this module stays RNG-independent.
+//! This module is deliberately RNG-free: the only randomness a piece needs is a
+//! die's pip value, which [`Piece::construct`] takes as a `die_value` argument
+//! so the caller owns the draw and the module stays a pure function of its
+//! inputs.
 
 use crate::board::Board;
 use crate::cell::Cell;
@@ -67,6 +67,8 @@ impl PieceKind {
         }
     }
 
+    /// The kind for a `BT_*_PIECE` id, or `None` if `id` is out of range — the
+    /// guard that turns a raw id (from selection or a keyframe) into a kind.
     pub fn from_id(id: i32) -> Option<PieceKind> {
         Some(match id {
             BT_EL_PIECE => PieceKind::El,
@@ -273,12 +275,15 @@ impl Piece {
         }
     }
 
-    /// `BTPiece::isMapped`.
+    /// Whether local grid cell `(x, y)` is part of the piece's shape.
     pub fn is_mapped(&self, x: usize, y: usize) -> bool {
         self.cells[x][y].is_some()
     }
 
-    /// `BTPiece::canMoveTo` — can the piece occupy board position `(x, y)`?
+    /// Whether the piece would fit if its origin were at board `(x, y)`. Tests
+    /// every occupied local cell against the board, where out-of-bounds counts as
+    /// occupied — so this rejects both overlaps and moves off the walls/floor in
+    /// one check (`BTPiece::canMoveTo`).
     pub fn can_move_to(&self, board: &Board, x: i32, y: i32) -> bool {
         for i in 0..BT_PIECE_WIDTH {
             for j in 0..BT_PIECE_HEIGHT {
@@ -302,7 +307,9 @@ impl Piece {
         }
     }
 
-    /// `BTPiece::canRotate`.
+    /// Whether the piece could rotate at board `(x, y)` — the rotated footprint
+    /// is collision-tested before any rotation commits. A `rot` of 0 means the
+    /// piece has no rotation, so it can never rotate (`BTPiece::canRotate`).
     pub fn can_rotate(&self, board: &Board, x: i32, y: i32) -> bool {
         if self.rot == 0 {
             return false;
@@ -319,10 +326,15 @@ impl Piece {
         true
     }
 
-    /// `BTPiece::rotate` (and the Wall/Star/WeirdLong overrides). `reverse`
-    /// rotates counter-clockwise. Returns false if blocked.
+    /// Rotate the piece, returning false (and leaving it unchanged) if the
+    /// rotated shape would collide. `reverse` rotates the other way.
+    ///
+    /// Most pieces fit inside a square and rotate by the generic 90° transform of
+    /// that square (a transpose with one axis reversed). Wall, Star, and WeirdLong
+    /// have shapes that no such square transform reproduces, so each has its own
+    /// hand-built per-orientation transition
+    /// (`BTWallPiece`/`BTStarPiece`/`BTWeirdLongPiece::rotate`).
     pub fn rotate(&mut self, board: &Board, reverse: bool) -> bool {
-        // Special cases for Wall, Star, WeirdLong; generic for all others
         match self.kind {
             PieceKind::Wall => self.rotate_wall(board, reverse),
             PieceKind::Star => self.rotate_star(board, reverse),
@@ -376,6 +388,11 @@ impl Piece {
         true
     }
 
+    /// Wall's bespoke rotation: it pivots two opposite arms around a 4-wide
+    /// frame, so each of its four orientations moves a specific pair of cells.
+    /// `state` tracks which orientation it is in; the per-`state` arm shuffle and
+    /// its collision pre-check are spelled out explicitly because no uniform
+    /// square transform produces this motion.
     fn rotate_wall(&mut self, board: &Board, reverse: bool) -> bool {
         let new_state = if reverse {
             (self.state - 1 + self.orientations) % self.orientations
@@ -484,8 +501,10 @@ impl Piece {
         true
     }
 
+    /// Star's bespoke rotation. It has only two orientations (a plus and an X),
+    /// so it toggles `state` between them; rotation direction is irrelevant —
+    /// both ways land on the other orientation — hence `_reverse` is ignored.
     fn rotate_star(&mut self, board: &Board, _reverse: bool) -> bool {
-        // Star ignores rotation direction (faithful to BTStarPiece::rotate).
         if self.state == 0 {
             if board.occupied(self.x, self.y)
                 || board.occupied(self.x + 2, self.y)
@@ -525,6 +544,10 @@ impl Piece {
         true
     }
 
+    /// WeirdLong's bespoke rotation. It cycles through six orientations (it is a
+    /// two-segment piece whose halves pivot independently), so `state` runs
+    /// `0..6` and each transition shuffles a different set of cells with its own
+    /// collision pre-check — again, no uniform square transform fits.
     fn rotate_weirding(&mut self, board: &Board, reverse: bool) -> bool {
         let new_state = if reverse {
             (self.state - 1 + self.orientations) % self.orientations

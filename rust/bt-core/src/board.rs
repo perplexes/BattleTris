@@ -139,7 +139,8 @@ impl Board {
         // else: fell off the board — discard (C++ `delete new_box`).
     }
 
-    /// `BTBoardManager::setIdiot`.
+    /// Raise the idiot (heckle) flag with `reason`; the game drains it after the
+    /// lock to emit a [`crate::GameEvent::Idiot`] (`BTBoardManager::setIdiot`).
     pub fn set_idiot(&mut self, reason: i16) {
         self.idiot = true;
         self.reason = reason;
@@ -450,6 +451,8 @@ impl Board {
         std::mem::swap(&mut self.cells, &mut other.cells);
     }
 
+    /// Exchange the contents of two squares — the primitive the board flips are
+    /// built from.
     fn swap(&mut self, x1: i32, y1: i32, x2: i32, y2: i32) {
         let a = self.get(x1, y1);
         let b = self.get(x2, y2);
@@ -475,16 +478,16 @@ impl Board {
         }
     }
 
-    /// The one-shot board mutation for a weapon turning on (`BT_WPN_ON`).
-    /// (Set the active flag via [`Board::set_active`] first.)
+    /// The one-shot board mutation for a weapon turning on (`BT_WPN_ON`). Set the
+    /// active flag via [`Board::set_active`] first.
     ///
-    /// Returns the [`LineClear`] produced if the mutation completed any rows.
-    /// Only Bottle can do this (planting its neck walls may finish a partially
-    /// filled neck row — `BTBoardManager.C:440` calls `checkLines()` after the
-    /// walls go up). The caller (`Game::apply_weapon_on`) MUST credit those funds
-    /// and lines: the original always sends `BT_FUNDS`/`BT_LINE` from `checkLines`
-    /// (BTBoardManager.C:613-615), so dropping them silently destroys the victim's
-    /// earned funds and line count. Every other weapon returns the empty clear.
+    /// Returns a non-empty [`LineClear`] only when the mutation itself completed
+    /// rows, which only Bottle can do: planting its neck walls can finish a
+    /// partially filled neck row, so it runs `check_lines` after the walls go up
+    /// (`BTBoardManager.C:440`). Those funds and lines are real earnings, so the
+    /// return value is propagated rather than swallowed — the caller
+    /// (`Game::apply_weapon_on`) credits them exactly like a normal clear. Every
+    /// other weapon returns the empty clear.
     pub fn apply_weapon(&mut self, token: WeaponToken, rng: &mut Rng) -> LineClear {
         let h = BT_BOARD_HGT;
         let mut clear = LineClear::default();
@@ -579,15 +582,14 @@ impl Board {
             }
             WeaponToken::FlipOut => self.flip_vert(),
             WeaponToken::FallOut => {
-                // The middle columns "fall out": repeatedly drop the bottom
-                // (or top, if upside-down) line over the non-ledge columns. The
-                // branch must mirror BTBoardManager.C:414 EXACTLY —
-                // `!BTActive[UPBYSIDE] || computer_` -> bottom (`height-1`), else top
-                // (`0`). A computer board is NEVER visually flipped, so even with
-                // Upbyside active it falls out from the BOTTOM; using a bare `!upside`
-                // here (ignoring `computer`) diverged for AI boards and was the only
-                // upside branch in this file not honoring `computer` (remove_line /
-                // insert_line both do).
+                // The middle columns "fall out": repeatedly drop the bottom (or
+                // top, when upside-down) line over the non-ledge columns
+                // (BTBoardManager.C:414). The direction test is
+                // `!Upbyside || computer` rather than a bare `!upside` because a
+                // computer board is never visually flipped — so even with
+                // Upbyside active the AI's board still falls out from the BOTTOM.
+                // (`remove_line` / `insert_line` gate on `computer` for the same
+                // reason.)
                 let from_bottom = !self.is_active(WeaponToken::Upbyside) || self.computer;
                 for _ in 0..self.height {
                     let line = if from_bottom { self.height - 1 } else { 0 };

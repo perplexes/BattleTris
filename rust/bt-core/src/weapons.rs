@@ -1,57 +1,104 @@
 //! Weapon tokens, active-weapon flags, and the weapon database.
 //!
 //! `WeaponToken` is ported verbatim from the `BTWeaponToken` enum in
-//! `usr/src/game/BTProtocol.H` (order and discriminants matter — they index
-//! `keep_prob_`, the arsenal, and the `BTActive[]` array).
+//! `usr/src/game/BTProtocol.H` (order and discriminants matter — they index the
+//! active-flag array, the per-weapon duration array, and [`weapon_table`], and
+//! identify the token on the arsenal/wire protocol).
 //!
 //! Weapon *effects* live in the board ([`crate::board`]), piece manager and
 //! game state machine; this module is the data + the active-flag bookkeeping.
 
-/// `BTWeaponToken` — 34 weapons (0..=33). Discriminants are load-bearing.
+/// The 34 weapons, identified by token.
+///
+/// The discriminants are load-bearing, not cosmetic: a token's `i32` value is
+/// its index into the active-flag array, the per-weapon duration array, and
+/// [`weapon_table`], and it is the token's identity on the arsenal/wire protocol.
+/// They must stay `0..=33` in exactly this order, matching the protocol every
+/// consumer shares. Full flavor/price/duration for each lives in
+/// [`weapon_table`]; the one-liners here name the gameplay effect so the variant
+/// is legible at a call site.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(i32)]
 pub enum WeaponToken {
+    /// Floods the opponent with hard-to-place "weird" pieces.
     FearedWeird = 0,
+    /// Replaces the opponent's box piece with a hollow 4x4 ring.
     FourByFour = 1,
+    /// The opponent's pieces spin nonstop (Mad Hatter).
     Hatter = 2,
+    /// Flips the opponent's board upside-down and reverses their controls.
     Upbyside = 3,
+    /// Opens a hole in the middle of the opponent's floor (Fallout).
     FallOut = 4,
+    /// Exchanges the two boards (cross-player; never queued).
     Swap = 5,
+    /// Every line you clear raises the opponent's stack one row (Lawyer's Delite).
     Lawyers = 6,
+    /// Raises the opponent's stack one solid row with a random gap.
     RiseUp = 7,
+    /// Mirrors the opponent's board left↔right.
     FlipOut = 8,
+    /// Doubles the opponent's drop speed (Speedy Gonzales).
     Speedy = 9,
+    /// Removes one of the opponent's blocks at random.
     Missing = 10,
+    /// Drops a random block onto the opponent's board (Piece It Together).
     PieceIt = 11,
+    /// Bombs out a region of the opponent's board (Blind Cleric).
     Blind = 12,
+    /// Taxes the opponent's earned funds to you (Mondale '96).
     Mondale = 13,
+    /// Seizes all the opponent's funds and hands them to you (Keating Five).
     Keating = 14,
+    /// Doubles the prices at the opponent's bazaar (Carter Years).
     Carter = 15,
+    /// Negates the opponent's funds (Reagan Era).
     Reagan = 16,
+    /// Cheapest spy, shortest reveal of the opponent's board/funds (William Ames).
     Ames = 17,
+    /// Mid-cost spy, longer reveal (Ace of Spies).
     Ace = 18,
+    /// Priciest spy, longest reveal (The Condor).
     Condor = 19,
+    /// Gives the opponent a smiley piece (Have a Nice Day).
     NiceDay = 20,
+    /// Denies the opponent long pieces (So Long).
     SoLong = 21,
+    /// Denies the opponent dice (No Dice).
     NoDice = 22,
+    /// Drops an INVISIBLE block onto the opponent's board (Bug Report).
     Bug = 23,
+    /// Squeezes the opponent's board to a narrow neck (Bottle neck).
     Bottle = 24,
+    /// Removes the opponent's slide window — pieces lock instantly (Slide Denied).
     NoSlide = 25,
+    /// Exchanges the two arsenals (cross-player Lazy Susan; never queued).
     Susan = 26,
+    /// Halves the opponent's drop speed (Meadow).
     Meadow = 27,
+    /// Backfires most weapons the launcher fires while cursed onto the launcher;
+    /// some simply fizzle (see `mirror_nullifies`).
     Mirror = 28,
+    /// Cloaks every block on the opponent's board (Twilight Zone).
     Twilight = 29,
+    /// The opponent's piece slides side to side endlessly (Slick Willy).
     Slick = 30,
+    /// The opponent keeps getting the same piece (Broken Record).
     Broken = 31,
+    /// The opponent's board won't collapse after a line clears (The Force).
     Force = 32,
+    /// Distracts the opponent with a cosmetic gimp overlay (The Gimp).
     Gimp = 33,
 }
 
-/// `BT_MAX_WEAPONS` — number of real weapon tokens.
+/// Number of weapon tokens — the length of every per-weapon array, so all of
+/// [`WeaponToken::ALL`], the active-flag counts, and [`weapon_table`] stay in
+/// lockstep.
 pub const BT_MAX_WEAPONS: usize = 34;
 
 impl WeaponToken {
-    /// All weapon tokens in protocol order.
+    /// Every token in discriminant order. The canonical iteration order, and the
+    /// reverse of [`WeaponToken::index`] (entry `i` has index `i`).
     pub const ALL: [WeaponToken; BT_MAX_WEAPONS] = {
         use WeaponToken::*;
         [
@@ -63,11 +110,15 @@ impl WeaponToken {
         ]
     };
 
+    /// The token's array index — its discriminant as a `usize`. The one place
+    /// the load-bearing discriminant is consumed as a subscript.
     #[inline]
     pub fn index(self) -> usize {
         self as i32 as usize
     }
 
+    /// The token for index `i`, or `None` if out of range — the guard that turns
+    /// an untrusted wire/keyframe integer into a valid token.
     pub fn from_index(i: i32) -> Option<WeaponToken> {
         if (0..BT_MAX_WEAPONS as i32).contains(&i) {
             Some(WeaponToken::ALL[i as usize])
@@ -77,12 +128,17 @@ impl WeaponToken {
     }
 }
 
-/// The `BTActive[]` array: how many copies of each weapon are currently active.
+/// Which weapons are currently in effect — the `BTActive[]` array.
 ///
-/// In the original this is incremented on `BT_WPN_ON` and decremented on
-/// `BT_WPN_OFF`; gameplay checks `if (BTActive[token])` i.e. "non-zero".
+/// Active is a per-weapon flag, not a stack: a weapon is on or off, so launching
+/// the same weapon twice and expiring it once must leave it off. Gameplay
+/// therefore sets it as a boolean ([`ActiveFlags::set`]) and tests "in effect"
+/// with [`ActiveFlags::is_active`]. The slot is a count rather than a `bool`
+/// only so it can serialize uniformly in a keyframe and offer the more general
+/// increment primitive; the live game never relies on the magnitude.
 #[derive(Clone, Debug)]
 pub struct ActiveFlags {
+    /// Per-token active state, indexed by [`WeaponToken::index`]. Nonzero = on.
     counts: [i32; BT_MAX_WEAPONS],
 }
 
@@ -95,60 +151,72 @@ impl Default for ActiveFlags {
 }
 
 impl ActiveFlags {
+    /// All weapons off.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Whether `token`'s effect is currently in force.
     #[inline]
     pub fn is_active(&self, token: WeaponToken) -> bool {
         self.counts[token.index()] != 0
     }
 
+    /// The raw count for `token` — the general primitive behind the boolean
+    /// view; live gameplay only ever cares whether it is nonzero.
     #[inline]
     pub fn count(&self, token: WeaponToken) -> i32 {
         self.counts[token.index()]
     }
 
+    /// Increment `token`'s count (the counting primitive).
     pub fn activate(&mut self, token: WeaponToken) {
         self.counts[token.index()] += 1;
     }
 
+    /// Decrement `token`'s count (the counting primitive).
     pub fn deactivate(&mut self, token: WeaponToken) {
         self.counts[token.index()] -= 1;
     }
 
-    /// Set a weapon's active flag as a boolean (`BTActive[token] = on`), matching
-    /// the original (which sets 1 on WPN_ON and 0 on WPN_OFF, not a counter).
+    /// Set `token` on or off as a flat boolean. This is what the game uses, so
+    /// that relaunching an active weapon does not deepen a count that a single
+    /// expiry could never unwind.
     pub fn set(&mut self, token: WeaponToken, on: bool) {
         self.counts[token.index()] = if on { 1 } else { 0 };
     }
 
+    /// Turn every weapon off — used on game reset.
     pub fn clear(&mut self) {
         self.counts = [0; BT_MAX_WEAPONS];
     }
 
-    /// The raw per-weapon active counts — for full-game keyframe serialization
-    /// (client-server reconciliation). Pair with [`ActiveFlags::set_raw`].
+    /// The raw per-weapon flags — for a full-game keyframe. Pair with
+    /// [`ActiveFlags::set_raw`].
     pub fn raw(&self) -> [i32; BT_MAX_WEAPONS] {
         self.counts
     }
 
-    /// Restore the raw counts captured by [`ActiveFlags::raw`].
+    /// Restore the raw flags captured by [`ActiveFlags::raw`].
     pub fn set_raw(&mut self, counts: [i32; BT_MAX_WEAPONS]) {
         self.counts = counts;
     }
 }
 
-/// Weapon metadata, mirroring `BTWeapon` (`usr/src/game/BTWeapon.H`) and the
-/// rows of `usr/src/share/btweapons.db`.
+/// The display + economy data for one weapon: its name, bazaar description, the
+/// price to buy it, and how long its effect lasts. Bundled per-weapon so the
+/// bazaar UI and the duration bookkeeping read from one table.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WeaponInfo {
+    /// Which weapon this row describes (equals its position in the table).
     pub token: WeaponToken,
+    /// Display name shown in the bazaar.
     pub name: &'static str,
+    /// Bazaar blurb describing the effect.
     pub description: &'static str,
-    /// Cost in funds.
+    /// Cost in funds to buy in the bazaar.
     pub price: u16,
-    /// Effect duration, measured in lines.
+    /// Effect lifetime, counted DOWN in lines cleared (0 = instant/one-shot).
     pub duration: u16,
 }
 
@@ -229,9 +297,8 @@ mod tests {
 
     #[test]
     fn set_is_boolean_not_a_counter() {
-        // BTActive[token] is 0/1, not a count: launching the same weapon twice
-        // and expiring it once must leave it inactive (regression guard for the
-        // "duration weapon stuck active forever" bug).
+        // Active is a flag, not a stack: launching the same weapon twice and
+        // expiring it once must leave it inactive, so `set` clamps to 0/1.
         let mut a = ActiveFlags::new();
         a.set(WeaponToken::Speedy, true);
         a.set(WeaponToken::Speedy, true);
