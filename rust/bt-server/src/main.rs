@@ -2093,6 +2093,14 @@ fn import_dir(conn: &Connection, dir: &str) -> usize {
     imported
 }
 
+/// Upper bound on a stored recording's `tick_count`. Storing a replay re-plays it
+/// to the end (`run_to_end` ticks the engine once per tick) to compute its line
+/// total, and `POST /api/replays` is unauthenticated with an attacker-controlled
+/// `tick_count` — so the replay work must be bounded. This ceiling is multiple hours
+/// of play at the engine's tick rate, far above any genuine recording, while keeping
+/// the per-upload work finite.
+const MAX_REPLAY_TICKS: u32 = 1_000_000;
+
 /// `POST /api/replays` — store a recording, return `{"id": "..."}`. Validates
 /// it parses as a [`Replay`] first so we never persist junk.
 async fn post_replay(State(db): State<Db>, body: String) -> impl IntoResponse {
@@ -2100,14 +2108,21 @@ async fn post_replay(State(db): State<Db>, body: String) -> impl IntoResponse {
         Ok(r) => r,
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid replay").into_response(),
     };
-    let id = replay_id(&body);
-    let stored = {
+    if replay.tick_count > MAX_REPLAY_TICKS {
+        return (StatusCode::BAD_REQUEST, "replay too long").into_response();
+    }
+    // Persisting computes the line total by deterministically replaying to the end —
+    // CPU work proportional to `tick_count`. Run it on the blocking pool so a burst of
+    // uploads can't starve the async runtime (matchmaking, WS heartbeats) of a worker.
+    let stored = tokio::task::spawn_blocking(move || {
+        let id = replay_id(&body);
         let conn = db.lock().unwrap();
-        db_insert(&conn, &id, &replay, &body, now_secs())
-    };
+        db_insert(&conn, &id, &replay, &body, now_secs()).map(|_| id)
+    })
+    .await;
     match stored {
-        Ok(_) => (StatusCode::OK, Json(json!({ "id": id }))).into_response(),
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "store unavailable").into_response(),
+        Ok(Ok(id)) => (StatusCode::OK, Json(json!({ "id": id }))).into_response(),
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, "store unavailable").into_response(),
     }
 }
 
@@ -2224,13 +2239,29 @@ async fn debug_matches(State(state): State<Shared>) -> impl IntoResponse {
     Json(json!({ "matches": matches })).into_response()
 }
 
+/// Constant-time byte-slice equality: no early-out on the first differing byte, so
+/// comparing a presented secret against the configured one yields no timing oracle
+/// for the secret's bytes. (A length mismatch is allowed to short-circuit; only the
+/// equal-length content comparison must be masked.) Mirrors the constant-time MAC
+/// check the identity layer relies on.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Verify the `x-admin-token` header against `BT_ADMIN_TOKEN`. With that env unset the
 /// admin endpoints are **closed** (fail-closed — never a silently-open admin control).
 fn admin_authed(headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
     let configured = std::env::var("BT_ADMIN_TOKEN").ok().filter(|t| !t.is_empty());
     let presented = headers.get("x-admin-token").and_then(|h| h.to_str().ok());
     match (configured.as_deref(), presented) {
-        (Some(want), Some(got)) if want == got => Ok(()),
+        (Some(want), Some(got)) if ct_eq(want.as_bytes(), got.as_bytes()) => Ok(()),
         (None, _) => Err((StatusCode::FORBIDDEN, "admin disabled: BT_ADMIN_TOKEN not set\n".into())),
         _ => Err((StatusCode::FORBIDDEN, "forbidden\n".into())),
     }
@@ -3181,6 +3212,34 @@ mod tests {
         // ...but a one-off directed challenger (no prior presence) leaves the
         // roster instead of being force-Available + instantly auto-rematched.
         assert_eq!(post_bout_status(None), None);
+    }
+
+    #[tokio::test]
+    async fn post_replay_rejects_an_absurd_tick_count() {
+        // An unauthenticated upload claiming u32::MAX ticks would otherwise spin
+        // run_to_end ~4.3 billion times on a runtime worker. It must be rejected.
+        let db: Db = Arc::new(std::sync::Mutex::new(mem_db()));
+        let mut r = sample_replay(1, bt_replay::Mode::Practice, None);
+        r.tick_count = u32::MAX;
+        let resp = post_replay(State(db), r.to_json()).await.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn post_replay_accepts_a_normal_recording() {
+        let db: Db = Arc::new(std::sync::Mutex::new(mem_db()));
+        let r = sample_replay(1, bt_replay::Mode::Practice, None); // tick_count 100
+        let resp = post_replay(State(db), r.to_json()).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn ct_eq_is_true_only_for_identical_slices() {
+        assert!(ct_eq(b"s3cret-admin-token", b"s3cret-admin-token"));
+        assert!(ct_eq(b"", b""));
+        assert!(!ct_eq(b"s3cret-admin-token", b"s3cret-admin-tokeX"));
+        assert!(!ct_eq(b"short", b"short-but-longer"));
+        assert!(!ct_eq(b"longer-than-other", b"short"));
     }
 
     #[test]
