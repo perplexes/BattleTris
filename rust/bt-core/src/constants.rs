@@ -109,9 +109,9 @@ pub const BT_GIMP_ID_OFFS: i32 = 300;
 // ---------------------------------------------------------------------------
 // Board geometry
 //
-// The playfield is 10 wide and 28 tall. The board is taller than it looks: the
-// top rows are spawn/overflow space, so a piece can rotate and settle above the
-// visible stack before the top-out test fires.
+// The playfield is 10 wide and 28 tall, all of it visible. Pieces spawn at the
+// top row (y = 0) and a top-out is simply a fresh piece that cannot be placed
+// there.
 // ---------------------------------------------------------------------------
 pub const BT_BOARD_WTH: i32 = 10;
 pub const BT_BOARD_HGT: i32 = 28;
@@ -168,7 +168,8 @@ pub const BT_HAP_PIECE: i32 = 9;
 
 /// The boundary just below the "weird" pieces — Feared Weird turns the stream on
 /// by zeroing the standard block and enabling the weird ids
-/// [`BT_DOG_PIECE`]..=[`BT_WLONG_PIECE`] (the 4x4 and Long Dong stay off).
+/// [`BT_DOG_PIECE`]..=[`BT_WLONG_PIECE`]. (It leaves the 4x4 off and does not
+/// touch Long Dong, which keeps its existing exotic keep weight.)
 pub const BT_WEIRD_OFFS: i32 = 9;
 pub const BT_DOG_PIECE: i32 = 10;
 pub const BT_RDOG_PIECE: i32 = 11;
@@ -196,7 +197,7 @@ pub const BT_DEFAULT_KEEP_PROB: f64 = 0.21;
 /// standard weight, so they turn up only occasionally.
 pub const BT_EXOTIC_KEEP_PROB: f64 = 0.02;
 /// The die is always kept once rolled (weight 1.0) — the heaviest weight, so the
-/// die is the single most common box once the standard pieces are in the mix.
+/// die is the single most common piece once the standard pieces are in the mix.
 pub const BT_DIE_KEEP_PROB: f64 = 1.0;
 /// Broken Record reroll divisor: a Broken-cursed stream breaks its repeat only
 /// about 1 draw in this many, so the same piece keeps coming.
@@ -209,7 +210,8 @@ pub const BT_BROKEN_PROB: i64 = 10;
 // the engine flagged the last lock; the board sets one as a side effect of
 // landing / line-checking.
 // ---------------------------------------------------------------------------
-/// Sealed an empty square under freshly placed boxes.
+/// Enclosed an empty square — boxes on its left, right and logical top, at least
+/// one of them just placed this turn.
 pub const BT_BAD_MOVE: i16 = 0;
 /// The stack is dangerously high.
 pub const BT_NEAR_DEATH: i16 = 1;

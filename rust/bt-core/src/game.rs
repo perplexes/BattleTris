@@ -10,8 +10,9 @@
 //! The core loop is spawn → fall → slide → lock → clear lines → award funds →
 //! spawn → top-out for a single board. Weapons, the bazaar, and the two-player
 //! relay build on the score/funds economy modeled here — see the `op_*` mirror
-//! fields and [`GameEvent`], which is the only channel out to the host and the
-//! opponent.
+//! fields and [`GameEvent`], the push channel by which a tick reports its
+//! relay-visible signals (the host also pulls state through the getters,
+//! `render_ids`, and the keyframe codec).
 
 use crate::arsenal::Arsenal;
 use crate::board::Board;
@@ -102,7 +103,6 @@ pub enum GameEvent {
 /// falling piece, and all the timing/weapon state that drives one tick of play.
 #[derive(Clone, Debug)]
 pub struct Game {
-    /// The playfield.
     board: Board,
     /// Source of the next piece (owns the keep-probability distribution).
     pieces: PieceManager,
@@ -130,14 +130,16 @@ pub struct Game {
     right_x: i32,
 
     // Drop timing (ms). `drop_time` is the live gravity interval (base or fast);
-    // Speedy/Meadow scale `base_drop_time`, fast-drop swaps in `fast_drop_time`.
+    // fast-drop swaps in `fast_drop_time`. Speedy scales `base_drop_time`; Meadow
+    // scales both base and fast intervals.
     base_drop_time: i32,
     fast_drop_time: i32,
     drop_time: i32,
     slide_time: i32,
 
     dropping: bool, // fast drop engaged
-    sliding: i32,   // slide counter — distinguishes an airslide tuck from a rest
+    sliding: i32,   // moves made during the lock delay; >1 means the player
+                    // steered the piece, which suppresses the airslide credit
 
     phase: Phase,
     /// Time banked toward the next drop step.
@@ -430,9 +432,9 @@ impl Game {
     // ---- input -------------------------------------------------------------
 
     /// Shift the piece one cell toward `left_x` (which Upbyside flips). A move
-    /// made during the lock delay bumps the slide counter, which is how an
-    /// airslide tuck is later distinguished from a piece that simply came to rest
-    /// (`BTGame::moveLeft`).
+    /// made during the lock delay bumps the slide counter past 1, which is how
+    /// `place` later tells a piece the player steered into place from one eligible
+    /// to register an airslide (`BTGame::moveLeft`).
     pub fn move_left(&mut self) {
         if self.paused || self.phase == Phase::Over {
             return;
@@ -632,10 +634,9 @@ impl Game {
     /// Sell `token` back in the bazaar (the "Remove" button): refund its
     /// effective price and remove one from the arsenal. Returns true on success.
     ///
-    /// The refund is [`Self::bazaar_price`], which — like the buy price — tracks
-    /// the CURRENT Carter multiplier (BTBazaar.C:458). Refunding at the live price
-    /// is intentional: buying un-cursed then selling while Carter-cursed nets a
-    /// base-price profit, a deliberate skill arbitrage rather than an exploit.
+    /// The refund is [`Self::bazaar_price`], which — like the buy price — reflects
+    /// the current Carter multiplier (BTBazaar.C:458), so a Carter-cursed sale
+    /// refunds at the doubled price.
     pub fn sell_weapon(&mut self, token: WeaponToken) -> bool {
         if !self.in_bazaar {
             return false;

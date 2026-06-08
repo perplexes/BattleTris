@@ -1,12 +1,15 @@
-//! Deterministic, seedable RNG reproducing the POSIX `drand48` family and the
-//! `rand()` the game draws from.
+//! Deterministic, seedable RNG that backs the game's `rand()`, `drand48()`, and
+//! `lrand48()` call sites.
 //!
 //! Determinism is the whole point: the engine is replayed and re-simulated
 //! (replays, property tests, and server-authoritative reconciliation all rerun
 //! the same seed and must land on the same state), so randomness has to be a
 //! pure function of the seed and the exact sequence of draws — never the host
-//! platform's libc. This is a single 48-bit LCG implemented per POSIX so it
-//! gives identical results everywhere.
+//! platform's libc. To get that, all three of the original generators are routed
+//! through ONE deterministic 48-bit LCG (the POSIX `drand48` recurrence): `rand`
+//! and `lrand48` return its high bits, `drand48` returns its full-width fraction.
+//! Folding them onto a single state — rather than a faithful libc `rand` — is
+//! what makes the whole stream reproducible from the seed alone.
 //!
 //! The order and KIND of draw matters as much as the values, because the engine
 //! consumes them in a fixed order that any faithful re-run must match:

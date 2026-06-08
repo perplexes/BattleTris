@@ -169,12 +169,14 @@ impl ActiveFlags {
         self.counts[token.index()]
     }
 
-    /// Increment `token`'s count (the counting primitive).
+    /// Counting activate/deactivate. The live game does not use these — it sets a
+    /// boolean flag via [`ActiveFlags::set`]; these are the general counting
+    /// primitive (so a caller that genuinely needs nesting can pair them).
     pub fn activate(&mut self, token: WeaponToken) {
         self.counts[token.index()] += 1;
     }
 
-    /// Decrement `token`'s count (the counting primitive).
+    /// See [`ActiveFlags::activate`].
     pub fn deactivate(&mut self, token: WeaponToken) {
         self.counts[token.index()] -= 1;
     }

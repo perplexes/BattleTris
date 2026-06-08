@@ -36,8 +36,10 @@ impl Side {
 
 /// Whether `token` is a spy (Ames/Ace/Condor). Spies are information weapons:
 /// they reveal the opponent's board TO the launcher instead of hitting the
-/// opponent, so they are handled by the host (which includes a degraded opponent
-/// board in the launcher's snapshot) and never delivered as a board effect.
+/// opponent. [`Versus`]'s relay uses this to peel spies out of the weapon stream
+/// and record them as a host-side reveal rather than [`deliver_weapon`]-ing them
+/// (a host that calls `deliver_weapon` directly is responsible for the same
+/// filtering).
 pub fn is_spy(token: WeaponToken) -> bool {
     matches!(token, WeaponToken::Ames | WeaponToken::Ace | WeaponToken::Condor)
 }
