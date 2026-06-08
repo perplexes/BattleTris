@@ -1,6 +1,6 @@
 //! Deterministic recording + playback for BattleTris.
 //!
-//! The engine is fully deterministic — [`bt_core::Game`] is seeded (drand48) and
+//! The engine is fully deterministic: [`bt_core::Game`] is seeded (drand48) and
 //! advanced by an explicit `tick(dt)` clock, and Ernie ([`bt_ai`]) is a pure
 //! function of the seed. So a complete recording of a game is just the seed plus
 //! the timestamped sequence of player inputs:
@@ -15,17 +15,17 @@
 //! of the replay library, and a deterministic test case for the headless harness
 //! ("does this bug still reproduce on commit X?").
 //!
-//! Faithful replay requires a **fixed timestep** — the host must advance the
-//! engine in constant `dt_ms` steps (an accumulator loop), not with wall-clock
-//! frame deltas. [`ReplayPlayer`] does exactly that.
+//! Faithful replay requires a fixed timestep: the host must advance the
+//! engine in constant `dt_ms` steps (an accumulator loop) rather than
+//! wall-clock frame deltas. [`ReplayPlayer`] does exactly that.
 //!
 //! ## Recording vs trace fidelity
 //!
 //! This is a *seed replay*: it records only the inputs and regenerates everything
 //! else (gravity, Ernie's moves, RNG) by re-running the engine. It is therefore
-//! faithful only on the **same engine build** — which is the point for debugging:
-//! replay the same inputs on a different `engine_sha` to see where behaviour
-//! diverged. `engine_sha` is recorded so a caller can detect a build mismatch.
+//! faithful only on the same engine build. To debug a regression, replay the
+//! same inputs on a different `engine_sha` to see where behaviour diverged.
+//! `engine_sha` is recorded so a caller can detect a build mismatch.
 
 use bt_ai::VsComputer;
 use bt_core::game::GameEvent;
@@ -41,12 +41,12 @@ pub const REPLAY_VERSION: u32 = 1;
 /// One state-mutating action the host can apply to a player's [`Game`]. These
 /// mirror the input surface of the wasm wrappers (`WasmGame` / `WasmVsComputer`).
 ///
-/// `ReceiveWeapon` / `ReceiveOpScore` / `AddFunds` are *incoming* frames — an
+/// `ReceiveWeapon` / `ReceiveOpScore` / `AddFunds` are *incoming* frames: an
 /// effect originating outside this board. In a two-player recording that source
 /// is the opponent (an external process whose effects on *this* side must be
 /// captured as inputs); a practice recording can also inject a `ReceiveWeapon`
 /// to demonstrate a weapon. In vs-computer mode Ernie is replayed from the seed,
-/// so his effects are re-simulated, not recorded.
+/// so his effects are re-simulated rather than recorded.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Input {
     /// Nudge the falling piece one column left.
@@ -62,13 +62,13 @@ pub enum Input {
     BeginDrop,
     /// Ernie's flat-scored hard drop (`Game::ai_begin_drop`, BTComputer.C:1255).
     /// Distinct from the human [`BeginDrop`](Input::BeginDrop) (which scores
-    /// `BT_BOARD_HGT - y`) so an AI-driven recording — one that captures Ernie's
-    /// own moves as inputs — replays bit-for-bit on his scoring curve, not the
-    /// human one.
+    /// `BT_BOARD_HGT - y`) so an AI-driven recording (one that captures Ernie's
+    /// own moves as inputs) replays bit-for-bit on his scoring curve rather than
+    /// the human one.
     AiDrop,
     /// Advance the falling piece down one cell (a blocked piece begins its lock
-    /// slide instead). Ignored unless a piece is actively falling — i.e. while
-    /// paused, in the bazaar, mid lock-slide, or after game over. One per tap;
+    /// slide instead). Ignored unless a piece is actively falling (i.e. while
+    /// paused, in the bazaar, mid lock-slide, or after game over). One per tap;
     /// the host hold-repeats it.
     SoftDrop,
     /// Fire the weapon in arsenal slot `n` at the opponent.
@@ -78,7 +78,7 @@ pub enum Input {
     /// Sell the weapon with [`WeaponToken`] index `n` back at the bazaar.
     SellWeapon(i32),
     /// Clear this player's bazaar flag, resuming their local play. (Online, the
-    /// shared barrier lifts only once both sides have left — `bt-netcode`'s
+    /// shared barrier lifts only once both sides have left; `bt-netcode`'s
     /// predictor forwards this without applying it locally.)
     LeaveBazaar,
     /// Set the paused flag (a recorded input so a pause/unpause reproduces).
@@ -86,12 +86,12 @@ pub enum Input {
     /// An incoming weapon ([`WeaponToken`] index `n`, the relay's `BT_WPN_ON`):
     /// queued on this side and applied at the next piece lock. Carried from the
     /// opponent in a two-player recording, or injected directly to demonstrate a
-    /// weapon in a showcase / fuzz recording — see the enum doc.
+    /// weapon in a showcase / fuzz recording (see the enum doc).
     ReceiveWeapon(i32),
     /// The opponent's score mirror arriving from the relay (`BT_OP_SCORE`), which
     /// drives this side's bazaar countdown and Lawyers' Delite. Two-player relay.
     ReceiveOpScore { score: i64, lines: i64, funds: i64 },
-    /// Funds credited to this player — normally relay-produced for two-player
+    /// Funds credited to this player. Normally relay-produced for two-player
     /// Mondale/Keating, banking the amount the opponent's `FundsStolen` reported.
     AddFunds(i64),
 }
@@ -145,7 +145,7 @@ impl Input {
 /// [`bt_ai::VsComputer`] match so Ernie is re-simulated rather than recorded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Mode {
-    /// Solo play — one board, no opponent.
+    /// Solo play: one board, no opponent.
     Practice,
     /// A match against Ernie, who is replayed from the seed and `ai_level`, not
     /// recorded.
@@ -178,21 +178,21 @@ pub struct Replay {
     /// The format version stamped at record time ([`REPLAY_VERSION`]), so a
     /// loader can compare it and reject a recording it can't interpret.
     pub version: u32,
-    /// The seed the engine was constructed with — the root of all determinism.
+    /// The seed the engine was constructed with, from which all determinism derives.
     pub seed: u32,
     /// Which engine to rebuild for playback.
     pub mode: Mode,
     /// Ernie's difficulty (vs-computer only).
     pub ai_level: Option<u32>,
     /// The fixed timestep the engine was advanced with. Replay must reuse it
-    /// exactly — wall-clock deltas would desync.
+    /// exactly; wall-clock deltas would desync.
     pub dt_ms: i32,
     /// The engine build this was recorded against (`git` short SHA, or "dev").
     /// A seed replay is faithful only on the same build; recording it lets a
     /// caller detect a build mismatch against the running engine.
     pub engine_sha: String,
-    /// Total engine ticks elapsed at the end of the recording — the playback
-    /// length, since the last input may land well before the final tick.
+    /// Total engine ticks elapsed at the end of the recording. This is the
+    /// playback length, since the last input may land well before the final tick.
     pub tick_count: u32,
     /// The timestamped inputs. Playback assumes they are in tick order (and
     /// applies same-tick inputs in vector order), the order [`Recorder`] writes
@@ -205,15 +205,15 @@ pub struct Replay {
 }
 
 impl Replay {
-    /// Serialize to JSON — the on-the-wire / on-disk form. Cannot fail for this
+    /// Serialize to JSON (the on-the-wire / on-disk form). Cannot fail for this
     /// plain data, so a failure degrades to an empty string rather than a panic.
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
     }
 
     /// Parse from JSON. A shape error surfaces as `Err` rather than being
-    /// swallowed; it does not check semantics (version, tick order) — the loader
-    /// is responsible for those.
+    /// swallowed; it does not check semantics (version, tick order). The loader
+    /// is responsible for those checks.
     pub fn from_json(s: &str) -> Result<Replay, serde_json::Error> {
         serde_json::from_str(s)
     }
@@ -303,21 +303,21 @@ impl Recorder {
         }
     }
 
-    /// The recording so far as JSON — `to_replay().to_json()`, the form the
+    /// The recording so far as JSON (`to_replay().to_json()`), the form the
     /// host ships to the replay library / bug report.
     pub fn to_json(&self) -> String {
         self.to_replay().to_json()
     }
 }
 
-/// The engine being replayed — a lone game (practice / one PvP side) or a full
+/// The engine being replayed: a lone game (practice / one PvP side) or a full
 /// vs-computer match (so Ernie is regenerated from the seed).
 // One Engine per ReplayPlayer (never in a hot array/Vec), so the ~2KB size gap
-// between a lone Game and a full VsComputer match is irrelevant — boxing both
+// between a lone Game and a full VsComputer match is irrelevant; boxing both
 // variants would only add allocations + deref noise. clippy::large_enum_variant.
 #[allow(clippy::large_enum_variant)]
 enum Engine {
-    /// Practice / one PvP side — a single board, no opponent to regenerate.
+    /// Practice / one PvP side: a single board, no opponent to regenerate.
     Single(Game),
     /// A full vs-computer match, so Ernie is re-simulated from the seed instead
     /// of recorded.
@@ -329,8 +329,8 @@ enum Engine {
 pub struct ReplayPlayer {
     engine: Engine,
     replay: Replay,
-    /// Ticks executed so far — the playback position, and the value each pending
-    /// frame's `tick` is compared against.
+    /// Ticks executed so far. This is the playback position, and the value each
+    /// pending frame's `tick` is compared against.
     executed: u32,
     /// Index of the next unapplied frame in `replay.frames`. Frames are in tick
     /// order, so a single forward cursor consumes them without rescanning.
@@ -339,7 +339,7 @@ pub struct ReplayPlayer {
 
 impl ReplayPlayer {
     /// Build a player positioned at tick 0, with a fresh engine seeded from the
-    /// replay — nothing is applied until [`step`](ReplayPlayer::step).
+    /// replay. Nothing is applied until [`step`](ReplayPlayer::step).
     pub fn new(replay: Replay) -> ReplayPlayer {
         let seed = replay.seed as u64;
         let engine = match replay.mode {
@@ -397,8 +397,8 @@ impl ReplayPlayer {
     }
 
     /// Jump to tick `target` (clamped to `tick_count`). Seeking backward rebuilds
-    /// from the seed and fast-forwards — cheap, since the engine runs thousands
-    /// of ticks per millisecond. This is what a scrubber/seek bar calls.
+    /// from the seed and fast-forwards; this is cheap since the engine runs
+    /// thousands of ticks per millisecond. This is what a scrubber/seek bar calls.
     pub fn seek(&mut self, target: u32) {
         let target = target.min(self.replay.tick_count);
         if target < self.executed {
@@ -412,7 +412,7 @@ impl ReplayPlayer {
         self.executed
     }
 
-    /// The player's game (read-only) — for rendering / inspection.
+    /// The player's game (read-only), for rendering / inspection.
     pub fn player(&self) -> &Game {
         match &self.engine {
             Engine::Single(g) => g,
@@ -436,7 +436,7 @@ impl ReplayPlayer {
         }
     }
 
-    /// The recording being played — for reading its metadata (title, mode, …).
+    /// The recording being played, for reading its metadata (title, mode, …).
     pub fn replay(&self) -> &Replay {
         &self.replay
     }
@@ -446,7 +446,7 @@ impl ReplayPlayer {
 
 /// One recorded client input in a versus replay: which side launched it, stamped
 /// with the tick it was applied at. For a server-produced replay, the order of
-/// these frames (by tick, then vector position) defines the playback order — both
+/// these frames (by tick, then vector position) defines the playback order; both
 /// boards derive from it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersusFrame {
@@ -460,10 +460,10 @@ pub struct VersusFrame {
 
 /// A self-contained recording of an online server-authoritative match: the two
 /// seeds plus the totally-ordered client-input stream. Because [`Versus`] is
-/// deterministic, replaying = re-running it and applying each input at its tick —
-/// the whole relay (weapons, taxes, bazaar) reproduces exactly, so none of those
-/// derived cross-player effects need to be recorded. A totally-ordered event log
-/// is therefore the entire canonical online replay.
+/// deterministic, replaying means re-running it and applying each input at its
+/// tick. The whole relay (weapons, taxes, bazaar) reproduces exactly, so none of
+/// those derived cross-player effects need to be recorded. A totally-ordered
+/// event log is therefore the entire canonical online replay.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersusReplay {
     /// The format version stamped at record time ([`REPLAY_VERSION`]), so a
@@ -473,7 +473,7 @@ pub struct VersusReplay {
     pub seed_a: u32,
     /// Seed for side B's board.
     pub seed_b: u32,
-    /// The fixed timestep both boards were advanced with — reused exactly on
+    /// The fixed timestep both boards were advanced with, reused exactly on
     /// playback.
     pub dt_ms: i32,
     /// The engine build this was recorded against; recording it lets a caller
@@ -490,7 +490,7 @@ pub struct VersusReplay {
 }
 
 impl VersusReplay {
-    /// Serialize to JSON — cannot fail for this plain data.
+    /// Serialize to JSON. Cannot fail for this plain data.
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
     }
@@ -507,7 +507,7 @@ pub struct VersusReplayPlayer {
     /// effects reproduce without being recorded.
     versus: Versus,
     replay: VersusReplay,
-    /// Ticks executed so far — the playback position.
+    /// Ticks executed so far (the playback position).
     executed: u32,
     /// Index of the next unapplied frame; advances monotonically since frames
     /// are tick-ordered.
@@ -557,12 +557,12 @@ impl VersusReplayPlayer {
         while self.executed < target && self.step() {}
     }
 
-    /// Ticks executed so far — the playback position.
+    /// Ticks executed so far (the playback position).
     pub fn tick_index(&self) -> u32 {
         self.executed
     }
 
-    /// A side's game (read-only) — `true` for A, `false` for B.
+    /// A side's game (read-only): `true` for A, `false` for B.
     pub fn game(&self, side_a: bool) -> &Game {
         self.versus.game(if side_a { Side::A } else { Side::B })
     }
@@ -572,7 +572,7 @@ impl VersusReplayPlayer {
         self.versus.result()
     }
 
-    /// The recording being played — for reading its metadata.
+    /// The recording being played, for reading its metadata.
     pub fn replay(&self) -> &VersusReplay {
         &self.replay
     }

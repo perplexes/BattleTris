@@ -1,17 +1,17 @@
 //! Shared client-side prediction + reconciliation for a server-authoritative
-//! BattleTris match — the netcode core both the browser (via `bt-wasm`'s
-//! `WasmClient`) and the bot (`bt-bot`) run.
+//! BattleTris match. Both the browser (via `bt-wasm`'s `WasmClient`) and the
+//! bot (`bt-bot`) run this crate.
 //!
 //! # Why this crate exists
 //!
-//! The server runs the only authoritative sim; each client keeps a LOCAL
+//! The server runs the only authoritative sim; each client keeps a local
 //! [`bt_core::Game`] seeded from the same piece stream, predicts its own inputs
 //! immediately (so play feels instant), and reconciles to the server's keyframes.
-//! That prediction/reconciliation logic is delicate — replaying unacked inputs
-//! on top of a keyframe, gating inputs at the bazaar barrier — so it lives in ONE
-//! place, [`Predictor`], driven identically by both clients. Its invariants are
-//! pinned by the proptests here; sharing the single implementation is what keeps
-//! the browser and the bot consistent.
+//! That prediction/reconciliation logic is delicate (replaying unacked inputs
+//! on top of a keyframe, gating inputs at the bazaar barrier), so it lives in
+//! one place, [`Predictor`], driven identically by both clients. Its invariants
+//! are pinned by the proptests here; sharing the single implementation is what
+//! keeps the browser and the bot consistent.
 //!
 //! # The model
 //!
@@ -19,7 +19,7 @@
 //!   *unacked*, and hands back the `(seq, Input)` to send. Inputs carry a monotonic
 //!   per-bout `seq`.
 //! - [`Predictor::on_snapshot`] reconciles against an authoritative frame: it drops
-//!   inputs the server has now acked (`seq <= ack`), and — on a keyframe — overwrites
+//!   inputs the server has now acked (`seq <= ack`), and on a keyframe overwrites
 //!   the local state with the authoritative one and *replays the still-unacked tail*
 //!   on top. Replaying the unacked tail is exactly what stops a not-yet-acked input
 //!   from being lost (the snap-back): the predicted-but-unconfirmed move survives the
@@ -49,7 +49,7 @@ pub struct Predictor {
     /// Authoritative "you are shopping" from the latest snapshot.
     you_bazaar: bool,
     /// Authoritative "your opponent is shopping" from the latest snapshot. The bazaar
-    /// is a BARRIER: while either side shops the whole match is frozen server-side.
+    /// is a barrier: while either side shops the whole match is frozen server-side.
     opp_bazaar: bool,
 }
 
@@ -65,21 +65,21 @@ impl Predictor {
         }
     }
 
-    /// The local predicted game — for rendering and HUD reads.
+    /// The local predicted game, for rendering and HUD reads.
     pub fn game(&self) -> &Game {
         &self.game
     }
 
     /// Mutable access to the local game, for draining queued events into the host's
-    /// event encoding (e.g. the browser's sound triggers). Not for applying inputs —
+    /// event encoding (e.g. the browser's sound triggers). Not for applying inputs;
     /// always go through [`predict`](Self::predict) so they're queued for reconciliation.
     pub fn game_mut(&mut self) -> &mut Game {
         &mut self.game
     }
 
     /// Advance the local prediction one fixed step. Callers must NOT tick while a
-    /// bazaar barrier is up ([`barrier`](Self::barrier) is true) — the server freezes
-    /// then, and ticking the local sim would drift it ahead.
+    /// bazaar barrier is up ([`barrier`](Self::barrier) is true), because the server
+    /// freezes then and ticking the local sim would drift it ahead.
     pub fn tick(&mut self, dt_ms: i32) {
         self.game.tick(dt_ms);
     }
@@ -95,7 +95,7 @@ impl Predictor {
         self.unacked.len()
     }
 
-    /// Is a bazaar barrier up? True while EITHER side is shopping — gameplay inputs
+    /// Is a bazaar barrier up? True while either side is shopping. Gameplay inputs
     /// are frozen and only shopping/leave actions are valid. (The authoritative read;
     /// matches the browser's `inBazaar()`.)
     pub fn barrier(&self) -> bool {
@@ -106,7 +106,7 @@ impl Predictor {
     /// to the server. Returns `None` when the input is suppressed:
     ///
     /// - a gameplay input (anything but Buy/Sell/LeaveBazaar) while a bazaar barrier
-    ///   is up — the central gate that keeps a frozen match from being driven, or
+    ///   is up (the central gate that keeps a frozen match from being driven), or
     /// - a `BuyWeapon`/`SellWeapon` the local engine rejected (insufficient funds /
     ///   not shopping): only an *accepted* buy/sell is forwarded, so the prediction and
     ///   the wire stay in lockstep instead of sending a shop action the server can't honor.
@@ -121,7 +121,7 @@ impl Predictor {
             return None;
         }
         match &input {
-            // Server-confirmed release only — never left locally (see the doc above).
+            // Server-confirmed release only; never left locally (see the doc above).
             Input::LeaveBazaar => {}
             // Forward only an accepted buy/sell.
             Input::BuyWeapon(_) | Input::SellWeapon(_) => {
@@ -145,7 +145,7 @@ impl Predictor {
     /// `keyframe`, when present, is the full authoritative state ([`Game::snapshot_bytes`]).
     ///
     /// Always drops acked inputs (`seq <= ack`). On a keyframe it then overwrites the
-    /// local state and replays the still-unacked tail on top — so a predicted input
+    /// local state and replays the still-unacked tail on top, so a predicted input
     /// the server hasn't confirmed yet is preserved rather than snapping back.
     ///
     /// [`barrier`]: Self::barrier
@@ -171,7 +171,7 @@ impl Predictor {
     }
 }
 
-/// The shopping inputs (Buy/Sell) — the gameplay-affecting actions allowed while
+/// The shopping inputs (Buy/Sell): the gameplay-affecting actions allowed while
 /// the bazaar barrier is up. `LeaveBazaar` is also valid under the barrier but is
 /// handled separately (forwarded, never applied locally), so it is not "shopping".
 fn is_shopping(input: &Input) -> bool {
@@ -191,7 +191,7 @@ fn apply_shop(game: &mut Game, input: &Input) -> bool {
 
 /// Re-apply one unacked input on top of a just-restored keyframe, WITHOUT re-sending.
 ///
-/// While the restored state is in the bazaar, only Buy/Sell replay — re-applying a
+/// While the restored state is in the bazaar, only Buy/Sell replay; re-applying a
 /// movement/drop/launch here would drift from the frozen server. `LeaveBazaar` is
 /// never replayed locally (it's server-confirmed). Mirrors `main.js`'s `applyReprToGame`.
 fn replay_input(game: &mut Game, input: &Input) {
@@ -207,7 +207,7 @@ fn replay_input(game: &mut Game, input: &Input) {
 /// The exact wire frame for an input: `{"type":"input","seq":N,"input":<repr>}`,
 /// where `<repr>` is `Input`'s serde form (`"MoveLeft"`, `{"LaunchWeapon":3}`, …).
 ///
-/// Built in one place — and reusing `Input`'s own serde — so the browser and the
+/// Built in one place, reusing `Input`'s own serde, so the browser and the
 /// bot can never disagree on the wire: both clients call this rather than each
 /// hand-rolling a JSON shape that has to track serde by hand.
 pub fn input_frame(seq: u64, input: &Input) -> String {
@@ -255,8 +255,8 @@ mod tests {
     fn keyframe_reconciles_to_authoritative_plus_unacked_tail() {
         // The snap-back guard in miniature: predict a few inputs, then receive a
         // keyframe acking only the first. The local state must equal a reference game
-        // with ALL the inputs applied (authoritative prefix + replayed unacked tail) —
-        // the unacked inputs are NOT lost.
+        // with all the inputs applied (authoritative prefix + replayed unacked tail);
+        // the unacked inputs are not lost.
         let seed = 0xABCD_1234u64;
         let inputs = [Input::MoveLeft, Input::Rotate, Input::MoveRight];
 
