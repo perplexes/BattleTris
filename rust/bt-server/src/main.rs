@@ -42,7 +42,7 @@ use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{FromRef, Path, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Redirect};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -2400,6 +2400,35 @@ async fn track_http(
     next.run(req).await
 }
 
+/// Paths whose responses carry `Cache-Control: no-cache` — the page, the compiled
+/// browser bundle, the wasm, and assets. API/WS/admin paths are left untouched.
+fn is_static_path(path: &str) -> bool {
+    path == "/"
+        || path.starts_with("/www")
+        || path.starts_with("/pkg")
+        || path.starts_with("/assets")
+}
+
+/// Make browsers REVALIDATE static assets on every load instead of serving a
+/// heuristically-cached copy — so a deploy actually reaches clients rather than a
+/// stale `main.js` lingering (notably on mobile Safari, which caches aggressively).
+/// `no-cache` means "you may store it, but revalidate before using": ServeDir sends
+/// `Last-Modified`, so the conditional request gets a cheap 304 when nothing changed
+/// and a fresh 200 when it did — correctness without re-downloading the wasm every
+/// time. Scoped to [`is_static_path`]; dynamic API/WS responses are unaffected.
+async fn static_no_cache(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let is_static = is_static_path(req.uri().path());
+    let mut res = next.run(req).await;
+    if is_static {
+        res.headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    }
+    res
+}
+
 #[tokio::main]
 async fn main() {
     // Error tracking — inert until SENTRY_DSN is set (a fly secret). The guard is
@@ -2474,6 +2503,7 @@ async fn main() {
         .route("/replay/:id", get(replay_page))
         .route("/", get(|| async { Redirect::permanent("/www/") }))
         .fallback_service(ServeDir::new(&static_dir))
+        .layer(axum::middleware::from_fn(static_no_cache))
         .layer(axum::middleware::from_fn(track_http))
         .with_state(state);
 
@@ -3151,6 +3181,20 @@ mod tests {
         // ...but a one-off directed challenger (no prior presence) leaves the
         // roster instead of being force-Available + instantly auto-rematched.
         assert_eq!(post_bout_status(None), None);
+    }
+
+    #[test]
+    fn no_cache_scoped_to_static_assets_only() {
+        // The page, bundle, wasm, and assets revalidate; dynamic endpoints don't.
+        assert!(is_static_path("/"));
+        assert!(is_static_path("/www/"));
+        assert!(is_static_path("/www/main.js"));
+        assert!(is_static_path("/pkg/bt_wasm_bg.wasm"));
+        assert!(is_static_path("/assets/btbiff1.png"));
+        assert!(!is_static_path("/ws"));
+        assert!(!is_static_path("/api/identity"));
+        assert!(!is_static_path("/api/leaderboard"));
+        assert!(!is_static_path("/admin/grant"));
     }
 
     #[test]
