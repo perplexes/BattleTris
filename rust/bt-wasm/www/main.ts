@@ -1,4 +1,4 @@
-import init, { WasmGame, WasmVsComputer, WasmClient, fixed_dt, max_weapons, weapon_name, weapon_price, weapon_description, weapon_duration } from '../pkg/bt_wasm.js';
+import init, { WasmGame, WasmVsComputer, WasmClient, fixed_dt, max_weapons, weapon_name, weapon_price, weapon_description, weapon_duration, spy_hide_pct, spy_revealed_funds } from '../pkg/bt_wasm.js';
 import { CELL_SIZE, drawBoard } from './render.js';
 import { Sound } from './sound.js';
 import type { ServerMessage, ClientMessage, PlayerInfo, SideStatus, OppStatus, PlayerStats, ReplayMeta } from './protocol.js';
@@ -72,6 +72,63 @@ function spyFlicker(board: Int32Array, hide: number): Int32Array {
     }
     return applySpyMask(board, spyFlickerMask!);
 }
+
+// ── Mock match (test mode) ─────────────────────────────────────────────────────
+// A local two-board match (you vs Ernie, via WasmVsComputer) rendered the way an
+// online match is: the opponent's board is hidden except through an active spy
+// (flickered to the spy's accuracy), funds are hidden except through a spy, and
+// score/lines are always shown. No WebSocket, no matchmaking, and it never ends on
+// you mid-test. Enabled with `?mock=1`; the spy reveal is driven entirely by
+// `mockSyncSpy` below using the same `bt_core::spy` math the server uses.
+let mockMatch = false;
+// The spy the player currently holds in the mock, with a line budget that counts
+// down as Ernie clears lines (mirrors the server's per-spy duration).
+let mockSpy: { token: number; budget: number } | null = null;
+let mockTick = 0;                 // a frame counter feeding the funds noise
+let mockPrevOppLines = 0;         // last seen Ernie line count, for budget + tetris
+let mockTetrisAtTick = -100000;   // tick of Ernie's last tetris (drives Ace's window)
+const MOCK_ACE_WINDOW = 60;       // ticks Ace keeps perturbing after a tetris
+
+// Called from `predict` when the player launches a weapon in a mock match: if the
+// fired slot holds a spy, start tracking it so the reveal turns on.
+function mockNoteLaunch(slot: number) {
+    const g = game as WasmVsComputer;
+    const token = g.arsenal_token(slot);
+    if (token === 17 || token === 18 || token === 19) { // Ames / Ace / Condor
+        mockSpy = { token, budget: weapon_duration(token) };
+        mockPrevOppLines = g.op_lines();
+        spyFlickerMask = null;
+    }
+}
+
+// Each frame in a mock match: age the active spy by Ernie's line clears, note his
+// tetrises, and set the authoritative spy fields (board / hide level / funds) the
+// render path reads, exactly as `applySnapshot` would online.
+function mockSyncSpy() {
+    const g = game as WasmVsComputer;
+    mockTick += 1;
+    const oppLines = g.op_lines();
+    if (mockSpy) {
+        const delta = oppLines - mockPrevOppLines;
+        if (delta >= 4) mockTetrisAtTick = mockTick; // a tetris: Ace perturbs briefly
+        if (delta > 0) mockSpy.budget -= delta;
+        if (mockSpy.budget <= 0) mockSpy = null;      // spy expired
+    }
+    mockPrevOppLines = oppLines;
+
+    authSpying = mockSpy !== null;
+    if (mockSpy) {
+        authSpyBoard = Int32Array.from(g.render_ai_grid());
+        authSpyHide = spy_hide_pct(mockSpy.token);
+        const aceRecent = mockTick - mockTetrisAtTick < MOCK_ACE_WINDOW;
+        authSpyFunds = spy_revealed_funds(g.ai_funds(), mockSpy.token, mockTick, aceRecent);
+    } else {
+        authSpyBoard = null;
+        authSpyFunds = null;
+        spyFlickerMask = null;
+    }
+}
+
 let playerName: string | null = null;    // remembered after the first prompt
 
 // Canvas and context
@@ -708,7 +765,10 @@ function predict(kind: PredictKind, arg?: any): boolean | void {
         case 'Rotate':       (game as WasmGame).rotate();     break;
         case 'BeginDrop':    (game as WasmGame).begin_drop(); break;
         case 'SoftDrop':     (game as WasmGame).soft_drop();  break;
-        case 'LaunchWeapon': (game as WasmGame).launch_weapon(arg); break;
+        case 'LaunchWeapon':
+            if (mockMatch) mockNoteLaunch(arg); // capture a spy before the slot fires
+            (game as WasmGame).launch_weapon(arg);
+            break;
         case 'LeaveBazaar':  (game as WasmGame).leave_bazaar(); break;
         case 'BuyWeapon':    return (game as WasmGame).buy_weapon(arg);
         case 'SellWeapon':   return (game as WasmGame).sell_weapon(arg);
@@ -1044,8 +1104,15 @@ function startGame(newMode: string) {
     if (mode === 'vscomputer') {
         const level = ernieSlider ? (parseInt(ernieSlider.value, 10) || 0) : DEFAULT_ERNIE_LEVEL;
         game = new WasmVsComputer(seed, level);
+        // `?mock=1`: run this local vs-Ernie match as a mock ONLINE match (opponent
+        // shown only through spies, funds spy-gated). Reset per-match spy tracking.
+        mockMatch = new URLSearchParams(location.search).get('mock') === '1';
+        mockSpy = null;
+        mockTick = 0;
+        mockPrevOppLines = 0;
     } else {
         game = new WasmGame(seed);
+        mockMatch = false;
     }
 
     // Set canvas size based on game dimensions
@@ -1118,13 +1185,14 @@ function render() {
     const height = game!.height();
     drawBoard(ctx, grid, width, height);
 
-    // Draw AI board in vscomputer mode
-    if (mode === 'vscomputer') {
+    // Draw AI board in vscomputer mode (but NOT in a mock match, where the opponent
+    // is shown through the spy path below, exactly like an online match).
+    if (mode === 'vscomputer' && !mockMatch) {
         const aiGrid = (game as WasmVsComputer).render_ai_grid();
         drawBoard(aiCtx, aiGrid, width, height);
-    } else if (authoritative) {
-        // Server-authorized spy: show the opponent's board (already degraded to
-        // the spy's accuracy server-side) only while a spy of ours is active.
+    } else if (authoritative || mockMatch) {
+        // Server-authorized spy (or the mock's local equivalent): show the opponent's
+        // board only while a spy of ours is active, flickered to the spy's accuracy.
         if (authSpying && authSpyBoard) {
             // Size the side canvas to the board the first time a spy reveals it
             // (initGame only sizes it for vs-Computer), then fit it to the viewport.
@@ -1137,7 +1205,7 @@ function render() {
             }
             // Label it with the real opponent (not "Ernie"); value-guarded so it
             // tracks a new opponent across matches without a per-frame DOM write.
-            const oppLabel = onlineOpponentName || 'Opponent';
+            const oppLabel = mockMatch ? 'Ernie' : (onlineOpponentName || 'Opponent');
             if (aiBoardLabel.textContent !== oppLabel) aiBoardLabel.textContent = oppLabel;
             aiBoard.style.display = 'block';
             drawBoard(aiCtx, spyFlicker(authSpyBoard, authSpyHide), width, height);
@@ -1175,9 +1243,10 @@ function updateOpponentPanel() {
     opponentScore.textContent = opScore >= 0 ? opScore as unknown as string : '-';
     opponentLines.textContent = opLines >= 0 ? opLines as unknown as string : '-';
 
-    // Opponent funds are revealed only while a spy of ours is active (the server
-    // sends the per-spy adjusted value); hide the row otherwise.
-    if (authoritative && authSpying && authSpyFunds !== null) {
+    // Opponent funds are revealed only while a spy of ours is active (online: the
+    // server sends the per-spy adjusted value; mock: computed locally the same way);
+    // hide the row otherwise.
+    if ((authoritative || mockMatch) && authSpying && authSpyFunds !== null) {
         opponentFunds.textContent = authSpyFunds as unknown as string;
         opponentFundsRow.style.display = '';
     } else {
@@ -1454,7 +1523,9 @@ function processEvents() {
 // inputs, and active weapons + remaining lines.
 const debugOverlayEl = document.getElementById('debugOverlay') as HTMLElement | null;
 const debugToolsEl = document.getElementById('debugTools') as HTMLElement | null;
-let debugOn = new URLSearchParams(location.search).get('debug') === '1';
+// `?debug=1` (or the backtick key) shows the debug overlay + weapon-grant picker.
+// `?mock=1` implies it, so a mock match has the grant picker for arming spies/weapons.
+let debugOn = (() => { const q = new URLSearchParams(location.search); return q.get('debug') === '1' || q.get('mock') === '1'; })();
 window.addEventListener('keydown', (e) => {
     if (e.key === '`') {
         debugOn = !debugOn;
@@ -1611,6 +1682,10 @@ function gameLoop(now: number) {
             gameOverOverlay.style.display = 'flex';
         }
     }
+
+    // In a mock match, refresh the spy reveal from the local opponent before drawing
+    // (online this arrives in a snapshot; here it is synthesized each frame).
+    if (mockMatch) mockSyncSpy();
 
     // Render
     render();

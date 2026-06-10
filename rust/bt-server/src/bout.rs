@@ -148,54 +148,11 @@ pub struct Snapshot {
     pub keyframe: Option<Vec<u8>>,
 }
 
-/// Percentage of a spy's revealed cells the server hides (`1 - report_prob` from
-/// BTRecon.C): Ames shows 50%, Ace 85%, Condor (satellite) is perfect.
-fn spy_hide_pct(token: WeaponToken) -> u32 {
-    match token {
-        WeaponToken::Ames => 50,
-        WeaponToken::Ace => 15,
-        _ => 0, // Condor
-    }
-}
-
-/// How many ticks after the opponent's tetris the Ace spy keeps perturbing the
-/// revealed funds. The original perturbs on the single render following a tetris
-/// (`tet_`, BTRecon.C:107-110); the port reveals funds on throttled keyframe
-/// frames, so it holds the perturbation for a short window to stay visible at
-/// that cadence.
-const ACE_TETRIS_WINDOW: u64 = 60;
-
-/// The funds a spy reveals to its holder, server-side, mirroring
-/// `BTRecon::adjustFunds` (BTRecon.C:94-118). Condor reveals exact funds; Ames
-/// perturbs by `+/- (noise % (|funds|+1))`, re-rolled per frame; Ace reveals exact
-/// funds except a `+/- (noise % 100)` perturbation shortly after the opponent's
-/// tetris. Computing it on the server keeps a modified client from reading a value
-/// the spy did not grant: Ames never yields the exact figure, and Ace/Condor yield
-/// exact only because that is the weapon's paid effect.
-fn adjust_funds(funds: i64, token: WeaponToken, noise: u64, ace_recent_tetris: bool) -> i64 {
-    // A pseudo-random sign drawn from a high bit of the noise (the original draws
-    // `mult = (rand() % 2) ? -1 : 1`, BTRecon.C:97-99).
-    let sign = if noise & (1 << 33) != 0 { -1 } else { 1 };
-    match token {
-        WeaponToken::Condor => funds,
-        WeaponToken::Ace => {
-            if ace_recent_tetris {
-                funds + sign * (noise % 100) as i64
-            } else {
-                funds
-            }
-        }
-        // Ames (the only remaining spy). The original remaps `funds == -1` to -2
-        // because `rand() % (funds + 1)` would divide by zero there
-        // (BTRecon.C:103-104). For any funds the span is `|funds| + 1`, so the
-        // perturbation magnitude lies in `0..=|funds|`.
-        _ => {
-            let base = if funds == -1 { -2 } else { funds };
-            let span = base.unsigned_abs() + 1; // |funds| + 1, always >= 1
-            base + sign * (noise % span) as i64
-        }
-    }
-}
+// The spy reveal math (per-spy hide percentage, the funds perturbation, and the
+// deterministic noise it draws from) lives in `bt_core::spy` so the server and the
+// wasm mock match compute identical reveals from one implementation. Imported under
+// the names this module already uses at its call sites.
+use bt_core::spy::{adjust_funds, hide_pct as spy_hide_pct, noise_for, ACE_TETRIS_WINDOW};
 
 /// A server-hosted authoritative match between two clients.
 pub struct Bout {
@@ -490,19 +447,10 @@ impl Bout {
         let spy_funds = match (spy, include_keyframe) {
             (Some((tok, _)), true) => {
                 let i = side_idx(side);
-                // A deterministic per-tick noise (varies each keyframe, differs per
-                // side) drives the Ames perturbation without RNG state, so the reveal
-                // stays reproducible and `snapshot_for` stays `&self`. The tick is run
-                // through a splitmix64 finalizer (full avalanche) so consecutive
-                // keyframes give uncorrelated noise; `tick * constant` alone leaves a
-                // linear walk mod span that an observer watching the readout could
-                // read off, where the original re-rolls `rand()` each render.
-                let mut z = self
-                    .tick
-                    .wrapping_add((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-                let noise = z ^ (z >> 31);
+                // A deterministic per-tick, per-side noise drives the Ames
+                // perturbation without RNG state, so the reveal stays reproducible
+                // and `snapshot_for` stays `&self`.
+                let noise = noise_for(self.tick, i as u64);
                 let ace_recent_tetris = self.last_opp_tetris_tick[i] != 0
                     && self.tick.saturating_sub(self.last_opp_tetris_tick[i]) < ACE_TETRIS_WINDOW;
                 Some(adjust_funds(them.score().funds, tok, noise, ace_recent_tetris))

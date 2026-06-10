@@ -20,6 +20,7 @@ pub mod game;
 pub mod piece;
 pub mod piece_manager;
 pub mod rng;
+pub mod spy;
 pub mod versus;
 pub mod weapons;
 

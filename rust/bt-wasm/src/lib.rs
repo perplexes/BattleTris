@@ -49,6 +49,30 @@ pub fn fixed_dt() -> i32 {
     FIXED_DT_MS
 }
 
+/// The percent of a spy's cells the holder hides each frame (`bt_core::spy::hide_pct`):
+/// Ames 50, Ace 15, Condor 0. The mock match uses this to flicker the opponent board
+/// to the same accuracy the server reports as `spy_hide`. Unknown tokens hide nothing.
+#[wasm_bindgen]
+pub fn spy_hide_pct(token: i32) -> u32 {
+    WeaponToken::from_index(token).map_or(0, bt_core::spy::hide_pct)
+}
+
+/// The funds a spy reveals, computed exactly as the server does
+/// (`bt_core::spy::adjust_funds` over `noise_for(tick, 0)`): Condor exact, Ace exact
+/// except a window after the opponent's tetris, Ames perturbed. The mock match calls
+/// this each frame with the opponent's real funds and its own tick so the Ames jitter
+/// varies. Unknown tokens return the funds unchanged.
+#[wasm_bindgen]
+pub fn spy_revealed_funds(funds: i32, token: i32, tick: f64, ace_recent_tetris: bool) -> i32 {
+    match WeaponToken::from_index(token) {
+        Some(tok) => {
+            let noise = bt_core::spy::noise_for(tick as u64, 0);
+            bt_core::spy::adjust_funds(funds as i64, tok, noise, ace_recent_tetris) as i32
+        }
+        None => funds,
+    }
+}
+
 // Event tags. Each [`GameEvent`] crosses to JS as a `[tag, a, b, c]` quad (see
 // `event_quad` / `drain_events`) because wasm-bindgen can't hand back a Rust
 // enum directly; the tag tells the front-end which event it is and how to read
@@ -705,6 +729,12 @@ impl WasmVsComputer {
     }
     pub fn op_funds(&self) -> i32 {
         self.inner.player().score().op_funds as i32
+    }
+    /// Ernie's REAL funds (not the player's mirror), so the mock match can compute a
+    /// spy's revealed-funds value against the true figure. Only meaningful for the
+    /// mock; normal play reads the opponent only through the relay mirror above.
+    pub fn ai_funds(&self) -> i32 {
+        self.inner.ai().score().funds as i32
     }
     pub fn launch_weapon(&mut self, slot: u32) {
         self.inner.player_mut().launch_weapon(slot as usize);
