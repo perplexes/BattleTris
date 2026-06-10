@@ -34,14 +34,17 @@ These apply to every weapon unless an entry states otherwise.
   and applies it from a pending queue at the next lock (`bt-server/src/bout.rs`,
   `game.rs` `receive_weapon`).
 - **Computer player.** The original hard-blocks the computer from launching Hatter,
-  FlipOut, and Speedy at the engine level (`BTWeaponManager.C:194-198`). The port has
-  no engine-level block; instead `bt-ai` launches only weapons it acquires through its
-  buy list (`BUY_PRIORITY`) and seed arsenal (`bt-ai/src/weapons.rs`). That list
-  includes Hatter and Speedy (so the port bot launches those two, which the original
-  blocks) but not FlipOut (so the port bot never launches FlipOut either, by a
-  different route). The port bot also declines several weapons the original computer
-  could use (e.g. Swap, classified `WClass::Skip`). Per-weapon entries note this where
-  relevant.
+  FlipOut, and Speedy (`BTWeaponManager.C:194-198`) and gates its purchases and
+  launches through a commando-orders engine (`BTComputer.C`). The port has two
+  computer players. The vs-Computer opponent, Ernie, ports that engine
+  (`bt-ai/src/ernie.rs`): the commando orders list, the purchase whitelist and gates
+  (Swap held while `board_top > BT_SWAPLINE`, Susan unlocked at opponent line 50), the
+  Mirror self-curse hold, and the never-launch Hatter/FlipOut/Speedy block, with the
+  weapon-adaptive penalty retuning in `bt-ai/src/lib.rs`. The lobby bots keep a
+  separate rating-matched policy that launches only weapons from its buy list and seed
+  arsenal (`bt-ai/src/weapons.rs`), a list that includes Hatter and Speedy and declines
+  several the original could use (e.g. Swap). Per-weapon entries that cite
+  `bt-ai/weapons.rs` describe the lobby-bot policy, not Ernie.
 - **Bazaar prices.** While Carter is active, bazaar prices are multiplied by 2
   (`price * (1 + carter_)`, with `carter_` boolean, `BTBazaar.C:393`; port
   `price *= 2`, `game.rs:619`).
@@ -108,16 +111,16 @@ These apply to every weapon unless an entry states otherwise.
 
 ### 5. Swap Meet (`WeaponToken::Swap`)
 
-- **Price / duration**: `1200` / `0` in both (`btweaponsp.db`; `weapons.rs:236`). Instant, and sets no active flag or remaining duration in either version (the port's `swap_board_with` never calls `apply_weapon_on`).
-- **Effect / mechanism**: Exchange only the two board grids, after forcing Bottle and Upbyside off on both boards. Original: the launcher zeroes its own Bottle/Upbyside and sends `BT_WPN_OFF`, then sends its board; the receiver does the same, installs the incoming board via `newBoard` (which copies the cell map `rep_` only), and sends its old board back (`BTGame.C:492-533`, `newBoard` `BTBoardManager.C:627-640`). Port: `swap_board_with` calls `force_weapon_off(Bottle, Upbyside)` on both games, then `board.swap_cells`, i.e. `std::mem::swap(cells)` (`game.rs:675-681`, `board.rs:445-452`). Scores, funds, arsenals, active-weapon flags and durations, and the falling piece all stay with their owner on both sides.
+- **Price / duration**: `1200` / `0` in both (`btweaponsp.db`; `weapons.rs:236`). Sets no active flag or remaining duration in either version (the port queues a board swap rather than calling `apply_weapon_on`). The effect itself lands at the next lock, not on the launch frame.
+- **Effect / mechanism**: Exchange only the two board grids, after forcing Bottle and Upbyside off on both boards. Original: the launcher zeroes its own Bottle/Upbyside and sends `BT_WPN_OFF`, then sends its board; the receiver does the same, installs the incoming board via `newBoard` (which copies the cell map `rep_` only), and sends its old board back (`BTGame.C:492-533`, `newBoard` `BTBoardManager.C:627-640`). Port: at launch the relay captures each side's board (`export_board`) and queues the other side's board onto each game's `pending_board` slot (`queue_board_swap`); at each side's next lock `flush_pending` installs the queued board (`import_board`) and forces Bottle and Upbyside off (`versus.rs` `apply_weapon` Swap arm; `game.rs` `queue_board_swap` / `flush_pending`). Scores, funds, arsenals, active-weapon flags and durations, and the falling piece all stay with their owner on both sides.
 - **Targeting**: Both boards (a symmetric exchange), not a single victim.
-- **Trigger / timing (differs)**: Original applies the swap at each side's next piece lock (the swapped board is held in `board_buf_` and re-emitted by `flushWeapons` inside `place()`, `BTCommManager.C:448-453,584-588`). Port applies it immediately inside the relay pass when the launch event is drained, bypassing the per-victim `pending` queue (`versus.rs:104-110`; the function's own comment contrasts "applied here immediately" against queued-to-next-lock for other weapons).
-- **Duration & stacking**: Duration 0; no active flag (both). Re-launch just swaps again.
-- **RNG**: None (`mem::swap` / cell copy).
-- **Cross-player relay**: Special two-board routing, not the normal victim queue. Original tags a `BT_BOARD` packet `motivation=BT_SWAP`, stashed in `board_buf_` and applied at the next flush (`BTCommManager.C:448-453,584-588`). Port special-cases `Swap`/`Susan` in `apply_weapon` to act on both `Game`s directly (`versus.rs:104-110`).
+- **Trigger / timing**: Both apply the swap at each side's next piece lock, in the gap where no piece is mid-fall. Original holds the swapped board in `board_buf_` and re-emits it from `flushWeapons` inside `place()` (`BTCommManager.C:448-453,584-588`). Port installs the launch-captured board from the `pending_board` slot in `flush_pending`, also called from `place()` at the lock, matching `board_buf_`.
+- **Duration & stacking**: Duration 0; no active flag (both). Re-launch captures and queues the boards again.
+- **RNG**: None (board copy).
+- **Cross-player relay**: Special two-board routing, not the normal victim queue. Original tags a `BT_BOARD` packet `motivation=BT_SWAP`, stashed in `board_buf_` and applied at the next flush (`BTCommManager.C:448-453,584-588`). Port special-cases `Swap`/`Susan` in `apply_weapon`: Swap captures both boards at launch and queues each onto the other side's `pending_board`, installed at that side's next lock (`versus.rs`).
 - **Edge cases / exact differences**:
   - Mirror-nullify (both): a Mirror-cursed launcher's Swap fizzles to nothing (original lists `BT_SWAP` among the Mirror cases that return without re-sending, `BTWeaponManager.C:204-219`; port has `Swap` on `mirror_nullifies`, `versus.rs:60`, and a cursed launch returns with no effect, `versus.rs:78-80`).
-  - AI use differs: the original computer can purchase and launch Swap, gated on board height (`can_purchase_[BT_SWAP]` off while `top_ > BT_SWAPLINE=5`, `BTComputer.C:552-555`). The port's `bt-ai` never launches Swap; it is classified `WClass::Skip` (`bt-ai/weapons.rs:53`). This is an AI-policy difference; the port engine imposes no Swap launch restriction.
+  - AI use: the original computer can purchase and launch Swap, gated on board height (`can_purchase_[BT_SWAP]` off while `top_ > BT_SWAPLINE=5`, `BTComputer.C:552-555`). Ernie ports this gate (Swap purchasable only while `board_top <= BT_SWAPLINE`, `bt-ai/src/ernie.rs`). The lobby bots never launch Swap (classified `WClass::Skip`, `bt-ai/weapons.rs:53`). The port engine imposes no Swap launch restriction; the gating is the computer player's policy.
 
 ### 6. Lawyer's Delite (`WeaponToken::Lawyers`)
 
@@ -209,15 +212,15 @@ These apply to every weapon unless an entry states otherwise.
 ### 14. Keating Five (`WeaponToken::Keating`)
 
 - **Price / duration**: `425` / `0` in both (`btweaponsp.db`; `weapons.rs:245`). Instant one-shot, no active flag.
-- **Effect / mechanism**: Zero the victim's funds and credit the attacker. Both set the victim's funds to 0 (`BTScoreManager.C:122` ↔ `game.rs:1184`). The amount the attacker receives is sourced differently:
+- **Effect / mechanism**: Zero the victim's funds and credit the attacker the funds value as of launch. Both set the victim's funds to 0 at activation and credit the attacker a launch-time snapshot, so the two amounts can differ:
   - Original: at launch the attacker snapshots its cached view of the opponent's funds, `keating_ = rep_.op_funds_` (`BTScoreManager.C:110-111`); the victim is zeroed when the weapon activates at its next lock (`:121-123`); the attacker is credited the launch snapshot at the next incoming `OP_SCORE`, `rep_.funds_ += keating_` (`:151-153`). The attacker gets the opponent-funds value as of launch; the victim loses whatever it holds at activation.
-  - Port: at the victim's activation lock, `stolen = victim.score.funds` is read (after that lock's clear is credited), the victim is zeroed, and `FundsStolen(stolen)` credits the attacker exactly that amount (`game.rs:1177-1186`, `versus.rs:236-237` → `add_funds`).
+  - Port: at launch the relay credits the attacker the victim's funds read at that moment (`attacker.add_funds(victim.score().funds)` in `apply_weapon`) and queues the seizure; the victim is zeroed only when the weapon activates at its next lock (`apply_weapon_on` sets `score.funds = 0`, with no `FundsStolen` event). The server holds ground truth, so the port's launch value is the victim's real balance at launch, where the original uses the attacker's cached mirror of it (`versus.rs` Keating arm; `game.rs` `apply_weapon_on` Keating).
 - **Targeting / trigger / relay**: Follows shared mechanics. Opponent-targeted; applied at the victim's next lock; standard relay.
 - **Duration & stacking**: Instant, duration 0, no active flag.
 - **RNG**: None.
 - **Edge cases / exact differences**:
-  - Snapshot timing and conservation: the original credits the attacker the `op_funds` value snapshotted at launch (`keating_`), independent of what the victim actually holds when zeroed, so credit-equals-seized is not guaranteed if those differ. The port credits the victim's actual funds read at activation, so seized equals credited by construction. The two amounts match only when the victim's funds (and the attacker's cached mirror of them) are unchanged between launch and the victim's next lock.
-  - The port's seizure reads the balance after the triggering lock's clear is credited, so funds banked on that piece are included; the original's amount is fixed at the launch snapshot.
+  - Snapshot timing: both credit the attacker the funds value snapshotted at launch, independent of what the victim actually holds when zeroed, so the credited amount and the seized amount can differ when the victim's balance changes between launch and its next lock. The original snapshots its cached `op_funds` (`keating_`); the port reads the victim's real funds in the relay at launch.
+  - The port zeroes the victim at its activation lock, after that lock's clear is credited, so funds banked on the triggering piece are included in what the victim loses; the credited amount stays fixed at the launch snapshot, as in the original.
   - Mirror-nullify (both): a Keating launched by a Mirror-cursed attacker fizzles rather than backfiring (original lists `BT_KEATING` among the Mirror skip cases, `BTWeaponManager.C:204-216`; port has `Keating` on `mirror_nullifies`, `versus.rs:60`).
 
 ### 15. Carter Years (`WeaponToken::Carter`)
@@ -248,34 +251,34 @@ These apply to every weapon unless an entry states otherwise.
 ### 17. Ames (`WeaponToken::Ames`)
 
 - **Price / duration**: `50` / `20` in both (`btweaponsp.db`; `weapons.rs:248`). Duration counts down in the opponent's cleared lines.
-- **Effect / mechanism**: Shows the launcher a partially obscured view of the opponent's board (the victim's board is not damaged). The reveal level and the funds handling differ:
-  - Board reveal: the original shows ~50% of non-empty cells (`report_prob=.5` for Ames), re-rolling `drand48()` per cell per render, so the hidden subset flickers frame to frame (`BTRecon.C:58-71`). The port hides a stable ~50% subset chosen by a position hash (`(i*2654435761>>8)%100 < hide`), with no per-render re-roll, so it does not flicker (`bout.rs:140-166`); hide% = 50 = `1 - report_prob`.
-  - Funds: the original displays the opponent's funds next to the launcher's, randomized per render by `±(rand()%(funds+1))` via `adjustFunds` (`BTScoreManager.C:61-62`, `BTRecon.C:94-117`). The port redacts opponent funds entirely: the client keyframe zeroes `op_funds` (`game.rs:1062-1066`) and the `spy_board` carries only the degraded board grid; no funds value reaches the launcher (`bout.rs:94-95`). The port's weapon description still reads "Displays your opponent's screen and your opponent's funds" (`weapons.rs:248`), describing the original behavior the port does not implement for funds.
-- **Targeting**: The launcher sees the victim's board; the victim's board is untouched. The original draws the opponent board the opponent sends each lock; the port records the spy launcher-side and the server builds a degraded `spy_board` from the opponent's `render_ids`, never delivered to the opponent (`versus.rs:220-227`).
-- **Trigger / relay**: Cross-player, attaching to the launcher's view. Original: the opponent's game sends its board tagged with the spy token on each of the opponent's locks (`BTGame.C:785-789`), redrawn launcher-side per receive (`BTRecon.C:209-223`). Port: the spy launch is recorded host-side and the server ships a degraded `spy_board` on throttled keyframe frames (`bout.rs:407-410`). Cadence differs: per-opponent-lock render (original) vs keyframe cadence (port).
-- **Duration & stacking**: Countdown in the opponent's cleared lines; re-launch accumulates the budget and switches accuracy to the newest spy token (`BTRecon.C:159-218` ↔ `bout.rs:318-332`).
-- **RNG**: The original re-rolls live RNG per render (`drand48()` per cell for the board, `rand()` per funds redraw); the port uses a fixed position hash for the reveal (no per-render randomness) and reveals no funds (no funds RNG).
-- **Edge cases / exact differences**: Flicker (original) vs stable hide (port); funds shown and randomized (original) vs redacted (port); per-opponent-lock cadence (original) vs keyframe cadence (port). All three differences are shared by the spy family (Ames, Ace, Condor); only the reveal percentage and duration differ per spy.
+- **Effect / mechanism**: Shows the launcher an obscured view of the opponent's board and the opponent's funds (the victim's board is not damaged):
+  - Board reveal: the original shows ~50% of non-empty cells (`report_prob=.5` for Ames), re-rolling `drand48()` per cell per render, so the hidden subset flickers frame to frame (`BTRecon.C:58-71`). The port sends the launcher the full opponent board and flickers it client-side: it blanks ~50% of the cells each frame, re-rolling the hidden subset on a ~70 ms timer (`spy-degrade.ts` `rollSpyMask` / `applySpyMask`, driven from `main.ts`). The hide percentage, 50 = `1 - report_prob`, is reported by the server (`spy_hide`, `bout.rs` `spy_hide_pct`). Both flicker; the original re-rolls per render via `drand48`, the port per ~70 ms tick via `Math.random`.
+  - Funds: the original displays the opponent's funds next to the launcher's, randomized per render by `±(rand()%(funds+1))` via `adjustFunds`, with a `funds==-1 -> -2` FPE guard (`BTScoreManager.C:61-62`, `BTRecon.C:94-117`). The port computes the revealed value server-side and sends only that scalar (`spy_funds`): `funds + sign*(noise % (|funds|+1))` with the same `funds==-1 -> -2` guard, the sign and magnitude drawn from a splitmix64 hash of the tick so consecutive reveals are uncorrelated (`bout.rs` `adjust_funds`). The client shows it next to its own funds while spying (`main.ts`). Computing it server-side means a modified client reads no more than the spy grants.
+- **Targeting**: The launcher sees the opponent's board; the victim's board is untouched. The original draws the opponent board the opponent sends each lock; the port records the spy launcher-side and the server sends the opponent's full `render_ids` plus the hide level, never delivered to the opponent, with the degradation applied client-side for display (`bout.rs` `snapshot_for`).
+- **Trigger / relay**: Cross-player, attaching to the launcher's view. Original: the opponent's game sends its board tagged with the spy token on each of the opponent's locks (`BTGame.C:785-789`), redrawn launcher-side per receive (`BTRecon.C:209-223`). Port: the spy launch is recorded host-side and the server ships the board and funds on throttled keyframe frames (`bout.rs` `snapshot_for`); the client flickers the board between frames. Board content updates at keyframe cadence (port) against per-opponent-lock (original); the flicker runs at the client's ~70 ms tick.
+- **Duration & stacking**: Countdown in the opponent's cleared lines; re-launch accumulates the budget and switches accuracy to the newest spy token (`BTRecon.C:159-218` ↔ `bout.rs`).
+- **RNG**: The original re-rolls live RNG per render (`drand48()` per cell for the board, `rand()` per funds redraw). The port re-rolls the board flicker with `Math.random` client-side per ~70 ms tick, and draws the funds perturbation from a splitmix64 hash of the tick server-side per keyframe. The cadences differ; both vary the reveal continuously.
+- **Edge cases / exact differences**: The board now flickers in both, and both reveal funds. The remaining differences are cadence (per-render original against the ~70 ms client tick for the board, and per-render against per-keyframe for funds) and that the port computes the funds value server-side, which is the anti-cheat boundary. The full opponent board reaches the client during an active spy, an accepted exposure bounded to the spy window. These are shared by the spy family (Ames, Ace, Condor); only the reveal percentage and duration differ per spy.
 
 ### 18. Ace of Spies (`WeaponToken::Ace`)
 
 - **Price / duration**: `100` / `30` in both (`btweaponsp.db`; `weapons.rs:249`).
-- **Effect / mechanism**: A spy revealing the opponent's board at 85% (more accurate than Ames's 50%): original `report_prob=.85` (`BTRecon.C:60-61`), port `spy_hide_pct(Ace)=15` → 85% shown (`bout.rs:143`). The shared spy machinery (flicker vs stable hide; funds shown vs redacted; per-lock vs keyframe cadence; launcher-only targeting; opponent-line duration with newest-token accumulation) is as documented for Ames (entry 17).
-- **Ace-specific funds (original) vs redacted (port)**: in the original, Ace's `adjustFunds` shows the opponent's funds unchanged, except a one-shot `±(rand()%100)` applied on the first funds render after the opponent clears a tetris (4 lines at once; `tet_` is set when `inc==4`, `BTRecon.C:106-110,205-206`). This is more accurate than Ames (which perturbs by `±rand%(funds+1)` every render) and less than Condor (exact). The port redacts opponent funds for all spies (`game.rs:1064`), so it has no Ace funds variant.
+- **Effect / mechanism**: A spy revealing the opponent's board at 85% (more accurate than Ames's 50%): original `report_prob=.85` (`BTRecon.C:60-61`), port `spy_hide_pct(Ace)=15` so 15% is flickered out and 85% shown (`bout.rs` `spy_hide_pct`). The shared spy machinery (the client-side flicker of the full board, the server-computed funds reveal, the keyframe board cadence, launcher-only targeting, and the opponent-line duration with newest-token accumulation) is as documented for Ames (entry 17).
+- **Ace-specific funds**: in the original, Ace's `adjustFunds` shows the opponent's funds unchanged, except a one-shot `±(rand()%100)` applied on the first funds render after the opponent clears a tetris (4 lines at once; `tet_` is set when `inc==4`, `BTRecon.C:106-110,205-206`). The port reproduces this: `adjust_funds` returns the exact funds, except `funds + sign*(noise%100)` while the opponent's last tetris is within `ACE_TETRIS_WINDOW` ticks, where the original fires once on the post-tetris render (`bout.rs` `adjust_funds`, `last_opp_tetris_tick`). This is more accurate than Ames (which perturbs by `±rand%(funds+1)` every render) and less than Condor (exact). The port holds the perturbation for a short tick window because it reveals funds on throttled keyframes rather than per render.
 - **Targeting / trigger / duration / relay / RNG**: As Ames (entry 17), with duration 30.
-- **Edge cases / exact differences**: 85% reveal (vs Ames 50%); the original's per-tetris one-shot funds perturbation vs the port's redaction; plus the spy-family differences (flicker/stable, funds shown/redacted, cadence). Mirror-nullified in both (`BT_ACE` in the original Mirror switch `BTWeaponManager.C:204-219`; `Ace` in `mirror_nullifies` `versus.rs:60`).
+- **Edge cases / exact differences**: 85% reveal (against Ames 50%); the original's per-tetris one-shot funds perturbation, which the port reproduces as a short tick window; plus the spy-family cadence differences. Mirror-nullified in both (`BT_ACE` in the original Mirror switch `BTWeaponManager.C:204-219`; `Ace` in `mirror_nullifies` `versus.rs:60`).
 
 ### 19. The Condor (`WeaponToken::Condor`)
 
 - **Price / duration**: `225` / `40` in both (`btweaponsp.db`; `weapons.rs:250`).
-- **Effect / mechanism**: The most accurate spy, with a perfect board reveal in both: the original's `report_prob` stays 1 because Condor is not special-cased (`BTRecon.C:58,72`), and the port's `spy_hide_pct(Condor)=0` makes `degrade_board` return the grid unchanged (`bout.rs:144,153-156`). The shared spy machinery is as documented for Ames (entry 17).
-- **Funds (exact in the original, redacted in the port)**: the original reveals the opponent's funds exactly (`adjustFunds` `case BT_CONDOR: return (funds)`, `BTRecon.C:112-113`). The port redacts opponent funds to 0 like all spies (the spy frame's `OppView` carries no funds, `bout.rs:429-434`; the keyframe zeroes `op_funds`, `game.rs:1064`). This is the defining Condor difference.
+- **Effect / mechanism**: The most accurate spy, with a perfect board reveal in both: the original's `report_prob` stays 1 because Condor is not special-cased (`BTRecon.C:58,72`), and the port's `spy_hide_pct(Condor)=0` leaves the full board unflickered (the client's `spyFlicker` returns the board untouched at hide 0) (`bout.rs` `spy_hide_pct`; `main.ts`). The shared spy machinery is as documented for Ames (entry 17).
+- **Funds (exact in both)**: the original reveals the opponent's funds exactly (`adjustFunds` `case BT_CONDOR: return (funds)`, `BTRecon.C:112-113`). The port does the same: `adjust_funds` returns the funds unchanged for Condor, sent as the `spy_funds` scalar (`bout.rs` `adjust_funds`).
 - **Targeting / trigger / relay**: As the spy family (the launcher sees the opponent's board; not delivered to the opponent). Duration 40, opponent-line countdown with additive re-launch.
-- **RNG**: None in the Condor path on either side (the original's per-cell `drand48()` is moot at `report_prob=1` since no cell is hidden; the port bypasses `degrade_board` for hide=0; the `CONDOR` funds arm draws nothing).
+- **RNG**: None in the Condor path on either side (the original's per-cell `drand48()` is moot at `report_prob=1` since no cell is hidden; the port's hide 0 skips the flicker re-roll; the `CONDOR` funds arm draws nothing).
 - **Edge cases / exact differences**:
-  - Funds exact (original) vs redacted (port): the defining Condor difference.
-  - Board flicker is moot: a perfect reveal hides nothing, so there is no per-cell re-roll flicker on either side (unlike Ames/Ace).
-  - Cadence: per-opponent-board-update (original) vs keyframe-throttled (port), as the spy family.
+  - Funds exact in both; no longer a difference.
+  - Board flicker is moot: a perfect reveal hides nothing, so there is no per-frame re-roll flicker on either side (unlike Ames/Ace).
+  - Cadence: per-opponent-board-update (original) against keyframe-throttled (port), as the spy family.
   - Mirror-nullified in both (`BT_CONDOR` in the original Mirror switch; `Condor` in `versus.rs:60`).
 
 ### 20. Have a Nice Day (`WeaponToken::NiceDay`)

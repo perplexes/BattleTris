@@ -5,6 +5,7 @@ import type { ServerMessage, ClientMessage, PlayerInfo, SideStatus, OppStatus, P
 import { escapeHtml } from './dom-util.js';
 import { nextGag, initialGagState, type GagState } from './update-gag.js';
 import { showMotifDialog } from './motif-dialog.js';
+import { rollSpyMask, applySpyMask } from './spy-degrade.js';
 
 // The `game` variable holds one of three wasm classes or null.
 type AnyGame = WasmGame | WasmVsComputer | WasmClient;
@@ -57,27 +58,19 @@ const SPY_FLICKER_MS = 70; // ~14 Hz re-roll: clearly staticky without a strobe
 // Degrade the FULL spy board to the spy's accuracy for display: blank `hide`% of
 // the opponent's filled cells, re-rolling which cells are hidden every
 // SPY_FLICKER_MS so the reveal shimmers like the original's imperfect spy feed.
-// hide == 0 (Condor) returns the board untouched. The full board is what the
-// server now sends; this is where the spy's inaccuracy is applied, per frame.
+// hide == 0 (Condor) returns the board untouched. The mask is held across frames and
+// only re-rolled on the timer; the pure mask roll/apply live in spy-degrade.ts.
 function spyFlicker(board: Int32Array, hide: number): Int32Array {
     if (hide <= 0) return board;
     const now = performance.now();
-    let mask = spyFlickerMask;
-    if (mask === null || mask.length !== board.length) {
-        mask = new Uint8Array(board.length);
-        spyFlickerMask = mask;
-        spyFlickerRolledAt = 0; // force a fresh roll below
-    }
-    if (now - spyFlickerRolledAt >= SPY_FLICKER_MS) {
-        for (let i = 0; i < board.length; i++) mask[i] = Math.random() * 100 < hide ? 1 : 0;
+    const stale = spyFlickerMask === null
+        || spyFlickerMask.length !== board.length
+        || now - spyFlickerRolledAt >= SPY_FLICKER_MS;
+    if (stale) {
+        spyFlickerMask = rollSpyMask(board.length, hide, Math.random);
         spyFlickerRolledAt = now;
     }
-    const out = new Int32Array(board.length);
-    for (let i = 0; i < board.length; i++) {
-        const v = board[i]!;
-        out[i] = v !== -2 && mask[i] ? -2 : v;
-    }
-    return out;
+    return applySpyMask(board, spyFlickerMask!);
 }
 let playerName: string | null = null;    // remembered after the first prompt
 
