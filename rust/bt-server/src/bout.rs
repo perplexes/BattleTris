@@ -92,8 +92,9 @@ pub struct SelfStatus {
 /// What a player is allowed to see about their opponent by default: score and
 /// lines for the opponent panel only. The opponent's board is not included; it
 /// is revealed only by an active spy, as a degraded `spy_board` on [`Snapshot`].
-/// The opponent's funds are never revealed, even under a spy. A client cannot
-/// see the opponent's board by requesting it directly.
+/// The opponent's funds are not in the default view; they are revealed only by an
+/// active spy, as a server-computed `spy_funds` scalar on [`Snapshot`]. A client
+/// cannot see the opponent's board or funds by requesting them directly.
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct OppView {
     pub score: i64,
@@ -129,6 +130,12 @@ pub struct Snapshot {
     /// the spy didn't earn). Rides the throttled keyframe frames, like `keyframe`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spy_board: Option<Vec<i32>>,
+    /// The opponent's funds as revealed by this client's active spy, computed
+    /// server-side per [`adjust_funds`] (Ames perturbed, Ace mostly exact, Condor
+    /// exact). Present only while spying, on the same throttled keyframe frames as
+    /// `spy_board`. The default (non-spy) opponent view never carries funds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spy_funds: Option<i64>,
     /// Full-state reconciliation keyframe (bytes, op_funds redacted), present
     /// only on the throttled keyframe frames; omitted from the JSON otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -165,6 +172,45 @@ fn degrade_board(mut grid: Vec<i32>, token: WeaponToken) -> Vec<i32> {
     grid
 }
 
+/// How many ticks after the opponent's tetris the Ace spy keeps perturbing the
+/// revealed funds. The original perturbs on the single render following a tetris
+/// (`tet_`, BTRecon.C:107-110); the port reveals funds on throttled keyframe
+/// frames, so it holds the perturbation for a short window to stay visible at
+/// that cadence.
+const ACE_TETRIS_WINDOW: u64 = 60;
+
+/// The funds a spy reveals to its holder, server-side, mirroring
+/// `BTRecon::adjustFunds` (BTRecon.C:94-118). Condor reveals exact funds; Ames
+/// perturbs by `+/- (noise % (|funds|+1))`, re-rolled per frame; Ace reveals exact
+/// funds except a `+/- (noise % 100)` perturbation shortly after the opponent's
+/// tetris. Computing it on the server keeps a modified client from reading a value
+/// the spy did not grant: Ames never yields the exact figure, and Ace/Condor yield
+/// exact only because that is the weapon's paid effect.
+fn adjust_funds(funds: i64, token: WeaponToken, noise: u64, ace_recent_tetris: bool) -> i64 {
+    // A pseudo-random sign drawn from a high bit of the noise (the original draws
+    // `mult = (rand() % 2) ? -1 : 1`, BTRecon.C:97-99).
+    let sign = if noise & (1 << 33) != 0 { -1 } else { 1 };
+    match token {
+        WeaponToken::Condor => funds,
+        WeaponToken::Ace => {
+            if ace_recent_tetris {
+                funds + sign * (noise % 100) as i64
+            } else {
+                funds
+            }
+        }
+        // Ames (the only remaining spy). The original remaps `funds == -1` to -2
+        // because `rand() % (funds + 1)` would divide by zero there
+        // (BTRecon.C:103-104). For any funds the span is `|funds| + 1`, so the
+        // perturbation magnitude lies in `0..=|funds|`.
+        _ => {
+            let base = if funds == -1 { -2 } else { funds };
+            let span = base.unsigned_abs() + 1; // |funds| + 1, always >= 1
+            base + sign * (noise % span) as i64
+        }
+    }
+}
+
 /// A server-hosted authoritative match between two clients.
 pub struct Bout {
     versus: Versus,
@@ -184,6 +230,10 @@ pub struct Bout {
     /// The opponent's line count last seen per side, to measure the spy's
     /// line-clear decrement.
     opp_lines_seen: [i64; 2],
+    /// The tick at which the opponent last cleared a tetris (4 lines at once),
+    /// per side. An Ace spy perturbs the revealed funds for [`ACE_TETRIS_WINDOW`]
+    /// ticks after one. 0 means the opponent has never done a tetris this match.
+    last_opp_tetris_tick: [u64; 2],
 }
 
 impl Bout {
@@ -199,6 +249,7 @@ impl Bout {
             ack: [0, 0],
             spy: [None, None],
             opp_lines_seen: [0, 0],
+            last_opp_tetris_tick: [0, 0],
         }
     }
 
@@ -274,14 +325,22 @@ impl Bout {
     }
 
     /// Out-of-band admin grant (the `POST /admin/grant` dev tool): add one weapon
-    /// and/or some funds to `side`'s authoritative game. This is not a client input;
-    /// it is never recorded into the replay `frames` and never touches `ack`, so it
-    /// cannot perturb input ordering or the deterministic input stream. The bout's
-    /// normal snapshot path (a keyframe rides the next send, see `run_bout`'s
-    /// `want_keyframe`) syncs the client. Replaying the recorded `frames` reproduces
-    /// the bout without this grant, as with any other un-recorded server action.
-    /// Returns `(weapon_granted, funds_applied)` for the HTTP summary.
+    /// and/or some funds to `side`'s authoritative game. This is not a client input
+    /// (it never touches `ack` and `is_legal_client_input` rejects the grant frames,
+    /// so a client cannot send one to arm itself).
+    ///
+    /// Each applied grant IS recorded into the replay `frames`, stamped at the
+    /// current tick, as a `GrantWeapon` / `AddFunds` frame. Recording it is what lets
+    /// a debug-granted online bout replay faithfully: the grant lands in the arsenal
+    /// at the same tick during playback, so the later recorded `LaunchWeapon` fires a
+    /// real weapon instead of an empty slot. The grant is deterministic on replay (a
+    /// fixed arsenal/funds mutation at a fixed tick), so recording it does not perturb
+    /// the input stream; it only makes the recording complete. The bout's normal
+    /// snapshot path (a keyframe rides the next send, see `run_bout`'s `want_keyframe`)
+    /// still syncs the live client. Returns `(weapon_granted, funds_applied)` for the
+    /// HTTP summary.
     pub fn debug_grant(&mut self, side: Side, weapon: Option<WeaponToken>, funds: Option<i64>) -> (bool, bool) {
+        let idx = side_idx(side);
         let g = self.versus.game_mut(side);
         let weapon_granted = weapon.map(|tok| g.grant_weapon(tok)).unwrap_or(false);
         let funds_applied = match funds {
@@ -291,6 +350,29 @@ impl Bout {
             }
             _ => false,
         };
+        // Record each grant that actually landed, so playback reproduces it. The
+        // weapon frame precedes the funds frame, matching the apply order above; both
+        // are stamped at the current tick (inputs for tick N are drained before the
+        // Nth tick advances, so playback applies them at this same tick, ahead of any
+        // later `LaunchWeapon` that spends them).
+        if weapon_granted {
+            if let Some(tok) = weapon {
+                self.frames.push(VersusFrame {
+                    tick: self.tick as u32,
+                    side: idx as u8,
+                    input: Input::GrantWeapon(tok.index() as i32),
+                });
+            }
+        }
+        if funds_applied {
+            if let Some(amount) = funds {
+                self.frames.push(VersusFrame {
+                    tick: self.tick as u32,
+                    side: idx as u8,
+                    input: Input::AddFunds(amount),
+                });
+            }
+        }
         (weapon_granted, funds_applied)
     }
 
@@ -315,10 +397,15 @@ impl Bout {
         self.tick += 1;
         for (i, side) in [Side::A, Side::B].into_iter().enumerate() {
             let opp_lines = self.versus.game(side.other()).score().lines;
+            let delta = (opp_lines - self.opp_lines_seen[i]).max(0) as i32;
+            // A tetris (>= 4 lines in one clear) by the opponent: an Ace spy
+            // perturbs the revealed funds for a window afterward (BTRecon.C:107-110).
+            if delta >= 4 {
+                self.last_opp_tetris_tick[i] = self.tick;
+            }
             // 1. Charge the ACTIVE spy first, for the opponent's clears since last
             //    seen (before any relaunch resets the baseline).
             if let Some((tok, rem)) = self.spy[i] {
-                let delta = (opp_lines - self.opp_lines_seen[i]).max(0) as i32;
                 let left = rem - delta;
                 self.spy[i] = if left > 0 { Some((tok, left)) } else { None };
             }
@@ -403,9 +490,26 @@ impl Bout {
         let me = self.versus.game(side);
         let them = self.versus.game(side.other());
         let spy = self.spy[side_idx(side)];
-        // The (degraded) opponent board rides the keyframe frames while spying.
+        // The (degraded) opponent board and the revealed funds both ride the
+        // keyframe frames while spying.
         let spy_board = match (spy, include_keyframe) {
             (Some((tok, _)), true) => Some(degrade_board(them.render_ids(), tok)),
+            _ => None,
+        };
+        let spy_funds = match (spy, include_keyframe) {
+            (Some((tok, _)), true) => {
+                let i = side_idx(side);
+                // A deterministic per-tick noise (varies each keyframe, differs per
+                // side) drives the Ames perturbation without RNG state, so the
+                // reveal stays reproducible and `snapshot_for` stays `&self`.
+                let noise = self
+                    .tick
+                    .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    ^ (i as u64).wrapping_mul(0x632B_E59B_D9B4_E019);
+                let ace_recent_tetris = self.last_opp_tetris_tick[i] != 0
+                    && self.tick.saturating_sub(self.last_opp_tetris_tick[i]) < ACE_TETRIS_WINDOW;
+                Some(adjust_funds(them.score().funds, tok, noise, ace_recent_tetris))
+            }
             _ => None,
         };
 
@@ -434,7 +538,9 @@ impl Bout {
             },
             spying: spy.is_some(),
             spy_board,
-            // op_funds-redacted: a client must not learn the opponent's funds.
+            spy_funds,
+            // op_funds-redacted in the keyframe: the opponent's funds reach a client
+            // only through the spy-gated `spy_funds` scalar above, never the keyframe.
             keyframe: include_keyframe.then(|| me.client_keyframe_bytes()),
         }
     }
@@ -1868,6 +1974,76 @@ mod tests {
                 "Condor (satellite) must reveal the ENTIRE board (hide nothing); hid {}", h_condor);
             prop_assert_eq!(&condor, &ids, "Condor's output must equal the source grid exactly");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Spy FUNDS reveal (BTRecon::adjustFunds, BTRecon.C:94-118). The original
+    // shows the opponent's funds under a spy: Ames perturbed, Ace mostly exact,
+    // Condor exact. The port computes the revealed value server-side so a modified
+    // client can never read a figure the spy did not grant.
+    // -----------------------------------------------------------------------
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn adjust_funds_matches_per_spy_semantics(funds in 0i64..2_000_000, noise in any::<u64>()) {
+            // Condor: always the exact balance.
+            prop_assert_eq!(adjust_funds(funds, WeaponToken::Condor, noise, false), funds);
+            prop_assert_eq!(adjust_funds(funds, WeaponToken::Condor, noise, true), funds);
+
+            // Ace: exact without a recent tetris; within +/- 99 after one.
+            prop_assert_eq!(adjust_funds(funds, WeaponToken::Ace, noise, false), funds);
+            let ace = adjust_funds(funds, WeaponToken::Ace, noise, true);
+            prop_assert!((ace - funds).abs() <= 99,
+                "Ace tetris perturbation must be within +/-99; got {} from {}", ace, funds);
+
+            // Ames: perturbation magnitude in 0..=funds (the original rand%(funds+1)).
+            let ames = adjust_funds(funds, WeaponToken::Ames, noise, false);
+            prop_assert!((ames - funds).abs() <= funds,
+                "Ames perturbation must be within +/-funds; got {} from {}", ames, funds);
+        }
+    }
+
+    #[test]
+    fn ames_perturbs_and_guards_minus_one() {
+        // Across a noise sweep Ames yields at least one non-exact value for a
+        // nonzero balance: it perturbs the figure rather than passing it through.
+        let funds = 1000;
+        let jittered = (0u64..256)
+            .any(|n| adjust_funds(funds, WeaponToken::Ames, n.wrapping_mul(0x9E37_79B9_7F4A_7C15), false) != funds);
+        assert!(jittered, "Ames must perturb the revealed funds, not pass them through");
+        // The funds == -1 FPE guard (BTRecon.C:103-104) remaps to -2 (span 3), so
+        // the result stays in [-4, 0] and never panics.
+        for n in 0u64..64 {
+            let v = adjust_funds(-1, WeaponToken::Ames, n, false);
+            assert!((-4..=0).contains(&v), "Ames(-1) -> base -2, span 3 -> [-4,0]; got {}", v);
+        }
+    }
+
+    #[test]
+    fn a_spy_reveals_opponent_funds_only_to_the_launcher_and_only_on_keyframes() {
+        let mut b = Bout::new(1, 2);
+        b.versus.game_mut(Side::B).add_funds(777);
+        let _ = b.versus.game_mut(Side::B).take_events();
+        // No spy yet: no funds revealed.
+        assert!(b.snapshot_for(Side::A, true).spy_funds.is_none(), "no funds revealed without a spy");
+
+        // A launches Condor (the exact-reveal spy) at B.
+        b.versus.game_mut(Side::A).grant_weapon(WeaponToken::Condor);
+        assert!(b.apply_input(Side::A, &Input::LaunchWeapon(0), 1));
+        b.tick(16); // relay records the spy; the bout activates it
+
+        let sa = b.snapshot_for(Side::A, true);
+        assert!(sa.spying, "A is spying after launching Condor");
+        assert_eq!(sa.spy_funds, Some(777), "Condor reveals B's exact funds");
+        assert!(
+            b.snapshot_for(Side::A, false).spy_funds.is_none(),
+            "spy_funds rides the keyframe frames only, like spy_board"
+        );
+        assert!(
+            b.snapshot_for(Side::B, true).spy_funds.is_none(),
+            "the side that launched no spy never sees the opponent's funds"
+        );
     }
 
     #[test]

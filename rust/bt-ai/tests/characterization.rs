@@ -32,11 +32,15 @@ const CONFIGS: &[(&str, u64, usize, usize)] = &[
 
 /// Baked fingerprints: (ai_score, ai_lines, ai_funds, board_hash), index-aligned
 /// with CONFIGS. Regenerate with the --ignored generator below.
+// The commando strategy engine (Ernie's faithful shopping/launching) changed the
+// post-bazaar funds for the two faster levels that reach a bazaar (pepped_up,
+// bionic); score, lines, and the board hash are unchanged everywhere (placement
+// is identical), so the only drift is funds where shopping now differs.
 const EXPECTED: &[(i64, i64, i64, u64)] = &[
     (462, 7, 86, 12057399988636814063),    // comatose
     (1442, 18, 99, 8806918482345380397),   // willing
-    (1302, 20, 14, 10445627093318506597),  // pepped_up
-    (1050, 20, 6, 14926149424688899277),   // bionic
+    (1302, 20, 29, 10445627093318506597),  // pepped_up
+    (1050, 20, 121, 14926149424688899277), // bionic
 ];
 
 fn fnv1a_board(b: &Board) -> u64 {

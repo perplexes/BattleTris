@@ -157,6 +157,12 @@ pub struct Game {
     /// Weapons received from the opponent, applied at the next piece lock
     /// (`BTCommManager::weapq_` flushed in `place`).
     pending: Vec<WeaponToken>,
+    /// A swapped-in board (Swap Meet) waiting to install at the next piece lock,
+    /// as an `export_board` encoding. Mirrors the original's `board_buf_`
+    /// (`BTCommManager.C:448-449,584-588`): the opponent's board captured at
+    /// launch, installed in `flush_pending` so the exchange lands at a clean lock
+    /// boundary, never under a falling piece. At most one swap can be in flight.
+    pending_board: Option<Vec<i32>>,
     /// Auto-rotate (Mad Hatter) / auto-slide (Slick Willy) sub-timers.
     hatter_accum: i32,
     slick_accum: i32,
@@ -202,6 +208,7 @@ impl Game {
             remaining: [0; BT_MAX_WEAPONS],
             arsenal: Arsenal::new(),
             pending: Vec::new(),
+            pending_board: None,
             hatter_accum: 0,
             slick_accum: 0,
             slick_dir: 0,
@@ -236,6 +243,15 @@ impl Game {
     /// the `x`/`y` field note), and the position collision/locking trust.
     pub fn piece_pos(&self) -> (i32, i32) {
         (self.x, self.y)
+    }
+    /// The current spawn origin and fall direction (`def_x`, `def_y`, `delta_y`).
+    /// Upbyside flips `def_y`/`delta_y` (spawn at the bottom, pieces rise); every
+    /// other state leaves them at the defaults. Normal play reads none of this; it
+    /// exists so an external invariant check can pin the spawn point against the
+    /// active orientation flags, since a spawn origin that drifts out of step with
+    /// `weapon_active(Upbyside)` is the signature of a spurious top-out.
+    pub fn spawn_origin(&self) -> (i32, i32, i32) {
+        (self.def_x, self.def_y, self.delta_y)
     }
     /// Whether the player has topped out.
     pub fn is_game_over(&self) -> bool {
@@ -578,6 +594,14 @@ impl Game {
         self.pending.push(token);
     }
 
+    /// Queue a Swap Meet board to install at the next piece lock (`board_buf_`,
+    /// `BTCommManager.C:448-449`). `cells` is the opponent's board captured at
+    /// launch (an `export_board` encoding). Replaces any swap already in flight,
+    /// matching the single `board_buf_` slot.
+    pub fn queue_board_swap(&mut self, cells: Vec<i32>) {
+        self.pending_board = Some(cells);
+    }
+
     /// `BT_OP_SCORE`: the opponent's score changed. Updates the mirror, applies
     /// Lawyers' Delite, and advances the bazaar trigger.
     pub fn receive_op_score(&mut self, op_score: i64, op_lines: i64, op_funds: i64) {
@@ -858,6 +882,18 @@ impl Game {
         for t in &self.pending {
             o.push(t.index() as i64);
         }
+        // Pending Swap board (board_buf_): a presence flag, then the cells if any.
+        // Carrying it on the keyframe keeps a reconciling client's prediction
+        // installing the swap at the same lock the server does.
+        match &self.pending_board {
+            Some(cells) => {
+                o.push(1);
+                for v in cells {
+                    o.push(*v as i64);
+                }
+            }
+            None => o.push(0),
+        }
         for v in self.export_board() {
             o.push(v as i64);
         }
@@ -986,6 +1022,18 @@ impl Game {
             }
         }
         let board_len = (self.board.width * self.board.height * 4) as usize;
+        // Pending Swap board (board_buf_): a presence flag, then the cells if any.
+        let pending_board = match c.next() {
+            0 => None,
+            1 => {
+                let mut cells = Vec::with_capacity(board_len);
+                for _ in 0..board_len {
+                    cells.push(c.next() as i32);
+                }
+                Some(cells)
+            }
+            _ => return false,
+        };
         let mut board_flat = Vec::with_capacity(board_len);
         for _ in 0..board_len {
             board_flat.push(c.next() as i32);
@@ -1040,6 +1088,7 @@ impl Game {
         self.board.reason = board_reason;
         self.current = current;
         self.pending = pending;
+        self.pending_board = pending_board;
         self.events.clear();
         true
     }
@@ -1175,16 +1224,18 @@ impl Game {
                 }
             }
             WeaponToken::Keating => {
-                // "...all taken away ... and given to you." Zero the victim's
-                // funds and hand the seized amount to the attacker via the relay.
-                // The seizure reads the balance at flush (the next lock), which is
-                // AFTER that lock's clear has already been credited, so funds the
-                // victim banks on the triggering piece are included in the haul.
-                let stolen = self.score.funds;
+                // "...all taken away ... and given to you." Zero the victim at
+                // activation. The attacker was already credited the victim's funds
+                // snapshotted at LAUNCH (in versus::apply_weapon), matching the
+                // original: the attacker banks its cached `op_funds` from launch
+                // (BTScoreManager.C:110-111,151-153) while the victim loses
+                // whatever it holds when the weapon activates at its next lock
+                // (:121-123). Activation runs after this lock's clear is credited,
+                // so funds the victim banks on the triggering piece are included in
+                // what is lost, and the amount lost can differ from the amount
+                // credited (no FundsStolen is emitted here; the credit already
+                // happened at launch).
                 self.score.funds = 0;
-                if stolen != 0 {
-                    self.events.push(GameEvent::FundsStolen(stolen));
-                }
             }
             WeaponToken::Reagan => self.score.funds = -self.score.funds,
             _ => {}
@@ -1231,11 +1282,22 @@ impl Game {
         }
     }
 
-    /// Apply weapons the opponent launched (queued via [`Self::receive_weapon`]).
+    /// Apply weapons the opponent launched (queued via [`Self::receive_weapon`]),
+    /// then install any pending Swap Meet board. The board install is last, so it
+    /// replaces the cells this lock just produced (the original sends `weapq_`
+    /// before `board_buf_` in `flushWeapons`, `BTCommManager.C:578-588`).
     fn flush_pending(&mut self) {
         let pend: Vec<WeaponToken> = self.pending.drain(..).collect();
         for tok in pend {
             self.apply_weapon_on(tok);
+        }
+        if let Some(cells) = self.pending_board.take() {
+            self.import_board(&cells);
+            // The swapped-in cells do not match this board's geometry weapons, so
+            // clear them as the immediate `swap_board_with` did (its
+            // `force_weapon_off(Bottle/Upbyside)` cleanup).
+            self.force_weapon_off(WeaponToken::Bottle);
+            self.force_weapon_off(WeaponToken::Upbyside);
         }
     }
 

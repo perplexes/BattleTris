@@ -20,7 +20,7 @@ struct Driver {
 
 impl Driver {
     fn new() -> Self {
-        Driver { ernie: Computer::new(), committed: false }
+        Driver { ernie: Computer::new(1), committed: false }
     }
 
     /// Advance one frame; returns the events produced this frame.
@@ -193,42 +193,41 @@ fn mondale_emits_the_swiped_tax_for_the_attacker() {
 /// Keating also CREDITS the attacker: when it zeroes the victim, the seized
 /// funds are emitted as a `FundsStolen` event (the launcher banks the loot).
 #[test]
-fn keating_emits_the_seized_funds_for_the_attacker() {
-    let mut g = Game::new(2024);
+fn keating_credits_the_attacker_the_launch_snapshot() {
+    // The attacker is credited the victim's funds snapshotted at LAUNCH
+    // (BTScoreManager.C:110-111,151-153); the victim is zeroed when the weapon
+    // activates at its next lock (:121-123). Drive a victim to earn a treasury,
+    // fire Keating at it from an attacker, and confirm the attacker banks the
+    // launch snapshot while the victim is zeroed at activation.
+    let mut vic = Game::new(2024);
     let mut d = Driver::new();
-
     assert!(
-        d.run_until(&mut g, |g| g.score().funds > 0, 6000),
+        d.run_until(&mut vic, |g| g.score().funds > 0, 6000),
         "Ernie should earn funds to steal"
     );
 
-    g.receive_weapon(WeaponToken::Keating);
-    let mut seized = None;
-    for _ in 0..3000 {
-        if g.is_game_over() {
-            break;
-        }
-        // Funds present just before this step's lock is the treasury Keating seizes.
-        let before_step = g.score().funds;
-        let evs = d.step(&mut g);
-        let gross: i64 = evs
-            .iter()
-            .filter_map(|e| match e {
-                GameEvent::Locked { funds, .. } if *funds > 0 => Some(*funds as i64),
-                _ => None,
-            })
-            .sum();
-        if let Some(amt) = evs.iter().find_map(|e| match e {
-            GameEvent::FundsStolen(amt) => Some(*amt),
-            _ => None,
-        }) {
-            // Keating fires at the lock: the victim's funds are (pre-step + the
-            // gross banked this same lock) before being zeroed.
-            assert_eq!(amt, before_step + gross, "the attacker is credited the full seized treasury");
-            seized = Some(amt);
-            break;
-        }
-    }
-    assert_eq!(g.score().funds, 0, "the victim is zeroed");
-    assert!(matches!(seized, Some(amt) if amt > 0), "Keating emitted a positive seizure");
+    let mut atk = Game::new(7);
+    let atk0 = atk.score().funds;
+    let launch_funds = vic.score().funds;
+    assert!(launch_funds > 0, "victim holds a treasury at launch");
+
+    // Launch: the attacker banks the launch snapshot immediately.
+    bt_core::deliver_weapon(&mut atk, &mut vic, WeaponToken::Keating);
+    assert_eq!(
+        atk.score().funds,
+        atk0 + launch_funds,
+        "attacker credited the launch snapshot"
+    );
+
+    // Drive the victim to a lock to activate the queued Keating.
+    assert!(
+        d.run_until(&mut vic, |g| g.score().funds == 0, 3000),
+        "Keating should zero the victim at its next lock"
+    );
+    assert_eq!(vic.score().funds, 0, "the victim is zeroed at activation");
+    assert_eq!(
+        atk.score().funds,
+        atk0 + launch_funds,
+        "attacker keeps exactly the launch snapshot"
+    );
 }

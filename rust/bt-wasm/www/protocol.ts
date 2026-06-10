@@ -114,6 +114,9 @@ export interface SnapshotMsg {
     spying?: boolean;
     /** Server-degraded opponent board (rides keyframes while spying). */
     spy_board?: number[];
+    /** Server-computed opponent funds revealed by our spy (Ames perturbed, Ace
+     *  mostly exact, Condor exact); rides keyframes while spying. */
+    spy_funds?: number;
 }
 
 export interface RatingMsg { type: 'rating'; mu: number; sigma: number; won: boolean; }

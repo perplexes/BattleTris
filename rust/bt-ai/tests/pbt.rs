@@ -471,7 +471,7 @@ proptest! {
         let piece_orient_before = g.current_piece().map(|p| p.orientation);
         let score_before = g.score();
 
-        let mut ernie = Computer::new();
+        let mut ernie = Computer::new(1);
         // This must not panic.
         ernie.take_turn(&mut g);
 
@@ -545,7 +545,7 @@ proptest! {
         // Only interesting when the AI must MOVE/ROTATE off the spawn pose.
         prop_assume!((target.x, target.orientation) != (spawn_x, spawn_o));
 
-        let mut ernie = Computer::new();
+        let mut ernie = Computer::new(1);
         ernie.take_turn(&mut g);
 
         // Right after take_turn (no tick yet) the piece must sit at the target —
@@ -651,7 +651,7 @@ proptest! {
         prop_assert_eq!(g.piece_pos().1, 0, "fresh piece must be at the spawn row");
         let score_before = g.score().score;
 
-        let mut ernie = Computer::new();
+        let mut ernie = Computer::new(1);
         ernie.take_turn(&mut g); // engages ai_begin_drop (synchronous score award)
 
         let delta = g.score().score - score_before;

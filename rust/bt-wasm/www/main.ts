@@ -44,6 +44,7 @@ let authSelf: SideStatus | null = null;       // latest authoritative own-status
 let authOpp: OppStatus | null = null;        // latest authoritative opponent view {score,lines,game_over,in_bazaar?}
 let authSpying = false;    // is a spy of ours active (server-authorized)?
 let authSpyBoard: Int32Array | null = null;   // latest server-DEGRADED opponent board (from a keyframe), or null
+let authSpyFunds: number | null = null;       // latest server-computed opponent funds our spy reveals, or null
 let playerName: string | null = null;    // remembered after the first prompt
 
 // Canvas and context
@@ -78,6 +79,8 @@ const bazaarInfoDesc = document.getElementById('bazaarInfoDesc') as HTMLElement;
 const arsenalList = document.getElementById('arsenalList') as HTMLElement;
 const opponentScore = document.getElementById('opponentScore') as HTMLElement;
 const opponentLines = document.getElementById('opponentLines') as HTMLElement;
+const opponentFundsRow = document.getElementById('opponentFundsRow') as HTMLElement;
+const opponentFunds = document.getElementById('opponentFunds') as HTMLElement;
 const modePracticeBtn = document.getElementById('modePractice') as HTMLElement;
 const playComputerBtn = document.getElementById('playComputerBtn') as HTMLElement;
 const findMatchBtn = document.getElementById('findMatchBtn') as HTMLElement;
@@ -621,6 +624,7 @@ function cleanupOnline() {
     authOpp = null;
     authSpying = false;
     authSpyBoard = null;
+    authSpyFunds = null;
 }
 
 // ─── Server-authoritative client (prediction + reconciliation) ────────────────
@@ -702,7 +706,8 @@ function applySnapshot(msg: Extract<ServerMessage, { type: 'snapshot' }>) {
     // rides keyframes. Keep the last board while spying; drop it when it ends.
     authSpying = !!msg.spying;
     if (msg.spy_board) authSpyBoard = Int32Array.from(msg.spy_board);
-    if (!authSpying) authSpyBoard = null;
+    if (msg.spy_funds !== undefined) authSpyFunds = msg.spy_funds;
+    if (!authSpying) { authSpyBoard = null; authSpyFunds = null; }
     // Reconcile: prune acked inputs and, on a keyframe, restore the authoritative
     // state then replay the still-unacked tail — all inside WasmClient.on_snapshot
     // (the shared, proptested core). An empty keyframe array ⇒ no keyframe this frame.
@@ -744,6 +749,7 @@ function enterAuthoritativeGame(msg: Extract<ServerMessage, { type: 'matchStart'
     authOpp = null;
     authSpying = false;
     authSpyBoard = null;
+    authSpyFunds = null;
     // Fresh match: no stored replay yet (the server sends matchReplay at the end).
     lastMatchReplayId = null;
     if (watchReplayBtn) watchReplayBtn.style.display = 'none';
@@ -1116,6 +1122,15 @@ function updateOpponentPanel() {
     const opLines = (authoritative && authOpp) ? authOpp.lines : game!.op_lines();
     opponentScore.textContent = opScore >= 0 ? opScore as unknown as string : '-';
     opponentLines.textContent = opLines >= 0 ? opLines as unknown as string : '-';
+
+    // Opponent funds are revealed only while a spy of ours is active (the server
+    // sends the per-spy adjusted value); hide the row otherwise.
+    if (authoritative && authSpying && authSpyFunds !== null) {
+        opponentFunds.textContent = authSpyFunds as unknown as string;
+        opponentFundsRow.style.display = '';
+    } else {
+        opponentFundsRow.style.display = 'none';
+    }
 
     // Derive opponent name for mobile stats bar
     let oppName = 'Opponent';

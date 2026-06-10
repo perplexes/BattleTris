@@ -263,38 +263,35 @@ proptest! {
         });
         let Some(slot) = swap_slot else { return Ok(()); };
         v.game_mut(Side::A).launch_weapon(slot);
-        // relay() runs inside tick() — the Swap fires synchronously in relay,
-        // but the tick also advances game time (may lock pieces). Capture
-        // boards immediately after relay fires by using tick(0) if available,
-        // or just accept tick(1) as close enough. We check the board grids
-        // BEFORE the tick (snapshot above) vs AFTER, knowing the relay has
-        // already swapped by end of tick.
-        //
-        // Actually: Swap is an instant weapon applied in relay synchronously
-        // within tick. The piece-lock timing within the same tick could add cells
-        // to the ALREADY-SWAPPED board, so the comparison we really want is:
-        //   A_after == B_before  AND B_after == A_before
-        // only if no piece locking happened in that tick. Instead we verify
-        // the weaker but correct property: A_after.len() == B_before.len() AND
-        // B_after.len() == A_before.len() in terms of filled cell counts.
-        // But that is also broken by locking. The cleanest correct property
-        // that doesn't depend on lock timing is: the sets of export bytes are
-        // swapped — i.e. the relay's exchange is a pure bijection at the cell level.
-        //
-        // We achieve this by using tick(0) — a zero-dt tick that runs relay but
-        // does not advance game physics (no piece movement / locking).
+        // tick(0) runs the relay (which captures each launch-time board and queues
+        // the exchange) without advancing physics. The swap is DEFERRED to each
+        // side's next lock (board_buf_), so the boards must be unchanged right now.
         v.tick(0);
-
-        let board_a_after = v.game(Side::A).export_board();
-        let board_b_after = v.game(Side::B).export_board();
-
         prop_assert_eq!(
-            &board_a_after, &board_b_before,
-            "after Swap, A's board must equal B's board before Swap"
+            v.game(Side::A).export_board(), board_a_before.clone(),
+            "Swap is deferred: A's board is unchanged until A's next lock"
         );
         prop_assert_eq!(
-            &board_b_after, &board_a_before,
-            "after Swap, B's board must equal A's board before Swap"
+            v.game(Side::B).export_board(), board_b_before.clone(),
+            "Swap is deferred: B's board is unchanged until B's next lock"
+        );
+
+        // Both sides had a current piece (not over) when the swap was queued, so
+        // driving each to a lock installs the other's launch-time board, replacing
+        // whatever cells the locking piece produced.
+        if v.game(Side::A).is_game_over() || v.game(Side::B).is_game_over() {
+            return Ok(());
+        }
+        lock(v.game_mut(Side::A));
+        lock(v.game_mut(Side::B));
+
+        prop_assert_eq!(
+            v.game(Side::A).export_board(), board_b_before,
+            "after its lock, A installed B's launch-time board"
+        );
+        prop_assert_eq!(
+            v.game(Side::B).export_board(), board_a_before,
+            "after its lock, B installed A's launch-time board"
         );
     }
 }

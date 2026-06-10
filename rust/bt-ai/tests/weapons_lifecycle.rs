@@ -22,7 +22,7 @@ struct Driver {
 
 impl Driver {
     fn new() -> Self {
-        Driver { ernie: Computer::new(), committed: false }
+        Driver { ernie: Computer::new(1), committed: false }
     }
     fn step(&mut self, g: &mut Game) {
         if g.is_in_bazaar() {

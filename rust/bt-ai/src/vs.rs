@@ -21,9 +21,6 @@ pub const AI_LEVELS: [i32; 15] = [
     4000, 3000, 2000, 1500, 1250, 1000, 750, 550, 400, 350, 300, 225, 100, 10, 0,
 ];
 
-/// Ms between Ernie's weapon launches.
-pub const AI_LAUNCH_PERIOD_MS: i32 = 4000;
-
 /// Which side of the match a weapon came from / is headed to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Side {
@@ -51,7 +48,6 @@ pub struct VsComputer {
     /// Ms between AI placements (the chosen difficulty's `levels[].timeout`).
     place_period: i32,
     place_accum: i32,
-    launch_accum: i32,
     /// True once Ernie has steered the current piece into its drop. `take_turn`
     /// only fires on a fresh piece: it ends with `ai_begin_drop` (a fast-drop
     /// that takes several ticks to land rather than an instant placement), so
@@ -82,10 +78,9 @@ impl VsComputer {
         VsComputer {
             player: Game::new(seed),
             ai: Game::new(seed ^ 0x9E37_79B9_7F4A_7C15),
-            computer: Computer::new(),
+            computer: Computer::new(seed),
             place_period: AI_LEVELS[idx],
             place_accum: 0,
-            launch_accum: 0,
             ai_committed: false,
             result: 0,
             events: Vec::new(),
@@ -107,15 +102,9 @@ impl VsComputer {
         // signals via `leave_bazaar`).
         if self.player.is_in_bazaar() || self.ai.is_in_bazaar() {
             if self.ai.is_in_bazaar() {
-                let mut bought = 0;
-                for t in WeaponToken::ALL {
-                    if bought >= 5 {
-                        break;
-                    }
-                    if self.ai.buy_weapon(t) {
-                        bought += 1;
-                    }
-                }
+                // Ernie shops via the commando engine: buy weapons per the
+                // whitelist/combo logic and queue their launch orders, then leave.
+                self.computer.shop(&mut self.ai);
                 self.ai.leave_bazaar();
             }
             // Forward the EnterBazaar / Scored events queued by the triggering
@@ -139,20 +128,10 @@ impl VsComputer {
         if !self.ai_committed && self.place_accum >= self.place_period {
             self.place_accum = 0;
             if !self.ai.is_game_over() && self.ai.current_piece().is_some() {
+                // take_turn fires any triggered weapon orders, then places the
+                // piece (launches are per-placement, as in BTComputer::run).
                 self.computer.take_turn(&mut self.ai);
                 self.ai_committed = true;
-            }
-        }
-
-        // Periodically fire a weapon if the AI has one.
-        self.launch_accum += dt;
-        if self.launch_accum >= AI_LAUNCH_PERIOD_MS {
-            self.launch_accum = 0;
-            for slot in 0..10usize {
-                if self.ai.arsenal_token(slot) >= 0 {
-                    self.ai.launch_weapon(slot);
-                    break;
-                }
             }
         }
     }
@@ -275,8 +254,11 @@ mod cross_player_tests {
         assert_eq!(cell_count(&vs.ai), 0);
 
         vs.deliver(WeaponToken::Swap, Side::Player);
+        // Deferred: each side installs the other's launch-time board at its next lock.
+        lock(&mut vs.player);
+        lock(&mut vs.ai);
 
-        assert_eq!(cell_count(&vs.player), 0, "player gave its board away");
+        assert_eq!(cell_count(&vs.player), 0, "player received Ernie's empty board");
         assert_eq!(
             vs.ai.board().get(3, 20).map(|c| c.value()),
             Some(5),
@@ -296,6 +278,10 @@ mod cross_player_tests {
         assert!(vs.ai.board().active.is_active(WeaponToken::Upbyside));
 
         vs.deliver(WeaponToken::Swap, Side::Player);
+        // Deferred: the Bottle/Upbyside cleanup lands when each side installs the
+        // swapped board at its next lock.
+        lock(&mut vs.player);
+        lock(&mut vs.ai);
 
         assert!(!vs.player.board().active.is_active(WeaponToken::Bottle), "Swap cleared Bottle");
         assert!(!vs.ai.board().active.is_active(WeaponToken::Upbyside), "Swap cleared Upbyside");

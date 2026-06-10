@@ -71,8 +71,9 @@ pub fn mirror_nullifies(token: WeaponToken) -> bool {
 /// included) hits the opponent as normal.
 ///
 /// Swap and Susan act on both boards at once and are applied here immediately;
-/// every other weapon is queued on its target and takes effect at that target's
-/// next piece lock (the `weapq_` model).
+/// Keating credits the attacker its launch-time funds snapshot here and queues
+/// only the victim's seizure; every other weapon is queued on its target and
+/// takes effect at that target's next piece lock (the `weapq_` model).
 pub fn deliver_weapon(attacker: &mut Game, victim: &mut Game, token: WeaponToken) {
     if attacker.weapon_active(WeaponToken::Mirror) {
         if mirror_nullifies(token) {
@@ -104,8 +105,30 @@ fn apply_weapon(attacker: &mut Game, victim: &mut Game, token: WeaponToken, to: 
         // Swap/Susan exchange between the two players, so they ignore `to`.
         // (They never arrive here while the attacker is cursed, as both are on the
         // nullify list, so a backfired exchange can't occur.)
-        WeaponToken::Swap => attacker.swap_board_with(victim),
+        //
+        // Swap captures each board at LAUNCH and installs the other's at that
+        // side's next piece lock (board_buf_, BTCommManager.C:448-449,584-588), so
+        // the exchange lands at a clean boundary, never under a falling piece.
+        // Susan trades arsenals immediately, which the original also does on
+        // arsenal-packet receipt (not at a lock; BTWeaponManager.C:104-110).
+        WeaponToken::Swap => {
+            let a_cells = attacker.export_board();
+            let v_cells = victim.export_board();
+            victim.queue_board_swap(a_cells);
+            attacker.queue_board_swap(v_cells);
+        }
         WeaponToken::Susan => attacker.swap_arsenal_with(victim),
+        // Keating credits the attacker the victim's funds as of LAUNCH (the
+        // attacker's cached `op_funds` in the original, BTScoreManager.C:110-111,
+        // 151-153), while the victim is zeroed only when the weapon activates at
+        // its next lock (Game::apply_weapon_on, BTScoreManager.C:121-123). The
+        // launch snapshot and the activation balance can differ, so the credited
+        // amount need not equal the seized amount. Keating is mirror-nullified, so
+        // `to` is always Victim here.
+        WeaponToken::Keating => {
+            attacker.add_funds(victim.score().funds);
+            victim.receive_weapon(token);
+        }
         _ => match to {
             Recipient::Attacker => attacker.receive_weapon(token),
             Recipient::Victim => victim.receive_weapon(token),
@@ -345,6 +368,66 @@ mod tests {
         deliver_weapon(&mut atk, &mut vic, WeaponToken::Swap); // Swap is nullified
         assert_eq!(cell_count(&atk), a0, "cursed Swap fizzled; boards unchanged");
         assert_eq!(cell_count(&vic), v0);
+    }
+
+    #[test]
+    fn swap_installs_the_opponents_board_at_the_next_lock_not_immediately() {
+        // The original buffers the swapped board (board_buf_) and installs it in
+        // flushWeapons at the victim's next lock (BTCommManager.C:448-449,584-588),
+        // so the exchange never mutates a board under a falling piece.
+        let mut a = Game::new(1);
+        let mut b = Game::new(2);
+        a.board_mut().set(0, 22, Some(Cell::die(3)));
+        b.board_mut().set(9, 22, Some(Cell::die(5)));
+        let a_board = a.export_board();
+        let b_board = b.export_board();
+
+        // A launches Swap at B: the relay queues the exchange on both sides.
+        deliver_weapon(&mut a, &mut b, WeaponToken::Swap);
+        assert_eq!(b.export_board(), b_board, "deferred: B's board is unchanged until B locks");
+        assert_eq!(a.export_board(), a_board, "deferred: A's board is unchanged until A locks");
+
+        // B locks first and installs A's launch-time board; A is still pending.
+        lock(&mut b);
+        assert_eq!(b.export_board(), a_board, "B installed A's board at B's lock");
+        assert_eq!(a.export_board(), a_board, "A still holds its own board until A locks");
+
+        // A locks and installs B's launch-time board.
+        lock(&mut a);
+        assert_eq!(a.export_board(), b_board, "A installed B's board at A's lock");
+    }
+
+    #[test]
+    fn keating_credits_launch_snapshot_not_activation_balance() {
+        // The original credits the attacker its cached `op_funds` snapshotted at
+        // LAUNCH (BTScoreManager.C:110-111,151-153) and zeroes the victim only
+        // when the weapon activates at the victim's next lock (:121-123). When the
+        // victim's balance grows between those two moments, the credited amount is
+        // less than the seized amount and the difference vanishes.
+        let mut atk = Game::new(1);
+        let mut vic = Game::new(2);
+        let atk0 = atk.score().funds;
+        vic.add_funds(100);
+        vic.take_events();
+        let launch_funds = vic.score().funds;
+
+        deliver_weapon(&mut atk, &mut vic, WeaponToken::Keating);
+        assert_eq!(atk.score().funds, atk0 + launch_funds, "attacker credited the launch snapshot");
+        assert_eq!(vic.score().funds, launch_funds, "victim not yet zeroed (activates at next lock)");
+
+        // The victim earns more before the queued Keating activates.
+        vic.add_funds(50);
+        vic.take_events();
+        let activation_funds = vic.score().funds;
+        assert!(activation_funds > launch_funds, "victim's balance grew after launch");
+
+        lock(&mut vic);
+        assert_eq!(vic.score().funds, 0, "victim loses its full activation balance");
+        assert_eq!(
+            atk.score().funds,
+            atk0 + launch_funds,
+            "attacker keeps only the launch snapshot, below the {activation_funds} seized",
+        );
     }
 
     #[test]

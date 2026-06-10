@@ -430,37 +430,45 @@ proptest! {
             "Reagan must multiply funds by -1 (got {}, want {})", g.score().funds, -start);
     }
 
-    /// KEATING applied locally (the victim side of the relay): "all taken away."
-    /// Independent oracle: funds == 0 after flush, and the FundsStolen event carries
-    /// EXACTLY the pre-seizure amount (so the relay can credit the attacker). A
-    /// mutant that steals a fraction, or emits the wrong amount, fails.
+    /// KEATING via the relay: "all taken away ... and given to you." The attacker
+    /// is credited the victim's funds snapshotted at LAUNCH
+    /// (BTScoreManager.C:110-111,151-153); the victim is zeroed when the weapon
+    /// activates at its next lock (:121-123). With the victim's balance unchanged
+    /// between launch and activation, credited == seized == the launch balance. A
+    /// mutant that steals a fraction, credits the wrong side, or skips the seizure
+    /// fails. (The credited != seized case is pinned in versus.rs by
+    /// `keating_credits_launch_snapshot_not_activation_balance`.)
     #[test]
-    fn keating_seizes_all_funds_and_reports_the_exact_amount(start in 1i64..1_000_000) {
-        let mut g = Game::new(1);
-        g.add_funds(start);
-        let _ = g.take_events();
-        prop_assume!(g.score().funds == start);
+    fn keating_credits_attacker_the_launch_snapshot_and_zeroes_the_victim(start in 1i64..1_000_000) {
+        let mut atk = Game::new(1);
+        let mut vic = Game::new(2);
+        let atk0 = atk.score().funds;
+        vic.add_funds(start);
+        let _ = vic.take_events();
+        let launch_funds = vic.score().funds;
 
-        g.receive_weapon(WeaponToken::Keating);
-        g.begin_drop();
-        let mut stolen = None;
+        // Launch: the attacker is credited the launch snapshot immediately.
+        deliver_weapon(&mut atk, &mut vic, WeaponToken::Keating);
+        prop_assert_eq!(atk.score().funds, atk0 + launch_funds,
+            "attacker credited the launch snapshot");
+        prop_assert_eq!(vic.score().funds, launch_funds,
+            "victim not yet zeroed (activates at the next lock)");
+
+        // Drive the victim to a lock to activate the queued Keating.
+        vic.begin_drop();
         let mut locked = false;
         for _ in 0..1200 {
-            g.tick(16);
-            for e in g.take_events() {
-                match e {
-                    GameEvent::FundsStolen(amt) => stolen = Some(amt),
-                    GameEvent::Locked { .. } => locked = true,
-                    _ => {}
-                }
+            vic.tick(16);
+            if vic.take_events().iter().any(|e| matches!(e, GameEvent::Locked { .. })) {
+                locked = true;
+                break;
             }
-            if locked { break; }
-            if g.is_game_over() { break; }
+            if vic.is_game_over() { break; }
         }
         prop_assume!(locked);
-        prop_assert_eq!(g.score().funds, 0, "Keating must zero the victim's funds");
-        prop_assert_eq!(stolen, Some(start),
-            "the FundsStolen report must equal the pre-seizure funds ({})", start);
+        prop_assert_eq!(vic.score().funds, 0, "Keating must zero the victim at activation");
+        prop_assert_eq!(atk.score().funds, atk0 + launch_funds,
+            "attacker keeps exactly the launch snapshot");
     }
 }
 

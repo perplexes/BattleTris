@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc cbfb7403a3303af11420c5a0613d9e692daac83d6197acc9fb2b054c9b14cd83 # shrinks to seed_a = 0, seed_b = 5162618303659819, ops = [DropB, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, AFiresRiseUp, Tick, Tick, AFiresRiseUp, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick]
+cc 5e314c73b8556ff5e36cd41d0192fd7874a7e4286931c0f7ccfc6d70a1198d2c # shrinks to seed_a = 0, seed_b = 0, ops = [Tick, DropB, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick, Tick]

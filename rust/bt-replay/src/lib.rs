@@ -41,12 +41,15 @@ pub const REPLAY_VERSION: u32 = 1;
 /// One state-mutating action the host can apply to a player's [`Game`]. These
 /// mirror the input surface of the wasm wrappers (`WasmGame` / `WasmVsComputer`).
 ///
-/// `ReceiveWeapon` / `ReceiveOpScore` / `AddFunds` are *incoming* frames: an
-/// effect originating outside this board. In a two-player recording that source
-/// is the opponent (an external process whose effects on *this* side must be
-/// captured as inputs); a practice recording can also inject a `ReceiveWeapon`
-/// to demonstrate a weapon. In vs-computer mode Ernie is replayed from the seed,
-/// so his effects are re-simulated rather than recorded.
+/// `ReceiveWeapon` / `ReceiveOpScore` / `AddFunds` / `GrantWeapon` are *incoming*
+/// frames: an effect originating outside this board. In a two-player recording the
+/// source is the opponent (an external process whose effects on *this* side must be
+/// captured as inputs); a practice recording can also inject a `ReceiveWeapon` to
+/// demonstrate a weapon; `GrantWeapon` is the server's admin dev-grant, recorded so
+/// a debug-granted online bout replays with the granted weapon in the arsenal rather
+/// than an empty slot the recorded `LaunchWeapon` would fire blank. In vs-computer
+/// mode Ernie is replayed from the seed, so his effects are re-simulated rather than
+/// recorded.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Input {
     /// Nudge the falling piece one column left.
@@ -94,6 +97,13 @@ pub enum Input {
     /// Funds credited to this player. Normally relay-produced for two-player
     /// Mondale/Keating, banking the amount the opponent's `FundsStolen` reported.
     AddFunds(i64),
+    /// Place one weapon ([`WeaponToken`] index `n`) directly into this player's
+    /// arsenal, no funds and no bazaar (`Game::grant_weapon`). The recorded form of
+    /// the server's `POST /admin/grant` dev tool, so a debug-granted online bout
+    /// reproduces: without it the recorded `LaunchWeapon` fires an empty slot on
+    /// replay and the weapon never goes off. Not a legal client input (see
+    /// `bt_server::bout::is_legal_client_input`); the server emits it itself.
+    GrantWeapon(i32),
 }
 
 impl Input {
@@ -136,6 +146,11 @@ impl Input {
                 g.receive_op_score(*score, *lines, *funds)
             }
             Input::AddFunds(amount) => g.add_funds(*amount),
+            Input::GrantWeapon(t) => {
+                if let Some(tok) = WeaponToken::from_index(*t) {
+                    g.grant_weapon(tok);
+                }
+            }
         }
     }
 }

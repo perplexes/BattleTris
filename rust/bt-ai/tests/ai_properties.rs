@@ -20,7 +20,7 @@ const FLAT: i64 = (BT_BOARD_HGT / 2) as i64; // 14
 #[test]
 fn ai_score_is_exactly_flat_times_pieces() {
     let mut g = Game::new(98_765);
-    let mut ernie = Computer::new();
+    let mut ernie = Computer::new(1);
     let mut pieces: i64 = 0;
 
     for _ in 0..80 {

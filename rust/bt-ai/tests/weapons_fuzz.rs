@@ -43,7 +43,7 @@ fn board_hash(b: &Board) -> u64 {
 /// any invariant is violated.
 fn fuzz_run(seed: u64, steps: usize) -> (i64, i64, u64) {
     let mut g = Game::new(seed);
-    let mut ernie = Computer::new();
+    let mut ernie = Computer::new(1);
     let mut rng = Rng::new(seed ^ 0xF00D_BABE);
     let mut committed = false;
 

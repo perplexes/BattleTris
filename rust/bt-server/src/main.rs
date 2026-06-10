@@ -2976,28 +2976,49 @@ mod tests {
     }
 
     // Bout::debug_grant applies a weapon and/or funds to the named side's
-    // authoritative game WITHOUT recording an input frame, so the replay/input
-    // stream (and thus determinism) is untouched. This is the unit-level teeth for
-    // the determinism claim.
+    // authoritative game AND records each as a replay frame, so a debug-granted bout
+    // replays faithfully (the grant lands in the arsenal at the same tick, ahead of
+    // any later LaunchWeapon that spends it). This is the unit-level teeth for the
+    // "grants are captured" claim.
     #[test]
-    fn debug_grant_mutates_the_named_side_without_recording_a_frame() {
+    fn debug_grant_mutates_the_named_side_and_records_a_frame() {
         let mut bout = bout::Bout::new(1, 2);
         let tok = WeaponToken::from_index(7).unwrap(); // Rise Up
         assert_eq!(bout.arsenal_count(Side::A, tok), 0, "arsenal starts empty for this weapon");
         let funds_before = bout.funds(Side::A);
 
+        // Grant mid-bout (after one tick), as a live admin grant would land, so the
+        // recording has ticks around the grant frame for playback to apply it within.
+        bout.tick(bout::TICK_MS);
         let (w, f) = bout.debug_grant(Side::A, Some(tok), Some(250));
+        bout.tick(bout::TICK_MS);
         assert!(w && f, "both the weapon and the funds were applied");
         assert_eq!(bout.arsenal_count(Side::A, tok), 1, "side A's arsenal gained the weapon");
         assert_eq!(bout.funds(Side::A), funds_before + 250, "side A's funds increased");
         // The OTHER side is untouched.
         assert_eq!(bout.arsenal_count(Side::B, tok), 0, "side B's arsenal is unchanged");
 
-        // Determinism: an admin grant is NOT a recorded input, so the exported replay's
-        // frame stream is empty (no client inputs), so a fresh replay reproduces the
-        // bout WITHOUT the grant.
+        // The grant IS recorded: one GrantWeapon frame then one AddFunds frame, both
+        // stamped to side A, so replaying reproduces the grant rather than firing an
+        // empty slot later.
         let replay = bout.to_replay(bout::TICK_MS, "test");
-        assert!(replay.frames.is_empty(), "the admin grant must NOT be recorded as a replay frame");
+        let a_frames: Vec<&bt_replay::Input> =
+            replay.frames.iter().filter(|fr| fr.side == 0).map(|fr| &fr.input).collect();
+        assert_eq!(
+            a_frames,
+            vec![&bt_replay::Input::GrantWeapon(7), &bt_replay::Input::AddFunds(250)],
+            "the admin grant must be recorded as a GrantWeapon then an AddFunds frame for side A"
+        );
+
+        // End to end: re-simulate the recording and confirm side A's arsenal holds the
+        // granted weapon, proving the recorded frame actually reproduces the grant.
+        let mut pl = bt_replay::VersusReplayPlayer::new(replay);
+        pl.run_to_end();
+        assert_eq!(
+            pl.game(true).arsenal_token(0),
+            7,
+            "replaying the recorded grant arms side A with Rise Up in slot 0"
+        );
     }
 
     // (3b) END-TO-END through the real bout task: register a live bout, spawn run_bout,

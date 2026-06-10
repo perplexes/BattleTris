@@ -114,6 +114,38 @@ proptest! {
     }
 }
 
+/// A pending Swap board (`board_buf_`) must survive a keyframe round-trip, so a
+/// reconciling client installs the swap at the same lock the server does, and the
+/// queued board installs at the next lock.
+#[test]
+fn keyframe_round_trips_a_pending_swap_board() {
+    // A distinctive board to swap in.
+    let mut donor = Game::new(8);
+    donor.board_mut().set(2, 21, Some(Cell::die(4)));
+    let swap_cells = donor.export_board();
+
+    let mut g = Game::new(7);
+    g.queue_board_swap(swap_cells.clone());
+    let bytes = g.snapshot_bytes();
+
+    let mut h = Game::new(99);
+    assert!(h.restore_bytes(&bytes), "restore accepts a snapshot carrying a pending swap");
+    assert_eq!(h.snapshot_bytes(), bytes, "the pending swap board round-trips byte-for-byte");
+
+    // The restored pending board installs at the next lock, exactly as the source's.
+    h.begin_drop();
+    for _ in 0..1200 {
+        h.tick(16);
+        if h.take_events().iter().any(|e| matches!(e, bt_core::game::GameEvent::Locked { .. })) {
+            break;
+        }
+        if h.is_game_over() {
+            break;
+        }
+    }
+    assert_eq!(h.export_board(), swap_cells, "the queued board installs at the restored game's next lock");
+}
+
 // ---------------------------------------------------------------------------
 // (a') FULL-FIELD ROUND-TRIP. The byte-equality check above proves the codec is
 //      self-consistent, but it can't catch a field that's WRONG on both the

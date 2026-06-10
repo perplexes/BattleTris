@@ -34,10 +34,14 @@
 //! * `VARIANCE_PENALTY`     = 50
 //! * `HOLE_DECAY`           = 0.50
 
+use bt_core::weapons::WeaponToken;
 use bt_core::{Board, Game, Piece};
 
+mod ernie;
+use ernie::Strategy;
+
 mod vs;
-pub use vs::{VsComputer, AI_LAUNCH_PERIOD_MS, AI_LEVELS};
+pub use vs::{VsComputer, AI_LEVELS};
 
 /// Smarter weapon buying/launching policy for the networked bots (`bt-bot`).
 pub mod weapons;
@@ -76,6 +80,87 @@ const HOLE_DECAY: f64 = 0.50;
 const MIDLINE: i32 = 14;
 
 // ---------------------------------------------------------------------------
+// Penalties (weapon-adaptive retuning, BTComputer.C:369-508)
+// ---------------------------------------------------------------------------
+
+/// The board-evaluation penalty weights. The defaults are the `BTComputer.C`
+/// constants; the original retunes them while certain weapons are active on the
+/// computer's own board (BTComputer.C:369-508), so the stacker changes strategy
+/// under attack. Only the single-player Ernie retunes; the lobby bots and the
+/// default [`eval_board`] use [`Penalties::default`].
+#[derive(Clone, Copy, Debug)]
+pub struct Penalties {
+    /// Variance (surface roughness) weight, `vp_`.
+    pub vp: f64,
+    /// Height weight, `hp_`.
+    pub hp: f64,
+    /// Closed-hole weight, `chp_`.
+    pub chp: f64,
+    /// Open-hole weight, `ohp_`.
+    pub ohp: f64,
+    /// Covered-hole weight, `cvhp_`.
+    pub cvhp: f64,
+    /// Line-clear bonus weight, `lb_`.
+    pub lb: f64,
+}
+
+impl Default for Penalties {
+    /// The base weights (`BTComputer.C:45-54`), before any weapon retuning.
+    fn default() -> Penalties {
+        Penalties {
+            vp: VARIANCE_PENALTY,
+            hp: HEIGHT_PENALTY,
+            chp: CLOSED_HOLE_PENALTY,
+            ohp: OPEN_HOLE_PENALTY,
+            cvhp: COVERED_HOLE_PENALTY,
+            lb: LINE_BONUS,
+        }
+    }
+}
+
+impl Penalties {
+    /// The penalty weights retuned for the weapons currently active on `game`'s
+    /// own board, faithful to the `BT_WPN_ON` retuning in BTComputer.C:369-424.
+    /// Each active weapon's factors are applied once; they compose multiplicatively
+    /// (the original applies them incrementally on activation and reverts on
+    /// expiry, which nets to the same product over the active set).
+    pub fn for_active_weapons(game: &Game) -> Penalties {
+        let mut p = Penalties::default();
+        let on = |t: WeaponToken| game.weapon_active(t);
+        // Force: cleared rows do not collapse, so push height/variance hard and
+        // chase line clears (vp x2, hp x4, lb x4).
+        if on(WeaponToken::Force) {
+            p.vp *= 2.0;
+            p.hp *= 4.0;
+            p.lb *= 4.0;
+        }
+        // FourByFour: a 4x4 hollow box looms; keep flat and low (hp x2, vp x2).
+        if on(WeaponToken::FourByFour) {
+            p.hp *= 2.0;
+            p.vp *= 2.0;
+        }
+        // Bottle: the neck narrows the playfield, so tolerate holes and fear
+        // height (ohp /10, chp /10, hp x2).
+        if on(WeaponToken::Bottle) {
+            p.ohp /= 10.0;
+            p.chp /= 10.0;
+            p.hp *= 2.0;
+        }
+        // NoDice: deprived of square pieces, so weight a smooth surface (vp x4).
+        if on(WeaponToken::NoDice) {
+            p.vp *= 4.0;
+        }
+        // FallOut: bottom lines keep vanishing, so chase clears and fear height
+        // (lb x2, hp x2).
+        if on(WeaponToken::FallOut) {
+            p.lb *= 2.0;
+            p.hp *= 2.0;
+        }
+        p
+    }
+}
+
+// ---------------------------------------------------------------------------
 // eval_board
 // ---------------------------------------------------------------------------
 
@@ -102,6 +187,12 @@ const MIDLINE: i32 = 14;
 /// value = variance + cov_hole_pen + hole_pen + height_pen - line_bonus
 /// ```
 pub fn eval_board(board: &Board) -> f64 {
+    eval_board_with(board, &Penalties::default())
+}
+
+/// [`eval_board`] with explicit penalty weights, so the single-player Ernie can
+/// retune them for the weapons active on its board (`Penalties::for_active_weapons`).
+pub fn eval_board_with(board: &Board, pen: &Penalties) -> f64 {
     let w = board.width;
     let h = board.height;
 
@@ -151,7 +242,7 @@ pub fn eval_board(board: &Board) -> f64 {
     // Fraction term for variance: (1 - top/h)^3
     // BTCBoard::eval: variance_ = variance() * vp * (1-f)^3  where f = top/h
     let fraction_top = top as f64 / h as f64;
-    let variance = variance_raw * VARIANCE_PENALTY
+    let variance = variance_raw * pen.vp
         * (1.0 - fraction_top)
         * (1.0 - fraction_top)
         * (1.0 - fraction_top);
@@ -241,16 +332,15 @@ pub fn eval_board(board: &Board) -> f64 {
         }
     }
 
-    let hole_pen = closed_holes as f64 * CLOSED_HOLE_PENALTY
-        + open_holes as f64 * OPEN_HOLE_PENALTY;
-    cov_hole_pen *= COVERED_HOLE_PENALTY;
+    let hole_pen = closed_holes as f64 * pen.chp + open_holes as f64 * pen.ohp;
+    cov_hole_pen *= pen.cvhp;
 
     // --- Height penalty ---------------------------------------------------
     // BTCBoard::eval: fraction = 1 - (j + piece_top) / h
     //                 height_pen = fraction^2 * hp
     // We use the global top (no active piece context).
     let fraction_height = 1.0 - (top as f64 / h as f64);
-    let height_pen = fraction_height * fraction_height * HEIGHT_PENALTY;
+    let height_pen = fraction_height * fraction_height * pen.hp;
 
     // --- Line bonus -------------------------------------------------------
     // Count lines that would be cleared if the board were checked right now.
@@ -272,9 +362,9 @@ pub fn eval_board(board: &Board) -> f64 {
     let line_bonus = if lines_cleared > 0 {
         let no_tetri = top < MIDLINE; // conservative: always use safe branch
         if no_tetri || top < MIDLINE {
-            LINE_BONUS * lines_cleared as f64 * (1.0 - fraction_top)
+            pen.lb * lines_cleared as f64 * (1.0 - fraction_top)
         } else {
-            LINE_BONUS * (-4.0 + lines_cleared as f64) * fraction_top
+            pen.lb * (-4.0 + lines_cleared as f64) * fraction_top
         }
     } else {
         0.0
@@ -374,6 +464,22 @@ pub fn best_placement(board: &Board, piece: &Piece) -> Placement {
     // `checkMove`'s centre-out DFS. eval_board: lower is better.
     for_each_landing(board, piece, |pl, b, _lines| {
         let score = eval_board(b);
+        if score < best_score {
+            best_score = score;
+            best = pl;
+        }
+    });
+    best
+}
+
+/// Like [`best_placement`] but with explicit penalty weights, so Ernie can retune
+/// them for the weapons active on its board (`Penalties::for_active_weapons`). With
+/// `Penalties::default()` this is identical to [`best_placement`].
+pub fn best_placement_tuned(board: &Board, piece: &Piece, pen: &Penalties) -> Placement {
+    let mut best_score = f64::MAX;
+    let mut best = Placement { x: piece.x, orientation: 0 };
+    for_each_landing(board, piece, |pl, b, _lines| {
+        let score = eval_board_with(b, pen);
         if score < best_score {
             best_score = score;
             best = pl;
@@ -532,14 +638,23 @@ fn for_each_landing(board: &Board, piece: &Piece, mut visit: impl FnMut(Placemen
 /// the best placement computed by [`best_placement`].
 #[derive(Clone, Debug)]
 pub struct Computer {
-    // Reserved for future difficulty / move-delay extension.
-    _priv: (),
+    /// The economy/launch engine (the commando orders system). Drives what Ernie
+    /// buys in the bazaar and when it launches, separate from the placement search.
+    strategy: Strategy,
 }
 
 impl Computer {
-    /// Create a new Computer player (equivalent to `BTComputer::reset()`).
-    pub fn new() -> Computer {
-        Computer { _priv: () }
+    /// Create a new Computer player (equivalent to `BTComputer::reset()`). `seed`
+    /// seeds the strategy's weapon-pick RNG, kept separate from the engine's piece
+    /// RNG so weapon choices do not perturb the piece stream.
+    pub fn new(seed: u64) -> Computer {
+        Computer { strategy: Strategy::new(seed) }
+    }
+
+    /// Shop the bazaar: buy weapons per the whitelist/combo logic and queue their
+    /// launch orders. Call once when Ernie enters the bazaar.
+    pub fn shop(&mut self, game: &mut Game) {
+        self.strategy.go_shopping(game);
     }
 
     /// Drive `game`'s current piece to the best placement.
@@ -560,12 +675,19 @@ impl Computer {
         if game.is_game_over() {
             return;
         }
+        // Fire any weapon orders whose trigger is now met, before placing the piece
+        // (BTComputer::run calls activateCommando each piece). Held while
+        // Mirror-cursed.
+        self.strategy.activate_commando(game);
         let piece = match game.current_piece() {
             Some(p) => p.clone(),
             None => return,
         };
 
-        let placement = best_placement(game.board(), &piece);
+        // Retune the penalty weights for the weapons currently active on Ernie's
+        // board (BTComputer.C:369-508), so the stacker adapts under attack.
+        let pen = Penalties::for_active_weapons(game);
+        let placement = best_placement_tuned(game.board(), &piece, &pen);
 
         // --- Rotate to target orientation ---
         let orientations = piece.orientations.max(1);
@@ -607,7 +729,7 @@ impl Computer {
 
 impl Default for Computer {
     fn default() -> Self {
-        Computer::new()
+        Computer::new(0)
     }
 }
 
@@ -891,7 +1013,7 @@ mod tests {
             // No input; pieces fall freely.
         });
 
-        let mut ernie = Computer::new();
+        let mut ernie = Computer::new(1);
         let (ai_pieces, _) = run_game(Game::new(SEED), |game| {
             ernie.take_turn(game);
         });
@@ -909,7 +1031,7 @@ mod tests {
     fn ai_clears_lines() {
         const SEED: u64 = 123;
 
-        let mut ernie = Computer::new();
+        let mut ernie = Computer::new(1);
         let (_, total_lines) = run_game(Game::new(SEED), |game| {
             ernie.take_turn(game);
         });
