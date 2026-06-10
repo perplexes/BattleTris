@@ -131,8 +131,15 @@ export interface OpponentLeftMsg { type: 'opponentLeft'; }
 export interface HeartbeatMsg { type: 'heartbeat'; }
 
 /** Every frame the server can send on the lobby/match socket. */
+/** A cross-player effect the server applied to its copy of our board (an opponent
+ *  weapon arriving, the opponent's score mirror, a funds credit), forwarded for the
+ *  client to apply to its own local sim. `input` is the serde form of a bt_replay
+ *  Input; the client hands it to `WasmClient.apply_event` verbatim. */
+export interface EventMsg { type: 'event'; input: unknown; }
+
 export type ServerMessage =
     | StatsMsg
+    | EventMsg
     | PlayersMsg
     | ChallengedMsg
     | ChallengeDeclinedMsg

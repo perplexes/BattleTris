@@ -965,6 +965,21 @@ async fn run_bout(state: Shared, pb: PendingBout) {
         if bout.take_dirty() {
             want_keyframe = true;
         }
+        // Forward the relay's cross-player events to each side's client, in order, so
+        // its local sim applies the same effect this tick (the model-B event channel).
+        // Additive for now: the reconciliation keyframe still rides the snapshots below
+        // and overwrites with the same authoritative truth, so this is safe to ship
+        // before the keyframe cadence is cut back (stage 3).
+        if connected[0] {
+            for ev in bout.take_events_for(Side::A) {
+                let _ = tx_a.send(Message::Text(json!({"type":"event","input": ev}).to_string()));
+            }
+        }
+        if connected[1] {
+            for ev in bout.take_events_for(Side::B) {
+                let _ = tx_b.send(Message::Text(json!({"type":"event","input": ev}).to_string()));
+            }
+        }
 
         if bout.is_over() {
             // Final frame carries a keyframe so both clients settle on the end state.

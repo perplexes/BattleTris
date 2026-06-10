@@ -980,6 +980,12 @@ async function onSignalMessage(ev: MessageEvent) {
         if (authoritative && game) applySnapshot(msg);
         return;
     }
+    if (msg.type === 'event') {
+        // A cross-player effect the server applied to our board; apply it to the local
+        // sim so an opponent weapon lands in our pending queue without a keyframe snap.
+        if (authoritative && game) (game as WasmClient).apply_event(JSON.stringify(msg.input));
+        return;
+    }
 
     if (msg.type === 'rating') {
         const conservative = (msg.mu - 3 * msg.sigma).toFixed(1);

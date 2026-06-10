@@ -370,6 +370,14 @@ impl Bout {
         self.versus.take_dirty()
     }
 
+    /// Drain the cross-player events the relay produced for `side` on the last tick,
+    /// as the wire `Input`s the host forwards to that side's client. The client applies
+    /// them to its own local sim (the model-B event channel), so the same effects that
+    /// landed on the server's copy land on the client's without a keyframe snap.
+    pub fn take_events_for(&mut self, side: Side) -> Vec<Input> {
+        self.versus.take_outbox(side).into_iter().map(Input::from).collect()
+    }
+
     /// 0 = ongoing, 1 = A won, 2 = B won.
     pub fn result(&self) -> i32 {
         self.versus.result()

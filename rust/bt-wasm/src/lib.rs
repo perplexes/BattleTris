@@ -442,6 +442,14 @@ impl WasmClient {
         self.inner.on_snapshot(ack as u64, you_bazaar, opp_bazaar, kf);
     }
 
+    /// Apply a server `event` frame: a cross-player effect (an opponent weapon, the
+    /// opponent's score mirror, a funds credit) the server already applied to its copy.
+    /// `input_json` is the frame's `input` field. Applied to the local sim without
+    /// touching the prediction bookkeeping (the model-B event channel).
+    pub fn apply_event(&mut self, input_json: &str) {
+        self.inner.apply_event_json(input_json);
+    }
+
     /// Is a bazaar barrier up (either side shopping)? Gameplay is frozen while true.
     pub fn barrier(&self) -> bool {
         self.inner.barrier()

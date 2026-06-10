@@ -180,6 +180,20 @@ impl Predictor {
     pub fn apply_event(&mut self, input: &Input) {
         input.apply_to_game(&mut self.game);
     }
+
+    /// Parse a server `event` frame's `input` field (the serde form of an `Input`) and
+    /// [`apply_event`](Self::apply_event) it. A malformed value is ignored: the
+    /// reconciliation keyframe still carries the authoritative state, so a dropped event
+    /// cannot desync the client past the next keyframe. Returns whether it parsed.
+    pub fn apply_event_json(&mut self, input_json: &str) -> bool {
+        match serde_json::from_str::<Input>(input_json) {
+            Ok(input) => {
+                self.apply_event(&input);
+                true
+            }
+            Err(_) => false,
+        }
+    }
 }
 
 /// The shopping inputs (Buy/Sell): the gameplay-affecting actions allowed while
