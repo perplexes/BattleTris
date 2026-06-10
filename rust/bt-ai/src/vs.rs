@@ -179,10 +179,13 @@ impl VsComputer {
     /// the two modes stay consistent. (Mirror is offensive: launching it curses
     /// the opponent; a cursed launcher's own weapons backfire or fizzle.)
     fn deliver(&mut self, token: WeaponToken, attacker: Side) {
-        match attacker {
+        // `deliver_weapon` now reports what it delivered (for the server's event
+        // channel); the local vs-Ernie match applies the effect directly and needs
+        // nothing back, so the report is dropped.
+        let _ = match attacker {
             Side::Player => bt_core::deliver_weapon(&mut self.player, &mut self.ai, token),
             Side::Ai => bt_core::deliver_weapon(&mut self.ai, &mut self.player, token),
-        }
+        };
     }
 
     #[cfg(test)]

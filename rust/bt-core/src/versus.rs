@@ -74,17 +74,44 @@ pub fn mirror_nullifies(token: WeaponToken) -> bool {
 /// Keating credits the attacker its launch-time funds snapshot here and queues
 /// only the victim's seizure; every other weapon is queued on its target and
 /// takes effect at that target's next piece lock (the `weapq_` model).
-pub fn deliver_weapon(attacker: &mut Game, victim: &mut Game, token: WeaponToken) {
+pub fn deliver_weapon(attacker: &mut Game, victim: &mut Game, token: WeaponToken) -> Delivery {
     if attacker.weapon_active(WeaponToken::Mirror) {
         if mirror_nullifies(token) {
-            return; // fizzles against the launcher's own mirror curse
+            return Delivery::default(); // fizzles against the launcher's own mirror curse
         }
         // Backfires: the effect is queued onto the cursed launcher's own next
         // lock instead of the victim's.
-        apply_weapon(attacker, victim, token, Recipient::Attacker);
-        return;
+        return apply_weapon(attacker, victim, token, Recipient::Attacker);
     }
-    apply_weapon(attacker, victim, token, Recipient::Victim);
+    apply_weapon(attacker, victim, token, Recipient::Victim)
+}
+
+/// What [`deliver_weapon`] did to the two games, so the relay can emit the matching
+/// cross-player event(s) for the affected side. All fields are relative to the
+/// `(attacker, victim)` passed in. Swap and Susan record nothing here: they exchange
+/// data the client cannot reconstruct from a token, so they ride a keyframe instead.
+#[derive(Clone, Copy, Default)]
+pub struct Delivery {
+    /// A weapon queued onto the VICTIM's next lock (the normal case).
+    pub queued_on_victim: Option<WeaponToken>,
+    /// A weapon queued onto the ATTACKER's next lock (a Mirror backfire).
+    pub queued_on_attacker: Option<WeaponToken>,
+    /// Funds credited to the ATTACKER (Keating's launch-snapshot credit).
+    pub attacker_credit: Option<i64>,
+}
+
+/// A cross-player effect the relay applied to one side's game, captured so the host
+/// can forward it to that side's client to apply to its own local sim. Mirrors the
+/// apply-side `bt_replay::Input` variants without bt-core depending on bt-replay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RelayEvent {
+    /// A weapon queued onto this side's next lock (`Game::receive_weapon`).
+    ReceiveWeapon(WeaponToken),
+    /// This side's opponent-score mirror updated (`Game::receive_op_score`); funds are
+    /// redacted (a client never learns the opponent's funds except through a spy).
+    ReceiveOpScore { score: i64, lines: i64 },
+    /// Funds credited to this side (a Mondale tax or a Keating launch credit).
+    AddFunds(i64),
 }
 
 /// Which player a (non-Swap/Susan) weapon's effect lands on once Mirror has been
@@ -100,7 +127,12 @@ enum Recipient {
 
 /// Apply `token` after Mirror resolution: the symmetric exchanges act on both
 /// boards at once; everything else is queued onto whichever player `to` names.
-fn apply_weapon(attacker: &mut Game, victim: &mut Game, token: WeaponToken, to: Recipient) {
+fn apply_weapon(
+    attacker: &mut Game,
+    victim: &mut Game,
+    token: WeaponToken,
+    to: Recipient,
+) -> Delivery {
     match token {
         // Swap/Susan exchange between the two players, so they ignore `to`.
         // (They never arrive here while the attacker is cursed, as both are on the
@@ -111,13 +143,20 @@ fn apply_weapon(attacker: &mut Game, victim: &mut Game, token: WeaponToken, to: 
         // the exchange lands at a clean boundary, never under a falling piece.
         // Susan trades arsenals immediately, which the original also does on
         // arsenal-packet receipt (not at a lock; BTWeaponManager.C:104-110).
+        //
+        // Neither records a RelayEvent: the client can't reconstruct the exchanged
+        // board / arsenal from a token, so they ride a keyframe (Delivery::default).
         WeaponToken::Swap => {
             let a_cells = attacker.export_board();
             let v_cells = victim.export_board();
             victim.queue_board_swap(a_cells);
             attacker.queue_board_swap(v_cells);
+            Delivery::default()
         }
-        WeaponToken::Susan => attacker.swap_arsenal_with(victim),
+        WeaponToken::Susan => {
+            attacker.swap_arsenal_with(victim);
+            Delivery::default()
+        }
         // Keating credits the attacker the victim's funds as of LAUNCH (the
         // attacker's cached `op_funds` in the original, BTScoreManager.C:110-111,
         // 151-153), while the victim is zeroed only when the weapon activates at
@@ -126,12 +165,24 @@ fn apply_weapon(attacker: &mut Game, victim: &mut Game, token: WeaponToken, to: 
         // amount need not equal the seized amount. Keating is mirror-nullified, so
         // `to` is always Victim here.
         WeaponToken::Keating => {
-            attacker.add_funds(victim.score().funds);
+            let credit = victim.score().funds;
+            attacker.add_funds(credit);
             victim.receive_weapon(token);
+            Delivery {
+                queued_on_victim: Some(token),
+                attacker_credit: Some(credit),
+                ..Delivery::default()
+            }
         }
         _ => match to {
-            Recipient::Attacker => attacker.receive_weapon(token),
-            Recipient::Victim => victim.receive_weapon(token),
+            Recipient::Attacker => {
+                attacker.receive_weapon(token);
+                Delivery { queued_on_attacker: Some(token), ..Delivery::default() }
+            }
+            Recipient::Victim => {
+                victim.receive_weapon(token);
+                Delivery { queued_on_victim: Some(token), ..Delivery::default() }
+            }
         },
     }
 }
@@ -156,6 +207,10 @@ pub struct Versus {
     /// pick up (the spy reveal is a host-level concern handled outside the board). A Vec so
     /// several launches drained in one server tick all accumulate.
     spy_launch: [Vec<WeaponToken>; 2],
+    /// Cross-player effects the relay applied to each side's game this tick (A = [0],
+    /// B = [1]), for the host to forward to that side's client so its local sim applies
+    /// the same effect (the model-B event channel). Drained with [`Versus::take_outbox`].
+    outbox: [Vec<RelayEvent>; 2],
 }
 
 impl Versus {
@@ -168,7 +223,18 @@ impl Versus {
             result: 0,
             dirty: false,
             spy_launch: [Vec::new(), Vec::new()],
+            outbox: [Vec::new(), Vec::new()],
         }
+    }
+
+    /// Take (and clear) the cross-player events the relay applied to `side`'s game on
+    /// the last tick, in order. The host forwards them to that side's client so its
+    /// local sim applies the same effects without waiting for a keyframe.
+    pub fn take_outbox(&mut self, side: Side) -> Vec<RelayEvent> {
+        std::mem::take(&mut self.outbox[match side {
+            Side::A => 0,
+            Side::B => 1,
+        }])
     }
 
     /// Take (and clear) the "client can't predict this" flag, set by the last
@@ -236,6 +302,12 @@ impl Versus {
     }
 
     /// Wire weapons / scores / funds between the two boards and latch the result.
+    ///
+    /// Besides applying each cross-player effect, this records it in the per-side
+    /// `outbox` (the host forwards those to the client whose local sim must apply the
+    /// same effect). The two halves are symmetric: `A`'s events act on `B` (or backfire
+    /// onto `A`), and the matching events are recorded for whichever side received
+    /// them. Indices: `A = 0`, `B = 1`.
     fn relay(&mut self) {
         for e in self.a.take_events() {
             match e {
@@ -249,15 +321,18 @@ impl Versus {
                             self.spy_launch[0].push(t);
                         }
                     } else {
-                        deliver_weapon(&mut self.a, &mut self.b, t);
+                        let d = deliver_weapon(&mut self.a, &mut self.b, t);
+                        self.record_delivery(d, 0, 1);
                     }
                     self.dirty = true;
                 }
                 GameEvent::Scored { score, lines, funds } => {
-                    self.b.receive_op_score(score, lines, funds)
+                    self.b.receive_op_score(score, lines, funds);
+                    self.outbox[1].push(RelayEvent::ReceiveOpScore { score, lines });
                 }
                 GameEvent::FundsStolen(amount) => {
                     self.b.add_funds(amount);
+                    self.outbox[1].push(RelayEvent::AddFunds(amount));
                     self.dirty = true;
                 }
                 GameEvent::EnterBazaar => self.dirty = true,
@@ -276,21 +351,38 @@ impl Versus {
                             self.spy_launch[1].push(t);
                         }
                     } else {
-                        deliver_weapon(&mut self.b, &mut self.a, t);
+                        let d = deliver_weapon(&mut self.b, &mut self.a, t);
+                        self.record_delivery(d, 1, 0);
                     }
                     self.dirty = true;
                 }
                 GameEvent::Scored { score, lines, funds } => {
-                    self.a.receive_op_score(score, lines, funds)
+                    self.a.receive_op_score(score, lines, funds);
+                    self.outbox[0].push(RelayEvent::ReceiveOpScore { score, lines });
                 }
                 GameEvent::FundsStolen(amount) => {
                     self.a.add_funds(amount);
+                    self.outbox[0].push(RelayEvent::AddFunds(amount));
                     self.dirty = true;
                 }
                 GameEvent::EnterBazaar => self.dirty = true,
                 GameEvent::GameOver if self.result == 0 => self.result = 1, // B topped out → A wins
                 _ => {}
             }
+        }
+    }
+
+    /// Record a [`deliver_weapon`] outcome into the outbox, given the attacker and
+    /// victim side indices for this delivery.
+    fn record_delivery(&mut self, d: Delivery, attacker_idx: usize, victim_idx: usize) {
+        if let Some(t) = d.queued_on_victim {
+            self.outbox[victim_idx].push(RelayEvent::ReceiveWeapon(t));
+        }
+        if let Some(t) = d.queued_on_attacker {
+            self.outbox[attacker_idx].push(RelayEvent::ReceiveWeapon(t));
+        }
+        if let Some(amount) = d.attacker_credit {
+            self.outbox[attacker_idx].push(RelayEvent::AddFunds(amount));
         }
     }
 }

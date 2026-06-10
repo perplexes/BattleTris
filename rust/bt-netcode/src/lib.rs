@@ -169,6 +169,17 @@ impl Predictor {
             }
         }
     }
+
+    /// Apply a server-sent cross-player event (a weapon arriving, the opponent's score
+    /// mirror, a funds credit) to the local sim. Unlike [`predict`](Self::predict) this
+    /// is NOT a local prediction: it is an authoritative effect the server already
+    /// applied to its copy, so it does not touch `input_seq` or `unacked` and is never
+    /// replayed after a keyframe (the keyframe already contains its effect). This is
+    /// the model-B path that keeps the opponent's weapons landing in the local sim
+    /// without a keyframe snap.
+    pub fn apply_event(&mut self, input: &Input) {
+        input.apply_to_game(&mut self.game);
+    }
 }
 
 /// The shopping inputs (Buy/Sell): the gameplay-affecting actions allowed while

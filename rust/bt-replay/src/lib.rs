@@ -155,6 +155,23 @@ impl Input {
     }
 }
 
+/// Map a relay's cross-player effect ([`bt_core::RelayEvent`]) to the `Input` the
+/// host sends to the affected side's client. The client applies it to its own local
+/// sim (the model-B event channel), so the same effect that landed on the server's
+/// copy lands on the client's copy. `ReceiveOpScore` carries `funds: 0`: a client
+/// never learns the opponent's funds except through a spy.
+impl From<bt_core::RelayEvent> for Input {
+    fn from(e: bt_core::RelayEvent) -> Input {
+        match e {
+            bt_core::RelayEvent::ReceiveWeapon(t) => Input::ReceiveWeapon(t.index() as i32),
+            bt_core::RelayEvent::ReceiveOpScore { score, lines } => {
+                Input::ReceiveOpScore { score, lines, funds: 0 }
+            }
+            bt_core::RelayEvent::AddFunds(amount) => Input::AddFunds(amount),
+        }
+    }
+}
+
 /// Which game a recording came from. Selects which engine [`ReplayPlayer`]
 /// rebuilds: a lone [`Game`] for the single-board modes, or a full
 /// [`bt_ai::VsComputer`] match so Ernie is re-simulated rather than recorded.
