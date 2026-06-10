@@ -646,6 +646,23 @@ fn handle_text(
                 }
             }
         }
+        // A cross-player effect the server applied to its copy of our board (an
+        // opponent weapon arriving, the opponent's score mirror, a funds credit),
+        // forwarded for us to apply to our own local sim. This is the model-B path:
+        // the effect is authoritative (already applied server-side), not a local
+        // prediction, so it goes straight into the sim without touching the input
+        // seq / unacked bookkeeping and is never replayed after a keyframe. `input`
+        // is the serde form of a `bt_replay::Input`.
+        Some("event") => {
+            if let Some(state) = ms.as_mut() {
+                if let Some(input) = v.get("input").cloned() {
+                    match serde_json::from_value::<Input>(input) {
+                        Ok(inp) => state.predictor.apply_event(&inp),
+                        Err(e) => eprintln!("[{}] dropped malformed event: {e}", persona.suffix),
+                    }
+                }
+            }
+        }
         _ => {}
     }
 }

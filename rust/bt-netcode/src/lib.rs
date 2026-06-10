@@ -148,6 +148,10 @@ impl Predictor {
     /// local state and replays the still-unacked tail on top, so a predicted input
     /// the server hasn't confirmed yet is preserved rather than snapping back.
     ///
+    /// When no keyframe is present, an authoritative bazaar-exit edge (`you_bazaar`
+    /// going true to false) releases the local sim instead: see the bazaar-exit note
+    /// below.
+    ///
     /// [`barrier`]: Self::barrier
     pub fn on_snapshot(
         &mut self,
@@ -156,6 +160,14 @@ impl Predictor {
         opp_bazaar: bool,
         keyframe: Option<&[u8]>,
     ) {
+        // Detect the authoritative bazaar-exit edge before overwriting the stored flag.
+        // The local sim entered the bazaar on its own when it reached the line
+        // threshold, but it never applies `LeaveBazaar` locally: the barrier stays up
+        // until BOTH sides leave, which only the server knows. Under model B the
+        // periodic keyframe that used to restore the sim out of the bazaar is gone, so
+        // a plain snapshot is now what carries the release. Without this edge the local
+        // sim would sit `in_bazaar` forever once the server reopened play.
+        let leaving_bazaar = self.you_bazaar && !you_bazaar;
         self.you_bazaar = you_bazaar;
         self.opp_bazaar = opp_bazaar;
         // Discard inputs the server has now applied.
@@ -167,6 +179,11 @@ impl Predictor {
             for (_, input) in &self.unacked {
                 replay_input(&mut self.game, input);
             }
+        } else if leaving_bazaar && self.game.is_in_bazaar() {
+            // No keyframe to restore us out: release the local sim to match the server.
+            // The shop's Buy/Sell were already applied locally during prediction, so
+            // there is nothing to replay here, only the frozen flag to clear.
+            self.game.leave_bazaar();
         }
     }
 
@@ -343,5 +360,69 @@ mod tests {
         p.on_snapshot(0, false, true, None); // opponent shopping → barrier up
         assert!(p.predict(Input::MoveLeft).is_none(), "movement blocked under barrier");
         assert_eq!(p.input_seq(), 0, "nothing sent");
+    }
+
+    /// Drive a fresh game across the bazaar line threshold using the opponent-lines
+    /// path (`combined = op_lines + lines`, fires when it crosses a multiple of
+    /// `BT_LINES_TIL_BAZ` = 20). Two `receive_op_score` calls (19 then 20) set the
+    /// countdown to 1 and then trip it, which is the same `update_bazaar` crossing a
+    /// real bout takes. This is how the local sim enters the bazaar on its own.
+    fn drive_local_into_bazaar(p: &mut Predictor) {
+        p.game_mut().receive_op_score(0, 19, 0);
+        p.game_mut().receive_op_score(0, 20, 0);
+        assert!(p.game().is_in_bazaar(), "setup: local sim should be shopping");
+    }
+
+    #[test]
+    fn bazaar_exit_without_keyframe_releases_the_local_sim() {
+        // The model-B regression guard. The local sim entered the bazaar on its own,
+        // never applies LeaveBazaar locally, and (with periodic keyframes retired) the
+        // server's release now arrives as a plain snapshot. The `you_bazaar` true→false
+        // edge must release the local sim, or it would stay frozen forever.
+        let mut p = Predictor::new(0xBA2AA2);
+        drive_local_into_bazaar(&mut p);
+
+        // Server confirms we're shopping (no keyframe). Barrier up; still in the bazaar.
+        p.on_snapshot(0, true, false, None);
+        assert!(p.barrier(), "barrier up while shopping");
+        assert!(p.game().is_in_bazaar(), "local sim still shopping under the barrier");
+
+        // Server reopens play with a plain snapshot (no keyframe to restore us out).
+        p.on_snapshot(0, false, false, None);
+        assert!(!p.barrier(), "barrier cleared");
+        assert!(
+            !p.game().is_in_bazaar(),
+            "the bazaar-exit edge must release the local sim without a keyframe"
+        );
+    }
+
+    #[test]
+    fn bazaar_exit_via_keyframe_still_releases() {
+        // The pre-existing path: when a keyframe IS present on the exit, the restore
+        // itself carries the not-shopping state, so the manual leave must not be needed
+        // (and the else-branch is correctly skipped). Guards against the new edge
+        // double-handling or fighting the restore.
+        let seed = 0x5EED_F00D;
+        let mut p = Predictor::new(seed);
+        drive_local_into_bazaar(&mut p);
+        p.on_snapshot(0, true, false, None);
+        assert!(p.game().is_in_bazaar());
+
+        // A keyframe of a fresh (not-shopping) game releases the sim via restore.
+        let authoritative = Game::new(seed).snapshot_bytes();
+        p.on_snapshot(0, false, false, Some(&authoritative));
+        assert!(!p.game().is_in_bazaar(), "keyframe restore leaves the bazaar");
+    }
+
+    #[test]
+    fn no_spurious_leave_when_never_in_bazaar() {
+        // A you_bazaar true→false edge while the local sim was never shopping must be a
+        // no-op: `leave_bazaar` is gated on `game.is_in_bazaar()`, so a stray edge can't
+        // corrupt a normally-playing sim.
+        let mut p = Predictor::new(7);
+        assert!(!p.game().is_in_bazaar());
+        p.on_snapshot(0, true, false, None); // server claims shopping; local sim is not
+        p.on_snapshot(0, false, false, None); // exit edge
+        assert!(!p.game().is_in_bazaar(), "still playing; nothing to leave");
     }
 }

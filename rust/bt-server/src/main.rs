@@ -892,14 +892,14 @@ async fn run_bout(state: Shared, pb: PendingBout) {
                     let _ = tx.send(Message::Text(
                         json!({"type":"matchStart","side":side_str,"seed":seed,"opponent":opp,"match_id":match_id}).to_string(),
                     ));
-                    let _ = tx.send(Message::Text(bout.snapshot_message(side, true)));
+                    let _ = tx.send(Message::Text(bout.snapshot_message(side, true, true)));
                     // Both back? Lift the freeze, resync both boards, tell both to resume.
                     if connected[0] && connected[1] {
                         grace_until = None;
                         let resumed = json!({"type":"opponentResumed"}).to_string();
-                        let _ = tx_a.send(Message::Text(bout.snapshot_message(Side::A, true)));
+                        let _ = tx_a.send(Message::Text(bout.snapshot_message(Side::A, true, true)));
                         let _ = tx_a.send(Message::Text(resumed.clone()));
-                        let _ = tx_b.send(Message::Text(bout.snapshot_message(Side::B, true)));
+                        let _ = tx_b.send(Message::Text(bout.snapshot_message(Side::B, true, true)));
                         let _ = tx_b.send(Message::Text(resumed));
                         want_keyframe = true;
                     }
@@ -967,9 +967,10 @@ async fn run_bout(state: Shared, pb: PendingBout) {
         }
         // Forward the relay's cross-player events to each side's client, in order, so
         // its local sim applies the same effect this tick (the model-B event channel).
-        // Additive for now: the reconciliation keyframe still rides the snapshots below
-        // and overwrites with the same authoritative truth, so this is safe to ship
-        // before the keyframe cadence is cut back (stage 3).
+        // This is now the PRIMARY path: with the periodic keyframe retired above, an
+        // ordinary weapon / funds tax / op-score reaches the client only as an event.
+        // A keyframe still corrects the rare unpredictable cases (bazaar, Swap/Susan,
+        // rejoin), but it no longer rides every snapshot to paper over a missed event.
         if connected[0] {
             for ev in bout.take_events_for(Side::A) {
                 let _ = tx_a.send(Message::Text(json!({"type":"event","input": ev}).to_string()));
@@ -983,21 +984,23 @@ async fn run_bout(state: Shared, pb: PendingBout) {
 
         if bout.is_over() {
             // Final frame carries a keyframe so both clients settle on the end state.
-            let _ = tx_a.send(Message::Text(bout.snapshot_message(Side::A, true)));
-            let _ = tx_b.send(Message::Text(bout.snapshot_message(Side::B, true)));
+            let _ = tx_a.send(Message::Text(bout.snapshot_message(Side::A, true, true)));
+            let _ = tx_b.send(Message::Text(bout.snapshot_message(Side::B, true, true)));
             break Some(bout.result() == 1); // 1 = A won
         }
         // Snapshots go out at ~30Hz (every other 16ms tick); this is also where a
-        // client disconnect is detected (the send fails). A reconciliation keyframe
-        // rides the first frame, the ~2Hz heartbeat, and any frame after an
-        // unpredictable cross-player event, so corrections are prompt.
+        // client disconnect is detected (the send fails). Under model B a keyframe is
+        // sent only on a trigger (first frame, bazaar entry, Swap/Susan, rejoin, debug
+        // grant, final), NOT periodically: the client tracks the server through the
+        // event channel between keyframes. The spy reveal rides its own ~7.5Hz cadence.
         if frame.is_multiple_of(2) {
-            let kf = want_keyframe || frame.is_multiple_of(32);
+            let kf = want_keyframe;
             if kf {
                 want_keyframe = false;
             }
-            let a_ok = tx_a.send(Message::Text(bout.snapshot_message(Side::A, kf))).is_ok();
-            let b_ok = tx_b.send(Message::Text(bout.snapshot_message(Side::B, kf))).is_ok();
+            let send_spy = frame.is_multiple_of(8);
+            let a_ok = tx_a.send(Message::Text(bout.snapshot_message(Side::A, kf, send_spy))).is_ok();
+            let b_ok = tx_b.send(Message::Text(bout.snapshot_message(Side::B, kf, send_spy))).is_ok();
             connected = [a_ok, b_ok];
             if !a_ok || !b_ok {
                 // A *bot* dropping (no human is down) forfeits immediately. A human

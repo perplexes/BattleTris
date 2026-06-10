@@ -70,10 +70,38 @@ proptest! {
         let mut client = Predictor::new(seed_a);
 
         for o in &ops {
-            // The bazaar barrier freezes the whole match; mirroring it on the client is
-            // a later stage, so stop the check once either side enters a bazaar.
+            // The bazaar barrier freezes the whole match. Under model B the client
+            // mirrors it from the snapshot's `you_bazaar`/`opp_bazaar` flags (no
+            // keyframe), and the local sim, which entered the bazaar on its own when its
+            // combined lines crossed the threshold, is released by the `you_bazaar`
+            // true->false edge rather than a keyframe restore. Drive one full cycle here:
+            // tell the client it is shopping, resolve the barrier (both players finish
+            // and leave), forward the release, and assert the client left the bazaar AND
+            // stayed in lock-sync across the whole cycle without ever seeing a keyframe.
             if server.game(Side::A).is_in_bazaar() || server.game(Side::B).is_in_bazaar() {
-                break;
+                client.on_snapshot(
+                    client.input_seq(),
+                    server.game(Side::A).is_in_bazaar(),
+                    server.game(Side::B).is_in_bazaar(),
+                    None,
+                );
+                // Both sides finish shopping and leave; the server reopens play.
+                server.game_mut(Side::A).leave_bazaar();
+                server.game_mut(Side::B).leave_bazaar();
+                client.on_snapshot(client.input_seq(), false, false, None);
+                prop_assert!(
+                    !client.game().is_in_bazaar(),
+                    "client local sim stuck in the bazaar after the server reopened play"
+                );
+                prop_assert_eq!(
+                    client.game().lock_seq(), server.game(Side::A).lock_seq(),
+                    "lock_seq diverged across the bazaar"
+                );
+                prop_assert_eq!(
+                    client.game().lock_hash(), server.game(Side::A).lock_hash(),
+                    "lock_hash diverged across the bazaar"
+                );
+                continue;
             }
             match o {
                 // Player inputs: apply to BOTH the server's game A and the client.

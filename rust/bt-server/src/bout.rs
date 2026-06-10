@@ -425,8 +425,8 @@ impl Bout {
 
     /// Build the authoritative snapshot for `side` as a ready-to-send WebSocket
     /// message: the [`Snapshot`] fields serialized with a `{"type":"snapshot"}` tag.
-    pub fn snapshot_message(&self, side: Side, include_keyframe: bool) -> String {
-        let mut v = serde_json::to_value(self.snapshot_for(side, include_keyframe))
+    pub fn snapshot_message(&self, side: Side, include_keyframe: bool, include_spy: bool) -> String {
+        let mut v = serde_json::to_value(self.build_snapshot(side, include_keyframe, include_spy))
             .unwrap_or(serde_json::Value::Null);
         if let Some(obj) = v.as_object_mut() {
             obj.insert("type".into(), serde_json::Value::String("snapshot".into()));
@@ -434,25 +434,34 @@ impl Bout {
         v.to_string()
     }
 
-    /// Build the authoritative snapshot for `side`. `include_keyframe` attaches
-    /// the full-state keyframe (the caller throttles it); otherwise the frame is
-    /// just tick/ack/result/opp and the client renders from its local prediction.
+    /// Build the authoritative snapshot for `side`, with the spy reveal riding the same
+    /// frames as the keyframe (the 2-arg test/inspection view). The wire path uses
+    /// [`build_snapshot`](Self::build_snapshot) to throttle the spy independently.
     pub fn snapshot_for(&self, side: Side, include_keyframe: bool) -> Snapshot {
+        self.build_snapshot(side, include_keyframe, include_keyframe)
+    }
+
+    /// Build the authoritative snapshot for `side`. `include_keyframe` attaches the
+    /// full-state reconciliation keyframe (the caller sends it only on triggers, not
+    /// periodically); `include_spy` attaches the spy reveal (board + funds), throttled
+    /// on its own cadence so it keeps updating now that keyframes are rare. Otherwise
+    /// the frame is just tick/ack/result/opp and the client renders from its local sim.
+    fn build_snapshot(&self, side: Side, include_keyframe: bool, include_spy: bool) -> Snapshot {
         let me = self.versus.game(side);
         let them = self.versus.game(side.other());
         let spy = self.spy[side_idx(side)];
-        // The opponent board and the revealed funds both ride the keyframe frames
+        // The opponent board and the revealed funds ride the `include_spy` frames
         // while spying. The board is sent in FULL, paired with the spy's hide
         // percentage (`spy_hide`); the client flickers it to that accuracy each
         // frame, reproducing the original's per-render spy static. Sending the
         // whole board during an active spy is an accepted exposure: revealing the
         // board is the spy's purpose, and it is bounded to the window the player
         // launched the spy for.
-        let (spy_board, spy_hide) = match (spy, include_keyframe) {
+        let (spy_board, spy_hide) = match (spy, include_spy) {
             (Some((tok, _)), true) => (Some(them.render_ids()), Some(spy_hide_pct(tok))),
             _ => (None, None),
         };
-        let spy_funds = match (spy, include_keyframe) {
+        let spy_funds = match (spy, include_spy) {
             (Some((tok, _)), true) => {
                 let i = side_idx(side);
                 // A deterministic per-tick, per-side noise drives the Ames
@@ -1599,36 +1608,58 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Property (g): `Bout::take_dirty` reports cross-player events. A delivered
-    //   weapon (and funds steal / bazaar entry) is something a client can't predict
-    //   from its own inputs, so the server sets a dirty flag to push a prompt
-    //   keyframe. Nothing pinned `Bout::take_dirty`, so `take_dirty() -> false`
-    //   survived. Here: A launches a weapon at B, a tick DELIVERS it -> take_dirty
-    //   must be true exactly once, then clear.
+    // Property (g): `Bout::take_dirty` reports only the cross-player effects that
+    //   need a full keyframe. Under model B an ordinary weapon (board/funds/score)
+    //   reaches the client through the event channel ([`Bout::take_events_for`]), so
+    //   it must NOT set dirty; only a Swap / Susan exchange (opponent board / arsenal,
+    //   data a token cannot carry) or a bazaar entry does. Here: an ordinary RiseUp
+    //   delivery produces a forwarded event and no dirty, while a Swap delivery sets
+    //   dirty exactly once and then clears.
     // -----------------------------------------------------------------------
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(64))]
 
         #[test]
-        fn take_dirty_fires_on_a_delivered_weapon(
+        fn ordinary_weapon_emits_an_event_and_does_not_mark_dirty(
             seed_a in any::<u64>(),
             seed_b in any::<u64>(),
         ) {
             let mut b = Bout::new(seed_a, seed_b);
             // Drain the start-of-match dirty (if any).
             let _ = b.take_dirty();
-            // A acquires + launches a cross-player weapon at B.
+            // A acquires + launches an ordinary cross-player weapon at B.
             b.versus.game_mut(Side::A).grant_weapon(bt_core::WeaponToken::RiseUp);
             prop_assert!(b.apply_input(Side::A, &Input::LaunchWeapon(0), 1),
                 "the launch input is accepted");
             prop_assert!(!b.take_dirty(),
                 "apply_input alone must not mark dirty (delivery happens in the tick)");
 
-            // The tick relays the launch -> weapon delivered -> dirty set.
+            // The tick relays the launch -> weapon delivered to B as an EVENT, not a
+            // keyframe trigger.
+            b.tick(16);
+            prop_assert!(!b.take_dirty(),
+                "an ordinary weapon rides the event channel, so it must not mark dirty");
+            prop_assert!(!b.take_events_for(Side::B).is_empty(),
+                "the delivery is forwarded to B as an event");
+        }
+
+        #[test]
+        fn swap_marks_dirty_for_a_keyframe(
+            seed_a in any::<u64>(),
+            seed_b in any::<u64>(),
+        ) {
+            let mut b = Bout::new(seed_a, seed_b);
+            let _ = b.take_dirty();
+            // A acquires + launches a Swap at B: it moves B's whole board, which no
+            // token can carry, so the client needs a keyframe.
+            b.versus.game_mut(Side::A).grant_weapon(bt_core::WeaponToken::Swap);
+            prop_assert!(b.apply_input(Side::A, &Input::LaunchWeapon(0), 1),
+                "the launch input is accepted");
+            prop_assert!(!b.take_dirty(), "apply_input alone must not mark dirty");
+
             b.tick(16);
             prop_assert!(b.take_dirty(),
-                "a delivered cross-player weapon must mark the bout dirty");
-            // And it CLEARS after being taken.
+                "a Swap exchange must mark the bout dirty for a keyframe");
             prop_assert!(!b.take_dirty(), "take_dirty must clear after being read");
         }
     }

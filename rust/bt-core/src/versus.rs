@@ -98,6 +98,9 @@ pub struct Delivery {
     pub queued_on_attacker: Option<WeaponToken>,
     /// Funds credited to the ATTACKER (Keating's launch-snapshot credit).
     pub attacker_credit: Option<i64>,
+    /// The delivery exchanged data a client cannot reconstruct from a token (a Swap
+    /// board or a Susan arsenal), so it needs a keyframe rather than an event.
+    pub needs_keyframe: bool,
 }
 
 /// A cross-player effect the relay applied to one side's game, captured so the host
@@ -151,11 +154,11 @@ fn apply_weapon(
             let v_cells = victim.export_board();
             victim.queue_board_swap(a_cells);
             attacker.queue_board_swap(v_cells);
-            Delivery::default()
+            Delivery { needs_keyframe: true, ..Delivery::default() }
         }
         WeaponToken::Susan => {
             attacker.swap_arsenal_with(victim);
-            Delivery::default()
+            Delivery { needs_keyframe: true, ..Delivery::default() }
         }
         // Keating credits the attacker the victim's funds as of LAUNCH (the
         // attacker's cached `op_funds` in the original, BTScoreManager.C:110-111,
@@ -198,10 +201,11 @@ pub struct Versus {
     /// 0 = ongoing, 1 = A won (B topped out), 2 = B won (A topped out). Latched
     /// once set, so the first side to top out decides the match.
     result: i32,
-    /// Set whenever this tick produced something a CLIENT can't predict from its
-    /// own inputs: a cross-player weapon delivery, a funds tax/steal, or a bazaar
-    /// entry. The host reads it via [`Versus::take_dirty`] to push a prompt
-    /// reconciliation keyframe instead of waiting for the periodic heartbeat.
+    /// Set when this tick produced something the client can't apply from an event and
+    /// so needs a full keyframe: a bazaar entry, or a Swap / Susan exchange (which move
+    /// the opponent's board / arsenal, data a token cannot carry). Ordinary weapons,
+    /// funds taxes, and op-score updates ride the event channel ([`Versus::take_outbox`])
+    /// instead. The host reads this via [`Versus::take_dirty`].
     dirty: bool,
     /// Spies launched THIS tick by each side (A = [0], B = [1]), for the host to
     /// pick up (the spy reveal is a host-level concern handled outside the board). A Vec so
@@ -323,8 +327,12 @@ impl Versus {
                     } else {
                         let d = deliver_weapon(&mut self.a, &mut self.b, t);
                         self.record_delivery(d, 0, 1);
+                        // Only a Swap / Susan exchange needs a keyframe; ordinary
+                        // weapons reach the client through the recorded event.
+                        if d.needs_keyframe {
+                            self.dirty = true;
+                        }
                     }
-                    self.dirty = true;
                 }
                 GameEvent::Scored { score, lines, funds } => {
                     self.b.receive_op_score(score, lines, funds);
@@ -333,7 +341,6 @@ impl Versus {
                 GameEvent::FundsStolen(amount) => {
                     self.b.add_funds(amount);
                     self.outbox[1].push(RelayEvent::AddFunds(amount));
-                    self.dirty = true;
                 }
                 GameEvent::EnterBazaar => self.dirty = true,
                 // A topped out → B wins. Latch: a simultaneous double-KO keeps the
@@ -353,8 +360,10 @@ impl Versus {
                     } else {
                         let d = deliver_weapon(&mut self.b, &mut self.a, t);
                         self.record_delivery(d, 1, 0);
+                        if d.needs_keyframe {
+                            self.dirty = true;
+                        }
                     }
-                    self.dirty = true;
                 }
                 GameEvent::Scored { score, lines, funds } => {
                     self.a.receive_op_score(score, lines, funds);
@@ -363,7 +372,6 @@ impl Versus {
                 GameEvent::FundsStolen(amount) => {
                     self.a.add_funds(amount);
                     self.outbox[0].push(RelayEvent::AddFunds(amount));
-                    self.dirty = true;
                 }
                 GameEvent::EnterBazaar => self.dirty = true,
                 GameEvent::GameOver if self.result == 0 => self.result = 1, // B topped out → A wins
@@ -577,13 +585,35 @@ mod tests {
     }
 
     #[test]
-    fn a_cross_player_weapon_marks_the_match_dirty() {
+    fn an_ordinary_weapon_rides_the_event_channel_not_a_keyframe() {
+        // Model B: a token-only weapon (here RiseUp, a board raiser) reaches the client
+        // as a recorded event, so it must NOT mark the match dirty. Marking dirty would
+        // force an unnecessary full keyframe, which is exactly the periodic reconcile
+        // this stage retires. The delivery instead shows up in the victim's outbox.
         let mut v = Versus::new(1, 2);
         assert!(!v.take_dirty(), "clean at the start");
         v.game_mut(Side::A).grant_weapon(WeaponToken::RiseUp);
         v.game_mut(Side::A).launch_weapon(0);
         v.tick(16); // relay delivers the weapon to B
-        assert!(v.take_dirty(), "a delivered weapon marks the match dirty");
+        assert!(!v.take_dirty(), "an ordinary weapon rides the event channel, no keyframe");
+        let events = v.take_outbox(Side::B);
+        assert!(
+            events.iter().any(|e| matches!(e, RelayEvent::ReceiveWeapon(_))),
+            "the delivery is recorded as an event the host forwards to B"
+        );
+    }
+
+    #[test]
+    fn a_swap_marks_the_match_dirty() {
+        // Swap (and Susan) move data a token cannot carry (the opponent's whole board /
+        // arsenal), so they still demand a keyframe and must set dirty. This is the
+        // narrow set the model-B keyframe is kept for.
+        let mut v = Versus::new(1, 2);
+        assert!(!v.take_dirty(), "clean at the start");
+        v.game_mut(Side::A).grant_weapon(WeaponToken::Swap);
+        v.game_mut(Side::A).launch_weapon(0);
+        v.tick(16); // relay queues the board swap on both sides
+        assert!(v.take_dirty(), "a Swap exchange needs a keyframe, so it marks dirty");
         v.tick(16);
         assert!(!v.take_dirty(), "and it clears after being taken");
     }
