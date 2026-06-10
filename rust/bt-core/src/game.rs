@@ -175,6 +175,27 @@ pub struct Game {
     /// Outbound signals produced this tick, drained by the host via
     /// [`Game::take_events`]. The sole channel out to the front-end and the relay.
     events: Vec<GameEvent>,
+
+    /// Lock counter and a hash of the deterministic, lockstep-required state as of
+    /// that lock. Incremented and recomputed at every piece lock in [`Game::place`].
+    /// Two sims processing the same inputs (the server's copy and a client's local
+    /// copy) must agree on `lock_hash` at the same `lock_seq`; a mismatch is the
+    /// divergence signal the netcode resyncs on. The hash deliberately excludes the
+    /// fields a client is allowed to drift on between resyncs (funds and the opponent
+    /// mirror, which the HUD reads from the authoritative snapshot) and the per-tick
+    /// timers and falling-piece position (which differ by latency, not by divergence).
+    lock_seq: u64,
+    lock_hash: u32,
+}
+
+/// Mix `bytes` into an in-progress FNV-1a 32-bit hash. Hand-rolled so `bt-core` stays
+/// dependency-free; the lock hash is a divergence check, not a security primitive, so
+/// FNV-1a's speed and small footprint are the right trade.
+fn fnv_feed(h: &mut u32, bytes: &[u8]) {
+    for &b in bytes {
+        *h ^= b as u32;
+        *h = h.wrapping_mul(0x0100_0193); // FNV prime
+    }
 }
 
 impl Game {
@@ -215,6 +236,8 @@ impl Game {
             in_bazaar: false,
             lines_til_baz: BT_LINES_TIL_BAZ,
             events: Vec::new(),
+            lock_seq: 0,
+            lock_hash: 0,
         };
         g.start_game();
         g
@@ -252,6 +275,54 @@ impl Game {
     /// `weapon_active(Upbyside)` is the signature of a spurious top-out.
     pub fn spawn_origin(&self) -> (i32, i32, i32) {
         (self.def_x, self.def_y, self.delta_y)
+    }
+    /// The lock counter: how many pieces have locked. The netcode pairs it with
+    /// [`Game::lock_hash`] so a client and the server compare hashes at the same lock.
+    pub fn lock_seq(&self) -> u64 {
+        self.lock_seq
+    }
+    /// A hash of the deterministic, lockstep-required state as of the last lock. Equal
+    /// between two sims that processed the same inputs; a mismatch at the same
+    /// [`lock_seq`](Game::lock_seq) means they have diverged (see the field doc for what
+    /// is and is not hashed).
+    pub fn lock_hash(&self) -> u32 {
+        self.lock_hash
+    }
+    /// Recompute the lockstep-state hash (FNV-1a over the board cells, score and lines,
+    /// arsenal, active-weapon flags and remaining durations, the pending weapon queue,
+    /// the pending swap board, and the RNG stream position). Excludes funds, the
+    /// opponent mirror, the per-tick timers, and the falling-piece position: a client
+    /// is allowed to drift on those between resyncs without it counting as divergence.
+    fn lock_hash_of(&self) -> u32 {
+        let mut h: u32 = 0x811c_9dc5; // FNV-1a offset basis
+        for v in self.export_board() {
+            fnv_feed(&mut h, &v.to_le_bytes());
+        }
+        fnv_feed(&mut h, &self.score.score.to_le_bytes());
+        fnv_feed(&mut h, &self.score.lines.to_le_bytes());
+        for v in self.export_arsenal() {
+            fnv_feed(&mut h, &v.to_le_bytes());
+        }
+        for c in self.weapons.raw() {
+            fnv_feed(&mut h, &c.to_le_bytes());
+        }
+        for r in self.remaining {
+            fnv_feed(&mut h, &r.to_le_bytes());
+        }
+        for t in &self.pending {
+            fnv_feed(&mut h, &(t.index() as u32).to_le_bytes());
+        }
+        match &self.pending_board {
+            Some(cells) => {
+                fnv_feed(&mut h, &[1]);
+                for v in cells {
+                    fnv_feed(&mut h, &v.to_le_bytes());
+                }
+            }
+            None => fnv_feed(&mut h, &[0]),
+        }
+        fnv_feed(&mut h, &self.rng.raw().to_le_bytes());
+        h
     }
     /// Whether the player has topped out.
     pub fn is_game_over(&self) -> bool {
@@ -428,6 +499,12 @@ impl Game {
 
             // Next piece (or top-out).
             self.spawn();
+
+            // Mark the lock boundary: advance the counter and snapshot the lockstep
+            // state hash, computed after the flush and the next spawn so it reflects
+            // the fully resolved post-lock state both sims must agree on.
+            self.lock_seq += 1;
+            self.lock_hash = self.lock_hash_of();
         } else {
             // It can fall again (it was slid over a hole during the lock delay):
             // resume falling instead of locking. Advance BOTH the game's position
@@ -819,7 +896,7 @@ impl Game {
     // dependency-free), versioned for forward-compat.
 
     /// Keyframe format version (bump on any layout change).
-    pub const KEYFRAME_VERSION: i64 = 1;
+    pub const KEYFRAME_VERSION: i64 = 2;
 
     /// Serialize the entire game state to a flat `i64` keyframe.
     pub fn snapshot(&self) -> Vec<i64> {
@@ -907,6 +984,10 @@ impl Game {
         o.push(self.board.computer as i64);
         o.push(self.board.idiot as i64);
         o.push(self.board.reason as i64);
+        // The lock counter and hash, so a restored client resumes the divergence check
+        // at the right lock without waiting for the next lock to re-derive them.
+        o.push(self.lock_seq as i64);
+        o.push(self.lock_hash as i64);
         o
     }
 
@@ -1046,6 +1127,8 @@ impl Game {
         let board_computer = c.next() != 0;
         let board_idiot = c.next() != 0;
         let board_reason = c.next() as i16;
+        let lock_seq = c.next() as u64;
+        let lock_hash = c.next() as u32;
         // Reject a malformed (short) or trailing-garbage keyframe before committing.
         if !c.ok || c.i != data.len() {
             return false;
@@ -1089,6 +1172,8 @@ impl Game {
         self.current = current;
         self.pending = pending;
         self.pending_board = pending_board;
+        self.lock_seq = lock_seq;
+        self.lock_hash = lock_hash;
         self.events.clear();
         true
     }
