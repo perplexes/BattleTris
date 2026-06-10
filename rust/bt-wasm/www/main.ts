@@ -44,8 +44,41 @@ let currentSeed: number | null = null;    // the game's RNG seed (shown in the d
 let authSelf: SideStatus | null = null;       // latest authoritative own-status {funds,in_bazaar,lines_til_bazaar}
 let authOpp: OppStatus | null = null;        // latest authoritative opponent view {score,lines,game_over,in_bazaar?}
 let authSpying = false;    // is a spy of ours active (server-authorized)?
-let authSpyBoard: Int32Array | null = null;   // latest server-DEGRADED opponent board (from a keyframe), or null
+let authSpyBoard: Int32Array | null = null;   // latest opponent board (FULL, from a keyframe), or null; degraded client-side per frame
+let authSpyHide = 0;       // percent of spy_board cells to hide each frame (per-spy accuracy: Ames 50, Ace 15, Condor 0)
 let authSpyFunds: number | null = null;       // latest server-computed opponent funds our spy reveals, or null
+// The per-frame spy static: a hide mask over the spy board, re-rolled on a timer
+// so `authSpyHide`% of the opponent's cells blink out and back, reproducing the
+// original's imperfect spy reveal. Reset whenever the spy board clears.
+let spyFlickerMask: Uint8Array | null = null;
+let spyFlickerRolledAt = 0;
+const SPY_FLICKER_MS = 70; // ~14 Hz re-roll: clearly staticky without a strobe
+
+// Degrade the FULL spy board to the spy's accuracy for display: blank `hide`% of
+// the opponent's filled cells, re-rolling which cells are hidden every
+// SPY_FLICKER_MS so the reveal shimmers like the original's imperfect spy feed.
+// hide == 0 (Condor) returns the board untouched. The full board is what the
+// server now sends; this is where the spy's inaccuracy is applied, per frame.
+function spyFlicker(board: Int32Array, hide: number): Int32Array {
+    if (hide <= 0) return board;
+    const now = performance.now();
+    let mask = spyFlickerMask;
+    if (mask === null || mask.length !== board.length) {
+        mask = new Uint8Array(board.length);
+        spyFlickerMask = mask;
+        spyFlickerRolledAt = 0; // force a fresh roll below
+    }
+    if (now - spyFlickerRolledAt >= SPY_FLICKER_MS) {
+        for (let i = 0; i < board.length; i++) mask[i] = Math.random() * 100 < hide ? 1 : 0;
+        spyFlickerRolledAt = now;
+    }
+    const out = new Int32Array(board.length);
+    for (let i = 0; i < board.length; i++) {
+        const v = board[i]!;
+        out[i] = v !== -2 && mask[i] ? -2 : v;
+    }
+    return out;
+}
 let playerName: string | null = null;    // remembered after the first prompt
 
 // Canvas and context
@@ -86,6 +119,7 @@ const modePracticeBtn = document.getElementById('modePractice') as HTMLElement;
 const playComputerBtn = document.getElementById('playComputerBtn') as HTMLElement;
 const findMatchBtn = document.getElementById('findMatchBtn') as HTMLElement;
 const aiBoard = document.getElementById('aiBoard') as HTMLElement;
+const aiBoardLabel = document.getElementById('aiBoardLabel') as HTMLElement;
 const gameAreaEl = document.querySelector('.game-area') as HTMLElement | null;
 const aiLabel = document.getElementById('aiLabel') as HTMLElement;
 const onlineStatus = document.getElementById('onlineStatus') as HTMLElement;
@@ -629,6 +663,7 @@ function cleanupOnline() {
     authSpying = false;
     authSpyBoard = null;
     authSpyFunds = null;
+    spyFlickerMask = null;
 }
 
 // ─── Server-authoritative client (prediction + reconciliation) ────────────────
@@ -706,12 +741,14 @@ function inBazaar() {
 function applySnapshot(msg: Extract<ServerMessage, { type: 'snapshot' }>) {
     authSelf = msg.you;
     authOpp = msg.opp;
-    // Server-authorized spy: `spying` every frame; the degraded opponent board
-    // rides keyframes. Keep the last board while spying; drop it when it ends.
+    // Server-authorized spy: `spying` every frame; the FULL opponent board and the
+    // hide level ride keyframes. Keep the last board while spying; drop it when it
+    // ends. The board is flickered to `authSpyHide`% accuracy at render time.
     authSpying = !!msg.spying;
     if (msg.spy_board) authSpyBoard = Int32Array.from(msg.spy_board);
+    if (msg.spy_hide !== undefined) authSpyHide = msg.spy_hide;
     if (msg.spy_funds !== undefined) authSpyFunds = msg.spy_funds;
-    if (!authSpying) { authSpyBoard = null; authSpyFunds = null; }
+    if (!authSpying) { authSpyBoard = null; authSpyFunds = null; spyFlickerMask = null; }
     // Reconcile: prune acked inputs and, on a keyframe, restore the authoritative
     // state then replay the still-unacked tail — all inside WasmClient.on_snapshot
     // (the shared, proptested core). An empty keyframe array ⇒ no keyframe this frame.
@@ -754,6 +791,7 @@ function enterAuthoritativeGame(msg: Extract<ServerMessage, { type: 'matchStart'
     authSpying = false;
     authSpyBoard = null;
     authSpyFunds = null;
+    spyFlickerMask = null;
     // Fresh match: no stored replay yet (the server sends matchReplay at the end).
     lastMatchReplayId = null;
     if (watchReplayBtn) watchReplayBtn.style.display = 'none';
@@ -1023,10 +1061,14 @@ function startGame(newMode: string) {
     canvas.width = width * CELL_SIZE;
     canvas.height = height * CELL_SIZE;
 
-    // Set up AI canvas in vscomputer mode
+    // Set up the side board canvas in vscomputer mode (Ernie's board). In an
+    // online match the same canvas shows the spy-revealed opponent board, but it is
+    // sized and labelled lazily when a spy first reveals it (see updateBoard), since
+    // the panel is hidden until then.
     if (mode === 'vscomputer') {
         aiGridCanvas.width = width * CELL_SIZE;
         aiGridCanvas.height = height * CELL_SIZE;
+        aiBoardLabel.textContent = 'Ernie (computer)';
         aiBoard.style.display = 'block';
         aiLabel.style.display = 'block';
     } else {
@@ -1091,8 +1133,21 @@ function render() {
         // Server-authorized spy: show the opponent's board (already degraded to
         // the spy's accuracy server-side) only while a spy of ours is active.
         if (authSpying && authSpyBoard) {
+            // Size the side canvas to the board the first time a spy reveals it
+            // (initGame only sizes it for vs-Computer), then fit it to the viewport.
+            // The resize is guarded so it runs once, not every frame.
+            if (aiGridCanvas.width !== width * CELL_SIZE || aiGridCanvas.height !== height * CELL_SIZE) {
+                aiGridCanvas.width = width * CELL_SIZE;
+                aiGridCanvas.height = height * CELL_SIZE;
+                aiBoard.style.display = 'block';
+                applyBoardScale();
+            }
+            // Label it with the real opponent (not "Ernie"); value-guarded so it
+            // tracks a new opponent across matches without a per-frame DOM write.
+            const oppLabel = onlineOpponentName || 'Opponent';
+            if (aiBoardLabel.textContent !== oppLabel) aiBoardLabel.textContent = oppLabel;
             aiBoard.style.display = 'block';
-            drawBoard(aiCtx, authSpyBoard, width, height);
+            drawBoard(aiCtx, spyFlicker(authSpyBoard, authSpyHide), width, height);
         } else {
             aiBoard.style.display = 'none';
         }

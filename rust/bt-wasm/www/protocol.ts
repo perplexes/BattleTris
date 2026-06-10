@@ -112,8 +112,13 @@ export interface SnapshotMsg {
     keyframe?: number[];
     /** A spy of ours is active this frame. */
     spying?: boolean;
-    /** Server-degraded opponent board (rides keyframes while spying). */
+    /** The opponent's FULL board (render ids, empty = -2), rides keyframes while
+     *  spying. The client flickers `spy_hide`% of the cells each frame to render
+     *  the spy's accuracy. */
     spy_board?: number[];
+    /** Percent of `spy_board`'s cells to hide each frame (Ames 50, Ace 15, Condor
+     *  0); the per-frame re-roll of the hidden set is the spy static. */
+    spy_hide?: number;
     /** Server-computed opponent funds revealed by our spy (Ames perturbed, Ace
      *  mostly exact, Condor exact); rides keyframes while spying. */
     spy_funds?: number;

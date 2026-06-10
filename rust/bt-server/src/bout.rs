@@ -125,11 +125,17 @@ pub struct Snapshot {
     /// Whether a spy of THIS client is currently active (drives showing/hiding
     /// the opponent-board panel), sent every frame.
     pub spying: bool,
-    /// The opponent's board as revealed by this client's active spy, already
-    /// degraded to the spy's accuracy server-side (so a client can't read cells
-    /// the spy didn't earn). Rides the throttled keyframe frames, like `keyframe`.
+    /// The opponent's FULL board as revealed by this client's active spy (render
+    /// ids, empty = -2). The client degrades it to the spy's accuracy for display,
+    /// flickering `spy_hide` percent of the cells each frame. Rides the throttled
+    /// keyframe frames, like `keyframe`. Present only while spying.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spy_board: Option<Vec<i32>>,
+    /// The percent of `spy_board`'s cells the client hides each frame to render the
+    /// spy's accuracy (Ames 50, Ace 15, Condor 0). Paired with `spy_board`; the
+    /// per-frame re-roll of which cells are hidden is what produces the spy static.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spy_hide: Option<u32>,
     /// The opponent's funds as revealed by this client's active spy, computed
     /// server-side per [`adjust_funds`] (Ames perturbed, Ace mostly exact, Condor
     /// exact). Present only while spying, on the same throttled keyframe frames as
@@ -150,26 +156,6 @@ fn spy_hide_pct(token: WeaponToken) -> u32 {
         WeaponToken::Ace => 15,
         _ => 0, // Condor
     }
-}
-
-/// Degrade a render-id grid (`Game::render_ids`, empty = -2) to a spy's accuracy
-/// by HIDING a deterministic ~hide% of non-empty cells. Doing it server-side
-/// so a modified client never receives the cells the spy didn't earn; the
-/// reveal is gated by the spy the player actually bought. Stable per position.
-fn degrade_board(mut grid: Vec<i32>, token: WeaponToken) -> Vec<i32> {
-    let hide = spy_hide_pct(token);
-    if hide == 0 {
-        return grid;
-    }
-    for (i, cell) in grid.iter_mut().enumerate() {
-        if *cell != -2 {
-            let h = (i.wrapping_mul(2_654_435_761) >> 8) % 100;
-            if (h as u32) < hide {
-                *cell = -2; // hide -> empty
-            }
-        }
-    }
-    grid
 }
 
 /// How many ticks after the opponent's tetris the Ace spy keeps perturbing the
@@ -490,22 +476,33 @@ impl Bout {
         let me = self.versus.game(side);
         let them = self.versus.game(side.other());
         let spy = self.spy[side_idx(side)];
-        // The (degraded) opponent board and the revealed funds both ride the
-        // keyframe frames while spying.
-        let spy_board = match (spy, include_keyframe) {
-            (Some((tok, _)), true) => Some(degrade_board(them.render_ids(), tok)),
-            _ => None,
+        // The opponent board and the revealed funds both ride the keyframe frames
+        // while spying. The board is sent in FULL, paired with the spy's hide
+        // percentage (`spy_hide`); the client flickers it to that accuracy each
+        // frame, reproducing the original's per-render spy static. Sending the
+        // whole board during an active spy is an accepted exposure: revealing the
+        // board is the spy's purpose, and it is bounded to the window the player
+        // launched the spy for.
+        let (spy_board, spy_hide) = match (spy, include_keyframe) {
+            (Some((tok, _)), true) => (Some(them.render_ids()), Some(spy_hide_pct(tok))),
+            _ => (None, None),
         };
         let spy_funds = match (spy, include_keyframe) {
             (Some((tok, _)), true) => {
                 let i = side_idx(side);
                 // A deterministic per-tick noise (varies each keyframe, differs per
-                // side) drives the Ames perturbation without RNG state, so the
-                // reveal stays reproducible and `snapshot_for` stays `&self`.
-                let noise = self
+                // side) drives the Ames perturbation without RNG state, so the reveal
+                // stays reproducible and `snapshot_for` stays `&self`. The tick is run
+                // through a splitmix64 finalizer (full avalanche) so consecutive
+                // keyframes give uncorrelated noise; `tick * constant` alone leaves a
+                // linear walk mod span that an observer watching the readout could
+                // read off, where the original re-rolls `rand()` each render.
+                let mut z = self
                     .tick
-                    .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                    ^ (i as u64).wrapping_mul(0x632B_E59B_D9B4_E019);
+                    .wrapping_add((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                let noise = z ^ (z >> 31);
                 let ace_recent_tetris = self.last_opp_tetris_tick[i] != 0
                     && self.tick.saturating_sub(self.last_opp_tetris_tick[i]) < ACE_TETRIS_WINDOW;
                 Some(adjust_funds(them.score().funds, tok, noise, ace_recent_tetris))
@@ -538,6 +535,7 @@ impl Bout {
             },
             spying: spy.is_some(),
             spy_board,
+            spy_hide,
             spy_funds,
             // op_funds-redacted in the keyframe: the opponent's funds reach a client
             // only through the spy-gated `spy_funds` scalar above, never the keyframe.
@@ -1920,60 +1918,22 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Property (f): SPY DEGRADATION privacy. Each spy reveals a DIFFERENT fraction
-    //   of the opponent board, and the degradation is what stops a modified client
-    //   from reading cells the spy didn't earn. The old test only asserted "some
-    //   cells visible", so `Ames => 0` (reveal everything, a full info leak)
-    //   survived. Here, over a fully-filled board, we pin each token's reveal:
-    //     * Ames must hide some and reveal some (a partial, ~50% view).
-    //     * Ace must hide fewer than Ames (it's the more accurate spy).
-    //     * Condor must reveal all (perfect satellite, hides nothing).
-    //   `degrade_board` hides by turning a cell to -2 (empty); a revealed cell
-    //   keeps its id. Empty cells (-2) are never "revealed", so we fill the board.
+    // Property (f): the SPY HIDE LEVEL per token. The server reveals the FULL
+    //   opponent board under a spy and reports how much the client should hide
+    //   (`spy_hide_pct`); the client flickers the board to that accuracy. This pins
+    //   the per-spy hide percent so a mutant that drifts a rate (e.g. `Ames => 2`,
+    //   a near-full reveal, or `Ames => 95`, a near-blackout) fails, that Ace is
+    //   more accurate than Ames, and that Condor (satellite) hides nothing.
     // -----------------------------------------------------------------------
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(64))]
-
-        #[test]
-        fn spy_degradation_hides_the_right_fraction_per_token(
-            // A fully-filled board of arbitrary non-empty render ids (>= 0).
-            ids in prop::collection::vec(0i32..30, 280),
-        ) {
-            // Sanity: the source grid has NO empty cells, so every -2 in the output
-            // is a HIDE the spy imposed (not a pre-existing empty).
-            prop_assert!(ids.iter().all(|&v| v != -2), "source grid must be fully filled");
-            let total = ids.len();
-            let hidden = |grid: &[i32]| grid.iter().filter(|&&v| v == -2).count();
-
-            let ames = degrade_board(ids.clone(), WeaponToken::Ames);
-            let ace = degrade_board(ids.clone(), WeaponToken::Ace);
-            let condor = degrade_board(ids.clone(), WeaponToken::Condor);
-
-            let (h_ames, h_ace, h_condor) = (hidden(&ames), hidden(&ace), hidden(&condor));
-            let pct = |h: usize| (h as f64) / (total as f64) * 100.0;
-
-            // Ames hides ~50% (`spy_hide_pct(Ames)`). The hide is a DETERMINISTIC
-            // hash, so over a full board the fraction is stable; pin it to a BAND
-            // around the spec so a mutant that drifts the rate (e.g. `Ames => 2`,
-            // a near-full info leak, or `Ames => 95`, a near-blackout) fails; the
-            // old "hides some / reveals some" check let a 2% hider pass.
-            prop_assert!((35.0..=65.0).contains(&pct(h_ames)),
-                "Ames must hide ~50% of cells (in [35,65]); hid {:.1}% ({}/{})",
-                pct(h_ames), h_ames, total);
-
-            // Ace hides ~15%, a band around its spec, and strictly fewer than Ames.
-            prop_assert!((5.0..=30.0).contains(&pct(h_ace)),
-                "Ace must hide ~15% of cells (in [5,30]); hid {:.1}% ({}/{})",
-                pct(h_ace), h_ace, total);
-            prop_assert!(h_ace < h_ames,
-                "Ace must hide FEWER cells than Ames (the more accurate spy): ace={} ames={}",
-                h_ace, h_ames);
-
-            // Condor is perfect: it hides NOTHING (reveals the whole board).
-            prop_assert_eq!(h_condor, 0,
-                "Condor (satellite) must reveal the ENTIRE board (hide nothing); hid {}", h_condor);
-            prop_assert_eq!(&condor, &ids, "Condor's output must equal the source grid exactly");
-        }
+    #[test]
+    fn spy_hide_pct_matches_the_per_spy_accuracy() {
+        assert_eq!(spy_hide_pct(WeaponToken::Ames), 50, "Ames hides ~half the board");
+        assert_eq!(spy_hide_pct(WeaponToken::Ace), 15, "Ace hides a little");
+        assert_eq!(spy_hide_pct(WeaponToken::Condor), 0, "Condor (satellite) hides nothing");
+        assert!(
+            spy_hide_pct(WeaponToken::Ace) < spy_hide_pct(WeaponToken::Ames),
+            "Ace is the more accurate spy"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2061,12 +2021,23 @@ mod tests {
         assert!(sa.spying, "A is spying after launching Ames");
         let board = sa.spy_board.expect("A gets the opponent board on a keyframe frame");
         let (w, h) = (b.versus.game(Side::B).board().width, b.versus.game(Side::B).board().height);
-        assert_eq!(board.len() as i32, w * h, "a full (degraded) render-id grid (not quads)");
-        assert!(board.iter().any(|&id| id != -2), "and it shows some of the opponent's cells");
+        assert_eq!(board.len() as i32, w * h, "a full render-id grid (not quads)");
+        // The board is sent in FULL now (the client flickers it): it equals the
+        // opponent's render grid verbatim, and the hide level rides alongside.
+        assert_eq!(
+            board,
+            b.versus.game(Side::B).render_ids(),
+            "the spy board is the opponent's full render grid, undegraded"
+        );
+        assert!(
+            board.iter().filter(|&&id| id != -2).count() >= 6,
+            "and it includes the cells we placed"
+        );
+        assert_eq!(sa.spy_hide, Some(spy_hide_pct(WeaponToken::Ames)), "Ames hide level rides the board");
 
         // B is not spying and gets nothing; and a light frame carries no spy board.
         let sb = b.snapshot_for(Side::B, true);
-        assert!(!sb.spying && sb.spy_board.is_none(), "the spied player learns nothing");
+        assert!(!sb.spying && sb.spy_board.is_none() && sb.spy_hide.is_none(), "the spied player learns nothing");
         assert!(b.snapshot_for(Side::A, false).spy_board.is_none(), "spy board rides keyframes only");
     }
 
