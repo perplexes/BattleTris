@@ -23,9 +23,10 @@
 //!     {"type":"input","seq":N,"input":<bt_replay::Input>}   (a gameplay action)
 //!     {"type":"rejoin","match_id":"<match-id>","token":"<jwt>"}   (reattach after a refresh)
 //!     {"type":"leaveMatch"}                 (intentional leave -> immediate forfeit)
+//!     {"type":"resync"}                     (local sim diverged, request a keyframe)
 //!   server -> client:
 //!     {"type":"matchStart","side":"A|B","seed":N,"opponent":"bob","match_id":"<match-id>",...}
-//!     {"type":"snapshot","tick":N,"ack":N,"result":...,"you":...,"opp":...,"keyframe"?:[..]}
+//!     {"type":"snapshot","tick":N,"ack":N,"result":...,"you":...,"opp":...,"lock_seq":N,"lock_hash":N,"keyframe"?:[..]}
 //!     {"type":"rating","mu":...,"sigma":...,"conservative":...,"won":true}
 //!     {"type":"players","players":[{"name":..,"status":"available|searching|ingame"}]}
 //!     {"type":"opponentLeft"}
@@ -489,6 +490,11 @@ enum BoutControl {
     /// loop mutates the game directly and never appends to the replay frame stream,
     /// so it cannot perturb input ordering or determinism (see `Bout::debug_grant`).
     DebugGrant { side: Side, weapon: Option<WeaponToken>, funds: Option<i64> },
+    /// A client detected that its local sim has diverged from the server (its own
+    /// lock hash disagrees with the one riding `side`'s snapshots) and is asking for
+    /// a fresh keyframe to resync. Sent by the `resync` frame handler; the loop
+    /// rate-limits how often it actually grants one (see `resync_grant_allowed`).
+    Resync { side: Side },
 }
 
 /// A handle to a live bout, kept in [`App::bouts`] keyed by `match_id` so the
@@ -838,6 +844,24 @@ fn sidx(s: Side) -> usize {
     }
 }
 
+/// Whether a resync request for one side may be granted right now, throttling a
+/// client that re-sends `resync` on every frame it still sees a divergence (or a
+/// buggy one that resyncs constantly) to at most one granted keyframe per second.
+/// Records `now` into `last_grant` when granting, so the next call measures from
+/// the grant, not from whenever the caller happens to check again. A pure function
+/// of its arguments (no wall-clock read inside), so the rate limit is unit-testable
+/// without the async tick loop.
+fn resync_grant_allowed(last_grant: &mut Option<Instant>, now: Instant) -> bool {
+    let allowed = match *last_grant {
+        None => true,
+        Some(last) => now.duration_since(last) >= Duration::from_secs(1),
+    };
+    if allowed {
+        *last_grant = Some(now);
+    }
+    allowed
+}
+
 /// The per-match authoritative tick loop. Advances the deterministic engine on
 /// the server's clock, broadcasts a snapshot to each client (~30Hz), and settles
 /// on the natural end.
@@ -860,10 +884,13 @@ async fn run_bout(state: Shared, pb: PendingBout) {
 
     // `Some(a_won)` = settle with A as winner/loser; `None` = both gone, nothing to rate.
     let mut frame: u64 = 0;
-    let mut want_keyframe = true; // send one on the very first frame
+    let mut want_keyframe = [true, true]; // send one on the very first frame, both sides
     let mut connected = [true, true]; // is each side's socket currently attached?
     let mut spectators: Vec<mpsc::UnboundedSender<Message>> = Vec::new(); // live-view watchers
     let mut grace_until: Option<Instant> = None; // freeze deadline while a human reconnects
+    // Per side: when this side's last resync-triggered keyframe was granted, so
+    // `resync_grant_allowed` can throttle a client that asks repeatedly.
+    let mut resync_last_grant: [Option<Instant>; 2] = [None, None];
     let outcome: Option<bool> = loop {
         ticker.tick().await;
 
@@ -901,7 +928,7 @@ async fn run_bout(state: Shared, pb: PendingBout) {
                         let _ = tx_a.send(Message::Text(resumed.clone()));
                         let _ = tx_b.send(Message::Text(bout.snapshot_message(Side::B, true, true)));
                         let _ = tx_b.send(Message::Text(resumed));
-                        want_keyframe = true;
+                        want_keyframe = [true, true];
                     }
                 }
                 BoutControl::Forfeit { side } => forfeit_by = Some(side),
@@ -920,7 +947,17 @@ async fn run_bout(state: Shared, pb: PendingBout) {
                     // the next snapshot resyncs the client with the granted arsenal/funds.
                     let (w, f) = bout.debug_grant(side, weapon, funds);
                     println!("bout {match_id}: admin grant side {side:?} weapon={weapon:?} funds={funds:?} (weapon_granted={w}, funds_applied={f})");
-                    want_keyframe = true;
+                    want_keyframe = [true, true];
+                }
+                BoutControl::Resync { side } => {
+                    // Rate-limited: a client re-sends `resync` on every frame it still
+                    // sees a mismatch, so only actually grant one keyframe per side per
+                    // second (`resync_grant_allowed`); an over-eager repeat is dropped
+                    // silently, and the client will simply ask again.
+                    if resync_grant_allowed(&mut resync_last_grant[sidx(side)], Instant::now()) {
+                        want_keyframe[sidx(side)] = true;
+                        println!("bout {match_id}: resync grant side {side:?}");
+                    }
                 }
             }
         }
@@ -963,7 +1000,7 @@ async fn run_bout(state: Shared, pb: PendingBout) {
         // A cross-player effect this tick (weapon/funds/bazaar) is something the
         // clients couldn't predict; push a prompt keyframe on the next send.
         if bout.take_dirty() {
-            want_keyframe = true;
+            want_keyframe = [true, true];
         }
         // Forward the relay's cross-player events to each side's client, in order, so
         // its local sim applies the same effect this tick (the model-B event channel).
@@ -994,13 +1031,14 @@ async fn run_bout(state: Shared, pb: PendingBout) {
         // grant, final), NOT periodically: the client tracks the server through the
         // event channel between keyframes. The spy reveal rides its own ~7.5Hz cadence.
         if frame.is_multiple_of(2) {
-            let kf = want_keyframe;
-            if kf {
-                want_keyframe = false;
-            }
+            // Each side's keyframe flag is cleared independently: a resync grant for
+            // one side (part of divergence recovery) must not force an unwanted
+            // keyframe on the other.
+            let kf = [want_keyframe[0], want_keyframe[1]];
+            want_keyframe = [false, false];
             let send_spy = frame.is_multiple_of(8);
-            let a_ok = tx_a.send(Message::Text(bout.snapshot_message(Side::A, kf, send_spy))).is_ok();
-            let b_ok = tx_b.send(Message::Text(bout.snapshot_message(Side::B, kf, send_spy))).is_ok();
+            let a_ok = tx_a.send(Message::Text(bout.snapshot_message(Side::A, kf[0], send_spy))).is_ok();
+            let b_ok = tx_b.send(Message::Text(bout.snapshot_message(Side::B, kf[1], send_spy))).is_ok();
             connected = [a_ok, b_ok];
             if !a_ok || !b_ok {
                 // A *bot* dropping (no human is down) forfeits immediately. A human
@@ -1180,7 +1218,7 @@ async fn reject_if_draining(state: &Shared, id: &str) -> bool {
 ///
 /// The arms split into presence/identity (`watch`/`active`/`available`), pairing
 /// (`queue`/`challenge`/`challengeAccept`/`challengeDecline`), and in-bout control
-/// (`input`/`rejoin`/`leaveMatch`/`spectate`). A matchmaking arm that pairs two
+/// (`input`/`resync`/`rejoin`/`leaveMatch`/`spectate`). A matchmaking arm that pairs two
 /// clients returns a [`PendingBout`] from inside the lock and spawns [`run_bout`]
 /// for it outside the lock (the tick loop must not hold the `App` mutex).
 async fn handle_message(state: &Shared, id: &str, text: &str) {
@@ -1398,6 +1436,26 @@ async fn handle_message(state: &Shared, id: &str, text: &str) {
                 if let Some((tx, side)) = app.clients.get(id).and_then(|c| c.bout.as_ref()) {
                     // try_send: drop under flood rather than grow memory (bounded channel).
                     let _ = tx.try_send((*side, input, seq));
+                }
+            }
+        }
+        // The client detected a lock-hash mismatch against its own local sim (see
+        // `Snapshot::lock_hash`) and is asking for a fresh keyframe to resync. Routed
+        // to the client's own bout via its server-side binding, exactly like
+        // `leaveMatch` below (never a client-supplied match/side). Dropped silently
+        // if the client isn't in a bout, the match is unknown, or the bout's control
+        // channel is full: a lost resync request only delays the repair until the
+        // client notices the mismatch again and re-asks, so there's nothing to fail
+        // loudly about here.
+        Some("resync") => {
+            let app = state.lock().await;
+            let target = app.clients.get(id).and_then(|c| match (c.match_id.as_ref(), c.bout.as_ref()) {
+                (Some(mid), Some((_, side))) => Some((mid.clone(), *side)),
+                _ => None,
+            });
+            if let Some((mid, side)) = target {
+                if let Some(h) = app.bouts.get(&mid) {
+                    let _ = h.control.try_send(BoutControl::Resync { side });
                 }
             }
         }
@@ -2840,6 +2898,42 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_millis(300), handle).await;
     }
 
+    // --- resync rate limiter (a pure function, no tick loop needed) ----------
+
+    #[test]
+    fn resync_grant_allowed_grants_the_first_call() {
+        let mut last = None;
+        let t0 = Instant::now();
+        assert!(resync_grant_allowed(&mut last, t0), "a side that never got a grant is allowed one");
+        assert_eq!(last, Some(t0), "the grant time is recorded");
+    }
+
+    #[test]
+    fn resync_grant_allowed_denies_a_second_call_within_a_second_and_keeps_the_window() {
+        let mut last = None;
+        let t0 = Instant::now();
+        assert!(resync_grant_allowed(&mut last, t0), "first call granted");
+
+        let t1 = t0 + Duration::from_millis(500);
+        assert!(!resync_grant_allowed(&mut last, t1), "a second call inside the 1s window is denied");
+        // Denial must NOT reset the window to t1: a further call still inside 1s of
+        // the ORIGINAL grant (t0) must also be denied, not measured from t1.
+        let t2 = t0 + Duration::from_millis(900);
+        assert!(!resync_grant_allowed(&mut last, t2), "denial must not have reset the window");
+        assert_eq!(last, Some(t0), "last_grant is untouched by a denied call");
+    }
+
+    #[test]
+    fn resync_grant_allowed_grants_again_a_second_later() {
+        let mut last = None;
+        let t0 = Instant::now();
+        assert!(resync_grant_allowed(&mut last, t0), "first call granted");
+
+        let t1 = t0 + Duration::from_secs(1);
+        assert!(resync_grant_allowed(&mut last, t1), "exactly 1s later is allowed again");
+        assert_eq!(last, Some(t1), "the new grant time replaces the old one");
+    }
+
     // --- admin grant (the gated live-bout weapon/funds injection dev tool) ----
 
     use axum::body::to_bytes;
@@ -3643,6 +3737,48 @@ mod tests {
 
         // The bout ends and unregisters once run_bout settles (asserted via the
         // run_bout integration test); here we've covered the resolution + routing.
+    }
+
+    // The `resync` handler, like `leaveMatch`, must resolve (match_id, side) from the
+    // client's OWN server-side binding and route a `BoutControl::Resync` to that
+    // bout's control channel. Drive it through the real dispatcher (`handle_message`)
+    // rather than mirroring the resolution, since the point is to pin the actual wire
+    // frame shape (`{"type":"resync"}`) end to end.
+    #[tokio::test]
+    async fn resync_frame_routes_to_the_clients_own_bout() {
+        let mut app = test_app();
+        let _rx_a = add_client(&mut app, "1", "alice");
+        let _rx_b = add_client(&mut app, "2", "bob");
+        set_present(&mut app, "1", Status::Available);
+        set_present(&mut app, "2", Status::Available);
+        let pending = start_bout(&mut app, "1", "2", None).expect("bout built");
+        let mid = pending.match_id.clone();
+        let mut ctrl_rx = pending.control_rx;
+
+        let shared: Shared = Arc::new(Mutex::new(app));
+        handle_message(&shared, "1", r#"{"type":"resync"}"#).await;
+
+        match ctrl_rx.try_recv() {
+            Ok(BoutControl::Resync { side }) => assert_eq!(side, Side::A, "alice (side A) sent it"),
+            _ => panic!("expected a Resync control message on alice's bout"),
+        }
+
+        let app = shared.lock().await;
+        assert!(app.bouts.get(&mid).is_some(), "the bout is still registered");
+    }
+
+    // A client not currently in a bout (no `match_id`/`bout` binding) sends `resync`:
+    // per the documented drop semantics, this must be silently ignored, not panic.
+    #[tokio::test]
+    async fn resync_frame_from_a_client_not_in_a_bout_is_silently_dropped() {
+        let mut app = test_app();
+        let _rx = add_client(&mut app, "1", "solo");
+        let shared: Shared = Arc::new(Mutex::new(app));
+
+        handle_message(&shared, "1", r#"{"type":"resync"}"#).await; // must not panic
+
+        let app = shared.lock().await;
+        assert!(app.bouts.is_empty(), "no bout existed to route anything into");
     }
 
     #[test]

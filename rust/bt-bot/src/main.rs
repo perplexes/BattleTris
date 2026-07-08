@@ -28,7 +28,7 @@
 use std::time::Duration;
 
 mod sync;
-use sync::{decide, BotAction, SyncState};
+use sync::{decide, resync_due, BotAction, SyncState};
 
 use bt_ai::weapons::{buy_plan, launch_choice};
 use bt_ai::{best_placement, best_placement_skill, best_placement_strong, Placement};
@@ -37,7 +37,7 @@ use bt_core::Game;
 // The SAME prediction/reconciliation core the browser runs (bt-wasm's WasmClient):
 // the local predicted sim, the unacked-input queue, per-bout seq, and keyframe replay
 // all live in `Predictor`, so the bot and the browser can't drift apart.
-use bt_netcode::{input_frame, Predictor};
+use bt_netcode::{input_frame, resync_frame, Predictor};
 use bt_replay::Input;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -329,6 +329,14 @@ struct MatchState {
     /// Ticks since the last snapshot; if it crosses [`STALE_TICKS`] the opponent
     /// has gone silent (forfeit/disconnect) and we end the match our side.
     idle_ticks: u32,
+    /// Last time we asked the server for a fresh keyframe with `resync_frame()`.
+    /// `Predictor::on_lock_hash` keeps reporting a divergence on every snapshot until
+    /// the requested keyframe actually lands and reconciles the local sim, and the
+    /// server itself rate-limits keyframe grants to once a second per side, so this
+    /// is what lets [`sync::resync_due`] throttle our own requests to one per 2s
+    /// instead of spamming one on every divergent snapshot. Reset to `None` for each
+    /// fresh match (`MatchState::new`).
+    resync_last_sent: Option<Instant>,
     /// The last input seq the server has acknowledged processing for us: the snapshot
     /// `ack`. It means "I've seen your inputs through seq N", not necessarily "applied":
     /// the server acks a fresh legal input even when a bazaar barrier then drops it.
@@ -371,6 +379,7 @@ impl MatchState {
             opp_high: false,
             done: false,
             idle_ticks: 0,
+            resync_last_sent: None,
             acked: 0,
         }
     }
@@ -601,7 +610,9 @@ fn handle_text(
                 // to `predictor.input_seq()`, so we never run ahead of the server.
                 let ack = v.get("ack").and_then(|a| a.as_u64()).unwrap_or(state.acked);
                 state.acked = ack;
-                if v.get("result").and_then(|r| r.as_i64()).unwrap_or(0) != 0 {
+                // The ONLY thing that ends the match: an authoritative nonzero result.
+                let result = v.get("result").and_then(|r| r.as_i64()).unwrap_or(0);
+                if result != 0 {
                     state.done = true;
                 }
                 // Authoritative bazaar flags. The bazaar is a BARRIER: while either side
@@ -633,6 +644,35 @@ fn handle_text(
                     .and_then(|k| k.as_array())
                     .map(|arr| arr.iter().filter_map(|n| n.as_u64().map(|x| x as u8)).collect());
                 state.predictor.on_snapshot(ack, you_bazaar, opp_bazaar, keyframe.as_deref());
+                // Divergence detection: `lock_seq`/`lock_hash` ride every snapshot from the
+                // current server, carrying the authoritative per-lock pair for
+                // `predictor.on_lock_hash` to judge against the local sim's ring. Judging
+                // only when BOTH fields are present mirrors how this arm already treats
+                // every other field it reads (`ack`, `result`, `you`/`opp.in_bazaar`): a
+                // missing field is a no-op default rather than an error, so an older server
+                // that doesn't send these two simply never gets judged, instead of the bot
+                // treating their absence as a hard error.
+                if let (Some(lock_seq), Some(lock_hash)) = (
+                    v.get("lock_seq").and_then(|s| s.as_u64()),
+                    v.get("lock_hash").and_then(|h| h.as_u64()).map(|h| h as u32),
+                ) {
+                    if state.predictor.on_lock_hash(lock_seq, lock_hash)
+                        && resync_due(&mut state.resync_last_sent, Instant::now())
+                    {
+                        let _ = out.send(Message::Text(resync_frame()));
+                    }
+                }
+                // Phantom top-out: the server still reports the match ongoing (`result ==
+                // 0`) but our local sim thinks the game already ended. The two sims
+                // disagree, which is itself a divergence, so ask for a keyframe through the
+                // same throttled gate rather than trusting the local game-over (only the
+                // authoritative nonzero `result` above may ever end the match).
+                if result == 0
+                    && state.predictor.game().is_game_over()
+                    && resync_due(&mut state.resync_last_sent, Instant::now())
+                {
+                    let _ = out.send(Message::Text(resync_frame()));
+                }
                 // Spy intel: a `spy_board` (the opponent's board, empty cells = -2)
                 // rides keyframes only while one of our spies is active. Refresh the
                 // "is the opponent stacked high?" read used to time board-raisers.

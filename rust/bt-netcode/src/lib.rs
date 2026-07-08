@@ -32,6 +32,13 @@ use bt_core::Game;
 use bt_core::WeaponToken;
 use bt_replay::Input;
 use serde::Serialize;
+use std::collections::VecDeque;
+
+/// How many recent `(lock_seq, lock_hash)` pairs the ring keeps. Bounds how far behind
+/// the authoritative pair can lag before a lock is no longer judgeable; wide enough to
+/// absorb the snapshot cadence (~30Hz) outrunning the lock cadence, small enough to stay
+/// a cheap fixed-size buffer.
+const LOCK_HISTORY: usize = 8;
 
 /// A client's local predicted game plus the bookkeeping needed to reconcile it to
 /// the server's authoritative keyframes.
@@ -51,6 +58,21 @@ pub struct Predictor {
     /// Authoritative "your opponent is shopping" from the latest snapshot. The bazaar
     /// is a barrier: while either side shops the whole match is frozen server-side.
     opp_bazaar: bool,
+    /// The last `LOCK_HISTORY` `(lock_seq, lock_hash)` pairs observed on the LOCAL sim,
+    /// oldest first. [`on_lock_hash`](Self::on_lock_hash) looks up the authoritative pair
+    /// against this ring; a lock that has scrolled out of it can no longer be judged.
+    lock_history: VecDeque<(u64, u32)>,
+    /// Consecutive judged locks that mismatched the authoritative pair. Requires two in
+    /// a row before signalling a resync, so a single straddled-event false alarm (the
+    /// event lands one lock early or late but both sims still agree moments later)
+    /// doesn't trigger a keyframe fetch.
+    mismatches: u32,
+    /// The last authoritative `lock_seq` already judged by [`on_lock_hash`], so a
+    /// snapshot repeated at ~30Hz between locks is not counted twice.
+    last_judged: Option<u64>,
+    /// The local sim's `lock_seq` as of the last recording check, so [`note_lock`]
+    /// only pushes into the ring on an actual advance rather than every call.
+    last_seen_lock_seq: u64,
 }
 
 impl Predictor {
@@ -62,6 +84,10 @@ impl Predictor {
             unacked: Vec::new(),
             you_bazaar: false,
             opp_bazaar: false,
+            lock_history: VecDeque::with_capacity(LOCK_HISTORY),
+            mismatches: 0,
+            last_judged: None,
+            last_seen_lock_seq: 0,
         }
     }
 
@@ -82,6 +108,7 @@ impl Predictor {
     /// freezes then and ticking the local sim would drift it ahead.
     pub fn tick(&mut self, dt_ms: i32) {
         self.game.tick(dt_ms);
+        self.note_lock();
     }
 
     /// The seq of the most recently sent input this bout (0 if none sent yet). The
@@ -135,6 +162,7 @@ impl Predictor {
         }
         self.input_seq += 1;
         self.unacked.push((self.input_seq, input.clone()));
+        self.note_lock();
         Some((self.input_seq, input))
     }
 
@@ -179,12 +207,23 @@ impl Predictor {
             for (_, input) in &self.unacked {
                 replay_input(&mut self.game, input);
             }
+            // The restored state (plus its replayed tail) has already been reconciled
+            // to the authoritative side, so divergence detection starts clean: the ring
+            // is cleared rather than left holding pairs from the pre-restore history,
+            // and the baseline moves to the post-replay lock_seq WITHOUT recording that
+            // pair (it was never independently reached and compared; only locks after
+            // this point are eligible for `on_lock_hash`).
+            self.lock_history.clear();
+            self.mismatches = 0;
+            self.last_judged = None;
+            self.last_seen_lock_seq = self.game.lock_seq();
         } else if leaving_bazaar && self.game.is_in_bazaar() {
             // No keyframe to restore us out: release the local sim to match the server.
             // The shop's Buy/Sell were already applied locally during prediction, so
             // there is nothing to replay here, only the frozen flag to clear.
             self.game.leave_bazaar();
         }
+        self.note_lock();
     }
 
     /// Apply a server-sent cross-player event (a weapon arriving, the opponent's score
@@ -196,6 +235,7 @@ impl Predictor {
     /// without a keyframe snap.
     pub fn apply_event(&mut self, input: &Input) {
         input.apply_to_game(&mut self.game);
+        self.note_lock();
     }
 
     /// Parse a server `event` frame's `input` field (the serde form of an `Input`) and
@@ -210,6 +250,55 @@ impl Predictor {
             }
             Err(_) => false,
         }
+    }
+
+    /// Record the local sim's current `(lock_seq, lock_hash)` into the ring if a lock
+    /// has happened since the last check. Every call site that can move the local sim
+    /// forward (`tick`, `predict`, `apply_event`, `on_snapshot`) calls this once at the
+    /// end; a single call can advance `lock_seq` by at most one, so one comparison per
+    /// call is enough to catch every lock.
+    fn note_lock(&mut self) {
+        let seq = self.game.lock_seq();
+        if seq != self.last_seen_lock_seq {
+            if self.lock_history.len() == LOCK_HISTORY {
+                self.lock_history.pop_front();
+            }
+            self.lock_history.push_back((seq, self.game.lock_hash()));
+            self.last_seen_lock_seq = seq;
+        }
+    }
+
+    /// Judge the host's authoritative `(lock_seq, lock_hash)`, carried on every
+    /// snapshot, against the local ring. Returns whether the caller should request a
+    /// resync (fetch a fresh keyframe).
+    ///
+    /// Snapshots arrive at a fixed cadence and repeat the same pair between locks, and
+    /// the local sim may be ahead of or behind what the ring still holds, so a pair is
+    /// judged at most once and only when it is still in range: already-judged or
+    /// not-yet-reached (or already-evicted) pairs return false without side effects.
+    /// A single mismatch does not fire (a cross-player event that straddles a lock by
+    /// one tick can disagree for exactly one lock and then re-converge); two
+    /// consecutive mismatches do, and reset the counter so the caller isn't asked to
+    /// resync again every judged lock while waiting for the fetch to land.
+    pub fn on_lock_hash(&mut self, lock_seq: u64, lock_hash: u32) -> bool {
+        if Some(lock_seq) == self.last_judged {
+            return false;
+        }
+        let Some(&(_, local_hash)) = self.lock_history.iter().find(|&&(seq, _)| seq == lock_seq)
+        else {
+            return false;
+        };
+        self.last_judged = Some(lock_seq);
+        if local_hash == lock_hash {
+            self.mismatches = 0;
+            return false;
+        }
+        self.mismatches += 1;
+        if self.mismatches >= 2 {
+            self.mismatches = 0;
+            return true;
+        }
+        false
     }
 }
 
@@ -261,6 +350,20 @@ pub fn input_frame(seq: u64, input: &Input) -> String {
         input: &'a Input,
     }
     serde_json::to_string(&InputFrame { ty: "input", seq, input }).unwrap_or_default()
+}
+
+/// The exact wire frame a client sends to ask the host for a fresh keyframe after
+/// [`Predictor::on_lock_hash`] reports a divergence: `{"type":"resync"}`.
+///
+/// Built in one place, like [`input_frame`], so the browser and the bot never hand-roll
+/// their own copy of this shape and drift from each other or from what the server parses.
+pub fn resync_frame() -> String {
+    #[derive(Serialize)]
+    struct ResyncFrame {
+        #[serde(rename = "type")]
+        ty: &'static str,
+    }
+    serde_json::to_string(&ResyncFrame { ty: "resync" }).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -424,5 +527,121 @@ mod tests {
         p.on_snapshot(0, true, false, None); // server claims shopping; local sim is not
         p.on_snapshot(0, false, false, None); // exit edge
         assert!(!p.game().is_in_bazaar(), "still playing; nothing to leave");
+    }
+
+    #[test]
+    fn resync_frame_matches_the_wire() {
+        assert_eq!(resync_frame(), r#"{"type":"resync"}"#);
+    }
+
+    /// Drive the local sim through fast-drop + ticks until exactly one more piece
+    /// locks, and return the new `lock_seq`. `BeginDrop` only engages the fast-drop
+    /// cadence for the CURRENT piece (each spawn resets it), so this must be called
+    /// once per lock rather than once for the whole test. Bounded so a sim that never
+    /// locks fails loudly instead of hanging.
+    fn drive_one_lock(p: &mut Predictor) -> u64 {
+        let before = p.game().lock_seq();
+        p.predict(Input::BeginDrop);
+        for _ in 0..64 {
+            p.tick(16);
+            if p.game().lock_seq() > before {
+                return p.game().lock_seq();
+            }
+        }
+        panic!("expected a piece to lock within the tick budget");
+    }
+
+    #[test]
+    fn two_distinct_lock_mismatches_trigger_resync_then_reset() {
+        let mut p = Predictor::new(7);
+        let seq1 = drive_one_lock(&mut p);
+        let hash1 = p.game().lock_hash();
+        assert!(!p.on_lock_hash(seq1, hash1.wrapping_add(1)), "one mismatch alone must not fire");
+
+        let seq2 = drive_one_lock(&mut p);
+        let hash2 = p.game().lock_hash();
+        assert!(
+            p.on_lock_hash(seq2, hash2.wrapping_add(1)),
+            "a second consecutive mismatch at a distinct lock must fire"
+        );
+        assert_eq!(p.mismatches, 0, "the counter resets once it fires");
+
+        // Post-reset, a lone mismatch must not immediately refire.
+        let seq3 = drive_one_lock(&mut p);
+        let hash3 = p.game().lock_hash();
+        assert!(
+            !p.on_lock_hash(seq3, hash3.wrapping_add(1)),
+            "the counter must have reset rather than staying armed"
+        );
+    }
+
+    #[test]
+    fn matching_lock_after_a_mismatch_resets_the_counter() {
+        let mut p = Predictor::new(11);
+        let seq1 = drive_one_lock(&mut p);
+        let hash1 = p.game().lock_hash();
+        assert!(!p.on_lock_hash(seq1, hash1.wrapping_add(1)), "first mismatch");
+
+        let seq2 = drive_one_lock(&mut p);
+        let hash2 = p.game().lock_hash();
+        assert!(!p.on_lock_hash(seq2, hash2), "a matching lock must reset, not fire");
+
+        let seq3 = drive_one_lock(&mut p);
+        let hash3 = p.game().lock_hash();
+        assert!(
+            !p.on_lock_hash(seq3, hash3.wrapping_add(1)),
+            "the counter was reset by the match; a single new mismatch must not fire"
+        );
+    }
+
+    #[test]
+    fn same_lock_seq_is_judged_once_despite_repeats() {
+        // Snapshots arrive at ~30Hz and repeat the same authoritative pair between
+        // locks; re-presenting it must not re-judge (and, critically, must not
+        // double-count toward the mismatch threshold).
+        let mut p = Predictor::new(21);
+        let seq1 = drive_one_lock(&mut p);
+        let hash1 = p.game().lock_hash();
+        assert!(!p.on_lock_hash(seq1, hash1.wrapping_add(1)), "first judgement of seq1");
+        assert!(!p.on_lock_hash(seq1, hash1.wrapping_add(1)), "repeat of seq1 must not re-judge");
+        assert!(!p.on_lock_hash(seq1, hash1.wrapping_add(1)), "repeat of seq1 must not re-judge");
+
+        let seq2 = drive_one_lock(&mut p);
+        let hash2 = p.game().lock_hash();
+        assert!(
+            p.on_lock_hash(seq2, hash2.wrapping_add(1)),
+            "this is only the second real mismatch; the seq1 repeats must not have already counted it"
+        );
+    }
+
+    #[test]
+    fn unknown_lock_seq_is_skipped_without_marking_judged() {
+        let mut p = Predictor::new(42);
+        let seq = drive_one_lock(&mut p);
+        let bogus = seq + 100; // never recorded: not in the ring
+        assert!(!p.on_lock_hash(bogus, 0), "an unjudgeable pair must not trigger");
+        assert_eq!(p.last_judged, None, "an unjudgeable pair must not mark last_judged");
+    }
+
+    #[test]
+    fn keyframe_restore_clears_divergence_state() {
+        let mut p = Predictor::new(99);
+        let seq = drive_one_lock(&mut p);
+        let hash = p.game().lock_hash();
+        assert!(!p.on_lock_hash(seq, hash.wrapping_add(1)), "one mismatch recorded pre-restore");
+        assert_eq!(p.mismatches, 1);
+
+        let kf = p.game().snapshot_bytes();
+        p.on_snapshot(p.input_seq(), false, false, Some(&kf));
+        assert_eq!(p.mismatches, 0, "restore clears the mismatch counter");
+        assert!(p.lock_history.is_empty(), "restore clears the ring");
+        assert_eq!(p.last_judged, None, "restore clears last_judged");
+
+        // The pre-restore mismatching pair must no longer be able to fire: the ring no
+        // longer holds `seq`, so it is now unjudgeable rather than a second mismatch.
+        assert!(
+            !p.on_lock_hash(seq, hash.wrapping_add(1)),
+            "a pre-restore mismatch must not trigger after the ring is cleared"
+        );
     }
 }

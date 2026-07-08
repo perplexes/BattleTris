@@ -6,6 +6,7 @@ import { escapeHtml } from './dom-util.js';
 import { nextGag, initialGagState, type GagState } from './update-gag.js';
 import { showMotifDialog } from './motif-dialog.js';
 import { rollSpyMask, applySpyMask } from './spy-degrade.js';
+import { shouldSendResync } from './resync.js';
 
 // The `game` variable holds one of three wasm classes or null.
 type AnyGame = WasmGame | WasmVsComputer | WasmClient;
@@ -42,6 +43,11 @@ let searching = false;    // background matchmaking in progress (queued, not yet
 let authoritative = false; // true during a server-authoritative online match
 let currentMatchId: string | null = null; // the live bout's id (`match-<uuid>`); parked in the URL for rejoin-on-refresh
 let currentSeed: number | null = null;    // the game's RNG seed (shown in the debug overlay)
+// Wall-clock time (Date.now) of the last resync request sent this match, or null if
+// none has been sent yet. Threaded through `shouldSendResync` so the client's three
+// resync triggers (see `requestResync`) share one self-throttle. Reset in
+// `resetMatchState` for every new match (local or online).
+let resyncLastSentMs: number | null = null;
 let authSelf: SideStatus | null = null;       // latest authoritative own-status {funds,in_bazaar,lines_til_bazaar}
 let authOpp: OppStatus | null = null;        // latest authoritative opponent view {score,lines,game_over,in_bazaar?}
 let authSpying = false;    // is a spy of ours active (server-authorized)?
@@ -486,6 +492,16 @@ function applyBoardScale() {
 
 window.addEventListener('resize', applyBoardScale);
 
+// Tab return: a backgrounded tab's rAF loop stalls, so the fixed-step accumulator
+// falls behind; the gameLoop catch-up cap (MAX_STEPS_PER_FRAME) discards the backlog
+// rather than banking it, so the local sim can be well behind the server's state by
+// the time the tab is visible again. Request a resync right away instead of waiting
+// for the lock-hash detector to notice on its own cadence. `requestResync`'s own
+// guard makes this a no-op outside a live authoritative match.
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') requestResync();
+});
+
 const cancelSearchBtn = document.getElementById('cancelSearch') as HTMLElement;
 const playersCountEl = document.getElementById('playersCount') as HTMLElement | null;
 const hitCounterEl = document.getElementById('hitCounter') as HTMLElement | null;
@@ -789,6 +805,21 @@ function inBazaar() {
     return game!.is_in_bazaar();
 }
 
+// Ask the server for a fresh keyframe after a detected divergence. Guarded the same
+// way the snapshot/event handlers are (authoritative match, game present), so it is a
+// no-op in local modes or before a match has started, and self-throttled via
+// `shouldSendResync` (see resync.ts for why the client rate-limits itself on top of
+// the server's own 1/s grant limit). Three callers: the lock-hash divergence check
+// and the phantom local top-out check below in `applySnapshot`, and the tab-visibility
+// handler that requests a resync when a backgrounded tab regains focus.
+function requestResync(): void {
+    if (!(authoritative && game)) return;
+    const now = Date.now();
+    if (!shouldSendResync(now, resyncLastSentMs)) return;
+    resyncLastSentMs = now;
+    sendMsg({ type: 'resync' });
+}
+
 // An authoritative snapshot from the server: update opponent/own status, reconcile
 // the local prediction against it (in the shared Predictor), and latch the result.
 function applySnapshot(msg: Extract<ServerMessage, { type: 'snapshot' }>) {
@@ -809,6 +840,16 @@ function applySnapshot(msg: Extract<ServerMessage, { type: 'snapshot' }>) {
     const oppBaz = !!(msg.opp && msg.opp.in_bazaar);
     const keyframe = msg.keyframe ? Uint8Array.from(msg.keyframe) : new Uint8Array(0);
     (game as WasmClient).on_snapshot(msg.ack >>> 0, youBaz, oppBaz, keyframe);
+    // Divergence detector: judge the server's authoritative per-lock hash for our
+    // board against the local sim's own history of the same lock. A sustained
+    // mismatch means the local prediction has drifted; ask for a fresh keyframe.
+    if ((game as WasmClient).on_lock_hash(msg.lock_seq >>> 0, msg.lock_hash >>> 0)) requestResync();
+    // Phantom local top-out: the local sim thinks it topped out, but the server's
+    // authoritative result says the match is still ongoing. That disagreement is a
+    // divergence by definition, so treat it the same as a lock-hash mismatch. The
+    // authoritative `result` handled below stays the only real end; this does not
+    // change how the game-over overlay latches.
+    if (msg.result === 0 && (game as WasmClient).is_game_over()) requestResync();
     if (!gameEnded && (msg.result === 1 || msg.result === 2)) {
         gameEnded = true;
         gameOverText.textContent = msg.result === 1 ? 'YOU WIN!' : 'GAME OVER - You Lost';
@@ -1419,6 +1460,7 @@ let debugBazaar: string | null = null;
 function resetMatchState() {
     bazaarWasOpen = false;
     lastArsenalSig = null; // force the arsenal to re-render for the new game
+    resyncLastSentMs = null; // a fresh match has sent no resync request yet
 }
 
 function updateBazaarOverlay() {

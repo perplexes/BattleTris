@@ -122,6 +122,15 @@ export interface SnapshotMsg {
     /** Server-computed opponent funds revealed by our spy (Ames perturbed, Ace
      *  mostly exact, Condor exact); rides keyframes while spying. */
     spy_funds?: number;
+    /** The server's own per-lock counter for this client's board, incremented each
+     *  time a piece locks. Paired with `lock_hash` so the client can judge its local
+     *  sim against the authoritative one at the same lock. */
+    lock_seq: number;
+    /** The server's authoritative state hash for this client's board at `lock_seq`.
+     *  The client judges this against its local sim's own hash for the same lock
+     *  (`WasmClient.on_lock_hash`); a sustained mismatch means the client has
+     *  diverged and triggers a resync request. */
+    lock_hash: number;
 }
 
 export interface RatingMsg { type: 'rating'; mu: number; sigma: number; won: boolean; }
@@ -172,4 +181,7 @@ export type ClientMessage =
     | { type: 'leaveMatch' }
     /** Subscribe to live-site stats (lobby watch) — no target field for the stats variant. */
     | { type: 'watch' }
-    | { type: 'active' };
+    | { type: 'active' }
+    /** Ask the server for a fresh keyframe after the client's divergence detector
+     *  fires (`WasmClient.on_lock_hash`). The server rate-limits grants to 1/s. */
+    | { type: 'resync' };

@@ -450,6 +450,17 @@ impl WasmClient {
         self.inner.apply_event_json(input_json);
     }
 
+    /// Judge the server's authoritative per-lock hash, carried on every snapshot,
+    /// against the local sim's own ring of recent `(lock_seq, lock_hash)` pairs
+    /// (see [`bt_netcode::Predictor::on_lock_hash`]). Returns true when the client
+    /// has diverged and should ask the server for a fresh keyframe. `lock_seq`
+    /// narrows to `u32` at the wasm boundary for the same reason `ack` does on
+    /// [`on_snapshot`](Self::on_snapshot): wasm-bindgen maps `u64` to a JS BigInt,
+    /// and a match's lock count is nowhere near 2^32.
+    pub fn on_lock_hash(&mut self, lock_seq: u32, lock_hash: u32) -> bool {
+        self.inner.on_lock_hash(lock_seq as u64, lock_hash)
+    }
+
     /// Is a bazaar barrier up (either side shopping)? Gameplay is frozen while true.
     pub fn barrier(&self) -> bool {
         self.inner.barrier()

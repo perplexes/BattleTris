@@ -146,6 +146,20 @@ pub struct Snapshot {
     /// only on the throttled keyframe frames; omitted from the JSON otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keyframe: Option<Vec<u8>>,
+    /// This side's own lock counter, matching `Game::lock_seq` at snapshot time. A
+    /// client's local prediction runs the same deterministic engine independently, so
+    /// comparing its own counter (and [`Snapshot::lock_hash`]) against these on every
+    /// snapshot, not only on a throttled keyframe, catches a divergence at the lock
+    /// where it happened instead of waiting for the next keyframe. Cheap enough (one
+    /// integer) to ride every frame regardless of snapshot cadence.
+    pub lock_seq: u64,
+    /// This side's own per-lock state hash, matching `Game::lock_hash` at snapshot
+    /// time. A client compares its own hash at the same `lock_seq`; a mismatch means
+    /// the two sims have diverged, which is the trigger for the client to send a
+    /// `resync` control frame asking the server for a fresh keyframe. Computed by the
+    /// engine right after each lock resolves (see `Game::lock_hash_of`), so it reflects
+    /// the fully-settled post-lock state both sims are expected to agree on.
+    pub lock_hash: u32,
 }
 
 // The spy reveal math (per-spy hide percentage, the funds perturbation, and the
@@ -505,6 +519,8 @@ impl Bout {
             // op_funds-redacted in the keyframe: the opponent's funds reach a client
             // only through the spy-gated `spy_funds` scalar above, never the keyframe.
             keyframe: include_keyframe.then(|| me.client_keyframe_bytes()),
+            lock_seq: me.lock_seq(),
+            lock_hash: me.lock_hash(),
         }
     }
 
@@ -2064,5 +2080,66 @@ mod tests {
         assert_eq!(b.result(), 1, "A won (B topped out)");
         assert_eq!(b.snapshot_for(Side::A, false).result, 1, "A's POV: you won");
         assert_eq!(b.snapshot_for(Side::B, false).result, 2, "B's POV: you lost");
+    }
+
+    /// Drive `side`'s current piece to a hard-drop lock (fast drop, ~10ms/row over a
+    /// 28-row board, so it lands and slide-expires in well under 100 ticks) without
+    /// touching the other side's piece. 400 ticks is a large margin over that, while
+    /// staying far short of the ~900 ticks the OTHER side's un-dropped piece would
+    /// need to reach bottom under the normal 512ms/row fall (see
+    /// `every_legal_client_input_is_accepted_outside_bazaar`'s sibling comment on that
+    /// same constant), so the other side's lock counter stays untouched.
+    fn drive_one_lock(b: &mut Bout, side: Side) {
+        let start = b.versus.game(side).lock_seq();
+        for _ in 0..400 {
+            b.versus.game_mut(side).begin_drop();
+            b.tick(16);
+            if b.versus.game(side).lock_seq() > start || b.is_over() {
+                break;
+            }
+        }
+    }
+
+    // The client can only compare its own local lock counter/hash against the
+    // server's if the snapshot carries THIS SIDE's own pair, not a shared or
+    // opponent one. Drive a real lock on A only, then check: A's snapshot pair
+    // matches `Game::lock_seq`/`lock_hash` exactly, is nonzero, and B's (which never
+    // locked) stays at the fresh-game baseline and differs from A's.
+    #[test]
+    fn snapshot_carries_this_sides_own_lock_seq_and_hash() {
+        let mut b = Bout::new(11, 22);
+        assert_eq!(b.snapshot_for(Side::A, false).lock_seq, 0, "fresh game, no locks yet");
+        assert_eq!(b.snapshot_for(Side::B, false).lock_seq, 0, "fresh game, no locks yet");
+
+        drive_one_lock(&mut b, Side::A);
+        assert!(!b.is_over(), "a single piece must not top out a fresh board");
+        assert!(b.versus.game(Side::A).lock_seq() > 0, "test needs A to have actually locked a piece");
+
+        let sa = b.snapshot_for(Side::A, false);
+        let sb = b.snapshot_for(Side::B, false);
+        assert_eq!(sa.lock_seq, b.versus.game(Side::A).lock_seq(), "A's snapshot carries A's own lock_seq");
+        assert_eq!(sa.lock_hash, b.versus.game(Side::A).lock_hash(), "A's snapshot carries A's own lock_hash");
+        assert_eq!(sb.lock_seq, b.versus.game(Side::B).lock_seq(), "B's snapshot carries B's own lock_seq");
+        assert_eq!(sb.lock_seq, 0, "B never locked");
+        assert_ne!(
+            (sa.lock_seq, sa.lock_hash),
+            (sb.lock_seq, sb.lock_hash),
+            "each side's snapshot reports its OWN lock pair, not a shared one"
+        );
+    }
+
+    // The wire format (what `snapshot_message` actually sends) must carry
+    // `lock_seq`/`lock_hash` as plain numbers so a client can parse and compare them
+    // without any special-casing. Pin the JSON shape directly, independent of the
+    // `Snapshot` struct's Rust-side field types.
+    #[test]
+    fn snapshot_message_json_carries_numeric_lock_fields() {
+        let mut b = Bout::new(3, 4);
+        drive_one_lock(&mut b, Side::A);
+        let msg = b.snapshot_message(Side::A, false, false);
+        let v: serde_json::Value = serde_json::from_str(&msg).expect("snapshot_message is valid JSON");
+        assert!(v.get("lock_seq").is_some_and(|x| x.is_u64()), "lock_seq present and numeric");
+        assert!(v.get("lock_hash").is_some_and(|x| x.is_u64()), "lock_hash present and numeric");
+        assert_eq!(v["lock_seq"].as_u64(), Some(b.versus.game(Side::A).lock_seq()));
     }
 }

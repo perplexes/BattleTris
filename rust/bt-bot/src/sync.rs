@@ -14,6 +14,8 @@
 //! model-based no-freeze liveness property, P5). The driver ([`crate::drive_tick`])
 //! interprets the result.
 
+use std::time::{Duration, Instant};
+
 /// Everything `decide` needs, read once per tick from the live [`crate::MatchState`].
 /// All fields are observable with no hidden coupling, so the function is trivially
 /// testable. Their sources: `acked`/`auth_baz`/`opp_baz` come straight from the
@@ -86,6 +88,29 @@ pub fn decide(s: &SyncState) -> BotAction {
     } else {
         BotAction::Play
     }
+}
+
+/// How long a resync request holds off a repeat before another may be sent.
+const RESYNC_INTERVAL: Duration = Duration::from_secs(2);
+
+/// The bot self-throttles resync requests to at most one every [`RESYNC_INTERVAL`]:
+/// `Predictor::on_lock_hash` keeps reporting divergence on every snapshot until the
+/// keyframe it asked for actually lands and reconciles the local sim, and the server
+/// itself grants keyframes at most once a second per side, so firing a resync on
+/// every divergent snapshot would just spam a request the server drops. Returns
+/// whether a resync may be sent now: true when `last_sent` is `None` (never asked)
+/// or at least [`RESYNC_INTERVAL`] old, in which case `last_sent` is set to `now` so
+/// the window restarts from here; false otherwise, leaving `last_sent` untouched so
+/// the existing window keeps counting down toward the caller's next attempt.
+pub fn resync_due(last_sent: &mut Option<Instant>, now: Instant) -> bool {
+    let due = match last_sent {
+        None => true,
+        Some(t) => now.duration_since(*t) >= RESYNC_INTERVAL,
+    };
+    if due {
+        *last_sent = Some(now);
+    }
+    due
 }
 
 #[cfg(test)]
@@ -355,5 +380,37 @@ mod tests {
             bought: false,
         };
         assert_eq!(decide(&s), BotAction::Play, "fresh bout must be free to act");
+    }
+
+    /// A never-yet-asked `last_sent` must always be allowed, and the call must record
+    /// the time it was allowed at.
+    #[test]
+    fn resync_due_first_call_is_allowed() {
+        let mut last = None;
+        let now = Instant::now();
+        assert!(resync_due(&mut last, now));
+        assert_eq!(last, Some(now));
+    }
+
+    /// A call inside the throttle window must be denied, and must leave the stored
+    /// time exactly as it was (no partial reset from a denied attempt).
+    #[test]
+    fn resync_due_denies_within_window_and_keeps_it() {
+        let now = Instant::now();
+        let mut last = Some(now);
+        let still_inside = now + Duration::from_millis(500);
+        assert!(!resync_due(&mut last, still_inside));
+        assert_eq!(last, Some(now), "a denied call must not touch the stored time");
+    }
+
+    /// Once the window has fully elapsed, the next call is allowed again, and the
+    /// window restarts from that call's `now` rather than the original.
+    #[test]
+    fn resync_due_allows_again_after_window_expires() {
+        let now = Instant::now();
+        let mut last = Some(now);
+        let expired = now + RESYNC_INTERVAL;
+        assert!(resync_due(&mut last, expired));
+        assert_eq!(last, Some(expired), "the window restarts from the newly-allowed call");
     }
 }
