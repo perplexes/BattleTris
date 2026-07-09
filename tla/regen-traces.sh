@@ -33,6 +33,8 @@ SCENARIOS=(
   "weapon_then_cross:GenWeaponCross.cfg:Gen.tla"
   "reconnect_snapback:GenReconnect.cfg:Gen.tla"
   "two_bazaar_visits:GenTwoVisits.cfg:Gen.tla"
+  "event_then_resync:GenEventResync.cfg:Gen.tla"
+  "drift_rejoin:GenDriftRejoin.cfg:Gen.tla"
 )
 
 OUT_DIR="$TRACES"

@@ -4,8 +4,11 @@
 (* only produces a single bazaar-crossing), `Gen` is a superset model that   *)
 (* drives the SAME server semantics as `Netcode.tla`'s `ServerDeliverInput`  *)
 (* across the WHOLE feature space — bazaar entry/exit, barrier crossings,     *)
-(* weapon deliveries, AND reconnect/reset_ack (the snap-back path) — and      *)
-(* stamps EVERY state with an explicit `lastAction` string.                  *)
+(* weapon deliveries, reconnect/reset_ack (the snap-back path), AND an        *)
+(* abstract client-consistency layer (cross-player events, a late-applied     *)
+(* event drifting the local sim, the hash-mismatch resync, and a reconnect    *)
+(* while drifted) — and stamps EVERY state with an explicit `lastAction`      *)
+(* string.                                                                  *)
 (*                                                                          *)
 (* Why an explicit `lastAction`: the Rust harness must map each model step to *)
 (* exactly one `Bout` operation. Inferring the action by DIFFING consecutive *)
@@ -56,11 +59,27 @@ VARIABLES
     \* @type: Bool;
     reachedReconnect,    \* a Reconnect (reset_ack) has happened
     \* @type: Int;
-    ackAtReconnect       \* serverAck the instant a Reconnect last fired (snap-back fuel)
+    ackAtReconnect,      \* serverAck the instant a Reconnect last fired (snap-back fuel)
+    \* @type: Str;
+    clientState,         \* the client's local-sim consistency: "consistent" | "drifted"
+    \* @type: Int;
+    eventsInFlight,      \* cross-player events emitted by the relay, not yet applied locally
+    \* @type: Int;
+    eventsApplied,       \* cross-player events the client has applied to its local sim (cumulative)
+    \* @type: Bool;
+    hashMismatchPending, \* the client's per-lock hash detector fired; a resync request is in flight
+    \* @type: Bool;
+    reachedLateEvent,    \* a cross-player event was applied LATE (drifted the local sim)
+    \* @type: Bool;
+    reachedResyncKf,     \* a resync keyframe restored the client after a drift
+    \* @type: Bool;
+    reachedDriftRejoin   \* a Reconnect happened while the client was drifted
 
 vars == << clientSeq, serverAck, serverBazaar, connected, weaponsApplied,
            inputChan, lastAction, bazaarVisits,
-           reachedCross, reachedWeaponApply, reachedReconnect, ackAtReconnect >>
+           reachedCross, reachedWeaponApply, reachedReconnect, ackAtReconnect,
+           clientState, eventsInFlight, eventsApplied, hashMismatchPending,
+           reachedLateEvent, reachedResyncKf, reachedDriftRejoin >>
 
 Init ==
     /\ clientSeq = 0
@@ -75,6 +94,13 @@ Init ==
     /\ reachedWeaponApply = FALSE
     /\ reachedReconnect = FALSE
     /\ ackAtReconnect = 0
+    /\ clientState = "consistent"
+    /\ eventsInFlight = 0
+    /\ eventsApplied = 0
+    /\ hashMismatchPending = FALSE
+    /\ reachedLateEvent = FALSE
+    /\ reachedResyncKf = FALSE
+    /\ reachedDriftRejoin = FALSE
 
 \* The client sends a gameplay input (predicting ahead).
 ClientSendGameplay ==
@@ -83,7 +109,9 @@ ClientSendGameplay ==
     /\ inputChan' = Append(inputChan, [ seq |-> clientSeq + 1, kind |-> "G" ])
     /\ lastAction' = "ClientSendGameplay"
     /\ UNCHANGED << serverAck, serverBazaar, connected, weaponsApplied, bazaarVisits,
-                    reachedCross, reachedWeaponApply, reachedReconnect, ackAtReconnect >>
+                    reachedCross, reachedWeaponApply, reachedReconnect, ackAtReconnect,
+                    clientState, eventsInFlight, eventsApplied, hashMismatchPending,
+                    reachedLateEvent, reachedResyncKf, reachedDriftRejoin >>
 
 \* The client fires a weapon (a non-shopping input, same barrier class as gameplay).
 ClientFireWeapon ==
@@ -92,7 +120,9 @@ ClientFireWeapon ==
     /\ inputChan' = Append(inputChan, [ seq |-> clientSeq + 1, kind |-> "W" ])
     /\ lastAction' = "ClientFireWeapon"
     /\ UNCHANGED << serverAck, serverBazaar, connected, weaponsApplied, bazaarVisits,
-                    reachedCross, reachedWeaponApply, reachedReconnect, ackAtReconnect >>
+                    reachedCross, reachedWeaponApply, reachedReconnect, ackAtReconnect,
+                    clientState, eventsInFlight, eventsApplied, hashMismatchPending,
+                    reachedLateEvent, reachedResyncKf, reachedDriftRejoin >>
 
 \* The client sends a LeaveBazaar.
 ClientSendLeave ==
@@ -101,7 +131,9 @@ ClientSendLeave ==
     /\ inputChan' = Append(inputChan, [ seq |-> clientSeq + 1, kind |-> "L" ])
     /\ lastAction' = "ClientSendLeave"
     /\ UNCHANGED << serverAck, serverBazaar, connected, weaponsApplied, bazaarVisits,
-                    reachedCross, reachedWeaponApply, reachedReconnect, ackAtReconnect >>
+                    reachedCross, reachedWeaponApply, reachedReconnect, ackAtReconnect,
+                    clientState, eventsInFlight, eventsApplied, hashMismatchPending,
+                    reachedLateEvent, reachedResyncKf, reachedDriftRejoin >>
 
 \* The server's combined lines cross: this side enters the bazaar.
 ServerEnterBazaar ==
@@ -110,7 +142,9 @@ ServerEnterBazaar ==
     /\ bazaarVisits' = bazaarVisits + 1
     /\ lastAction' = "ServerEnterBazaar"
     /\ UNCHANGED << clientSeq, serverAck, connected, weaponsApplied, inputChan,
-                    reachedCross, reachedWeaponApply, reachedReconnect, ackAtReconnect >>
+                    reachedCross, reachedWeaponApply, reachedReconnect, ackAtReconnect,
+                    clientState, eventsInFlight, eventsApplied, hashMismatchPending,
+                    reachedLateEvent, reachedResyncKf, reachedDriftRejoin >>
 
 \* Process the next client input — EXACTLY Netcode.tla's ServerDeliverInput (and the
 \* real Bout::apply_input): stale-reject; L leaves; G/W barrier-reject while in the
@@ -137,19 +171,91 @@ ServerDeliverInput ==
                           /\ weaponsApplied' = IF in.kind = "W" THEN weaponsApplied + 1 ELSE weaponsApplied
                           /\ reachedWeaponApply' = IF in.kind = "W" THEN TRUE ELSE reachedWeaponApply
                           /\ UNCHANGED << serverBazaar, reachedCross >>
-    /\ UNCHANGED << clientSeq, connected, bazaarVisits, reachedReconnect, ackAtReconnect >>
+    /\ UNCHANGED << clientSeq, connected, bazaarVisits, reachedReconnect, ackAtReconnect,
+                    clientState, eventsInFlight, eventsApplied, hashMismatchPending,
+                    reachedLateEvent, reachedResyncKf, reachedDriftRejoin >>
 
-\* The socket drops: the client's in-flight inputs are flushed; the bout freezes.
+\* The relay emits a cross-player event bound for this side's client (a weapon, a score
+\* mirror, ...). Guarded off the bazaar: the real relay cannot emit while the barrier
+\* freezes the match, and the harness realizes an emission by actually launching an
+\* opponent weapon, which a frozen Versus would not flush.
+EmitEvent ==
+    /\ connected /\ ~serverBazaar /\ eventsInFlight < MaxChan
+    /\ eventsInFlight' = eventsInFlight + 1
+    /\ lastAction' = "EmitEvent"
+    /\ UNCHANGED << clientSeq, serverAck, serverBazaar, connected, weaponsApplied, inputChan,
+                    bazaarVisits, reachedCross, reachedWeaponApply, reachedReconnect,
+                    ackAtReconnect, clientState, eventsApplied, hashMismatchPending,
+                    reachedLateEvent, reachedResyncKf, reachedDriftRejoin >>
+
+\* The client applies a queued cross-player event ON TIME: the two sims stay in lockstep.
+ClientApplyEvent ==
+    /\ connected /\ eventsInFlight > 0
+    /\ eventsInFlight' = eventsInFlight - 1
+    /\ eventsApplied' = eventsApplied + 1
+    /\ lastAction' = "ClientApplyEvent"
+    /\ UNCHANGED << clientSeq, serverAck, serverBazaar, connected, weaponsApplied, inputChan,
+                    bazaarVisits, reachedCross, reachedWeaponApply, reachedReconnect,
+                    ackAtReconnect, clientState, hashMismatchPending,
+                    reachedLateEvent, reachedResyncKf, reachedDriftRejoin >>
+
+\* The client applies a queued cross-player event LATE: the local sim's tick when the
+\* event lands no longer matches the server's, so the two sims MAY now disagree.
+ClientApplyEventLate ==
+    /\ connected /\ eventsInFlight > 0
+    /\ eventsInFlight' = eventsInFlight - 1
+    /\ eventsApplied' = eventsApplied + 1
+    /\ clientState' = "drifted"
+    /\ reachedLateEvent' = TRUE
+    /\ lastAction' = "ClientApplyEventLate"
+    /\ UNCHANGED << clientSeq, serverAck, serverBazaar, connected, weaponsApplied, inputChan,
+                    bazaarVisits, reachedCross, reachedWeaponApply, reachedReconnect,
+                    ackAtReconnect, hashMismatchPending, reachedResyncKf,
+                    reachedDriftRejoin >>
+
+\* The client's per-lock hash detector fires: a resync request is now in flight.
+HashMismatch ==
+    /\ connected /\ clientState = "drifted" /\ ~hashMismatchPending
+    /\ hashMismatchPending' = TRUE
+    /\ lastAction' = "HashMismatch"
+    /\ UNCHANGED << clientSeq, serverAck, serverBazaar, connected, weaponsApplied, inputChan,
+                    bazaarVisits, reachedCross, reachedWeaponApply, reachedReconnect,
+                    ackAtReconnect, clientState, eventsInFlight, eventsApplied,
+                    reachedLateEvent, reachedResyncKf, reachedDriftRejoin >>
+
+\* The grant, keyframe delivery, and restore — collapsed to one step because the
+\* harness realizes them as one operation: the resync is granted, the keyframe
+\* arrives, and the client restores to the authoritative state.
+ResyncKeyframe ==
+    /\ connected /\ hashMismatchPending
+    /\ hashMismatchPending' = FALSE
+    /\ clientState' = "consistent"
+    /\ reachedResyncKf' = TRUE
+    /\ lastAction' = "ResyncKeyframe"
+    /\ UNCHANGED << clientSeq, serverAck, serverBazaar, connected, weaponsApplied, inputChan,
+                    bazaarVisits, reachedCross, reachedWeaponApply, reachedReconnect,
+                    ackAtReconnect, eventsInFlight, eventsApplied,
+                    reachedLateEvent, reachedDriftRejoin >>
+
+\* The socket drops: the client's in-flight inputs are flushed; the bout freezes. The
+\* in-flight cross-player events and any pending hash-mismatch resync are flushed too
+\* (the socket that would have carried them is gone).
 Disconnect ==
     /\ connected
     /\ connected' = FALSE
     /\ inputChan' = << >>
+    /\ eventsInFlight' = 0
+    /\ hashMismatchPending' = FALSE
     /\ lastAction' = "Disconnect"
     /\ UNCHANGED << clientSeq, serverAck, serverBazaar, weaponsApplied, bazaarVisits,
-                    reachedCross, reachedWeaponApply, reachedReconnect, ackAtReconnect >>
+                    reachedCross, reachedWeaponApply, reachedReconnect, ackAtReconnect,
+                    clientState, eventsApplied, reachedLateEvent, reachedResyncKf,
+                    reachedDriftRejoin >>
 
 \* The client reloads + reconnects: it restarts seq at 0 and the server runs reset_ack
-\* (the fix) so the fresh low seqs aren't `seq <= ack`-rejected (the snap-back).
+\* (the fix) so the fresh low seqs aren't `seq <= ack`-rejected (the snap-back). The
+\* reattach keyframe restores the client too, so a drifted client becomes consistent
+\* again here (recorded in reachedDriftRejoin before the state is overwritten).
 Reconnect ==
     /\ ~connected
     /\ connected' = TRUE
@@ -158,13 +264,19 @@ Reconnect ==
     /\ lastAction' = "Reconnect"
     /\ reachedReconnect' = TRUE
     /\ ackAtReconnect' = serverAck   \* the ack JUST BEFORE reset_ack drops it
+    /\ reachedDriftRejoin' = (reachedDriftRejoin \/ (clientState = "drifted"))
+    /\ clientState' = "consistent"
     /\ UNCHANGED << serverBazaar, weaponsApplied, inputChan, bazaarVisits,
-                    reachedCross, reachedWeaponApply >>
+                    reachedCross, reachedWeaponApply,
+                    eventsInFlight, eventsApplied, hashMismatchPending,
+                    reachedLateEvent, reachedResyncKf >>
 
 Next ==
     \/ ClientSendGameplay \/ ClientFireWeapon \/ ClientSendLeave
     \/ ServerEnterBazaar  \/ ServerDeliverInput
     \/ Disconnect         \/ Reconnect
+    \/ EmitEvent \/ ClientApplyEvent \/ ClientApplyEventLate
+    \/ HashMismatch \/ ResyncKeyframe
 
 Spec == Init /\ [][Next]_vars
 
@@ -186,5 +298,14 @@ NotReconnectedWithHistory == ~(reachedReconnect /\ ackAtReconnect > 0)
 
 \* The server has entered the bazaar at least twice (multiple visits in one trace).
 NotTwoVisits == bazaarVisits < 2
+
+\* A cross-player event was applied LATE (drifting the client) AND a resync keyframe
+\* later restored it — forces a trace that exercises the whole hash-mismatch detect +
+\* resync-restore path, not just the drift by itself.
+NotEventThenResync == ~(reachedLateEvent /\ reachedResyncKf)
+
+\* The client reconnected WHILE drifted — forces a trace where the reattach keyframe is
+\* what restores a drifted client, not merely a consistent one.
+NotDriftRejoin == ~reachedDriftRejoin
 
 ===============================================================================

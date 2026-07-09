@@ -95,6 +95,10 @@ run_check Error   NotCrossed 6  Cross.cfg       Cross.tla   "Cross generator -> 
 run_check Error   NoDeadlock        10 NetcodeBugAck.cfg   Netcode.tla "Netcode ack OFF   -> NoDeadlock violated"
 run_check Error   AckBounds         10 NetcodeBugReset.cfg Netcode.tla "Netcode reset OFF -> AckBounds violated"
 run_check Error   LeaveOnlyWhenReal 10 NetcodeBugLeave.cfg Netcode.tla "Netcode leave OFF -> LeaveOnlyWhenReal violated"
+run_check Error   ResyncConvergence     10 NetcodeBugKfRestore.cfg   Netcode.tla "Netcode kf restore OFF -> ResyncConvergence violated"
+run_check Error   NoResyncStorm         10 NetcodeBugStorm.cfg       Netcode.tla "Netcode resync-guard OFF -> NoResyncStorm violated"
+run_check Error   EventDeliveryAccounted 10 NetcodeBugReplay.cfg     Netcode.tla "Netcode replay-guard OFF -> EventDeliveryAccounted violated"
+run_check Error   ResultIndependence    10 NetcodeBugResyncWrite.cfg Netcode.tla "Netcode resync-write OFF -> ResultIndependence violated"
 
 # A REDUCED-length all-fixed Netcode check (NOT the full ~6.5-min length-14 run, which
 # is gated behind tla-full): every invariant holds to a short bound. Catches an

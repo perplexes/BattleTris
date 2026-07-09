@@ -1148,23 +1148,33 @@ mod tests {
     // -----------------------------------------------------------------------
     // TLA+ CONFORMANCE (à la modelator), DATA-DRIVEN over a CORPUS of Apalache traces.
     // Every `*.itf.json` in `tests/traces/` is an Apalache-generated trace of the
-    // `Gen.tla` server semantics (the same `ServerDeliverInput` as `Netcode.tla`); we
-    // replay each against the REAL `Bout` and assert the implementation's
-    // (ack, in_bazaar, weapons-applied) tracks the MODEL's (serverAck, serverBazaar,
-    // weaponsApplied) after EVERY state. The corpus covers the bazaar crossing (the
-    // ack-on-barrier-reject step), weapon delivery + a later crossing, the
-    // reconnect/reset_ack snap-back, and multiple bazaar visits, so the model and the
-    // Rust share one source of truth across the whole feature space, not just one path.
+    // `Gen.tla` server-plus-client-consistency semantics (the same `ServerDeliverInput`
+    // as `Netcode.tla`, plus an abstract layer for cross-player event delivery, a
+    // late-applied event drifting the client, the hash-mismatch resync, and a
+    // reconnect while drifted); we replay each against the REAL `Bout` AND a REAL
+    // `bt_netcode::Predictor` and assert the implementation's (ack, in_bazaar,
+    // weapons-applied) tracks the MODEL's (serverAck, serverBazaar, weaponsApplied),
+    // and the predictor's (seq stream, held-event count, applied-event count, lock
+    // pair while consistent) tracks the model's (clientSeq, eventsInFlight,
+    // eventsApplied, clientState), after EVERY state. The corpus covers the bazaar
+    // crossing (the ack-on-barrier-reject step), weapon delivery + a later crossing,
+    // the reconnect/reset_ack snap-back, multiple bazaar visits, a late-applied event
+    // resynced via keyframe, and a reconnect while drifted, so the model and the Rust
+    // share one source of truth across the whole feature space, not just one path.
     //
     // The mapping is driven by each state's EXPLICIT `lastAction` string (emitted by
     // `Gen.tla`), not inferred by diffing consecutive states, so a step can never be
     // silently mis-mapped or skipped. Any `lastAction` the harness doesn't know how to
-    // drive against a `Bout` is a HARD FAILURE (`panic!`), never a silent pass.
+    // drive against a `Bout`/`Predictor` is a HARD FAILURE (`panic!`), never a silent
+    // pass.
     //
     // Teeth: the corpus is required to exercise a barrier crossing (a G/W input the
     // bazaar rejects, where the model advances ack); reverting the ack-on-barrier-reject
     // fix makes the per-state ack assertion fire at that step. (The reconnect fixture
-    // gives the reset_ack path its own teeth; see `reset_ack` below.)
+    // gives the reset_ack path its own teeth; see `reset_ack` below.) The corpus is
+    // also required to exercise a late-applied event, a resync keyframe, and a
+    // drifted reconnect; see the teeth asserts in
+    // `apply_input_conforms_to_every_tla_trace` below.
     fn itf_int(v: &serde_json::Value) -> i64 {
         v.get("#bigint").and_then(|b| b.as_str()).map(|s| s.parse().unwrap())
             .unwrap_or_else(|| v.as_i64().expect("itf int"))
@@ -1197,6 +1207,13 @@ mod tests {
         /// The max `weaponsApplied` the model reached (and the oracle matched) in this
         /// trace; > 0 proves the weapons oracle was genuinely exercised, not vacuously 0.
         max_weapons_applied: u64,
+        /// A `ClientApplyEventLate` step occurred: the drift teeth.
+        saw_late_event: bool,
+        /// A `ResyncKeyframe` step occurred: the resync-convergence teeth.
+        saw_resync_kf: bool,
+        /// A `Reconnect` occurred while the PREVIOUS state's `clientState` was
+        /// "drifted": the drifted-reconnect teeth.
+        saw_drift_rejoin: bool,
     }
 
     /// Replay one Apalache trace against a real `Bout`, asserting conformance after every
@@ -1214,6 +1231,11 @@ mod tests {
         let ack = |s: &serde_json::Value| itf_int(&s["serverAck"]) as u64;
         let conn = |s: &serde_json::Value| s["connected"].as_bool().unwrap();
         let w_applied = |s: &serde_json::Value| itf_int(&s["weaponsApplied"]) as u64;
+        // The client-consistency fields every regenerated fixture carries. No Option
+        // fallback: a fixture missing one of these is a schema regression and must panic.
+        let client_state = |s: &serde_json::Value| s["clientState"].as_str().unwrap().to_string();
+        let events_in_flight = |s: &serde_json::Value| itf_int(&s["eventsInFlight"]) as u64;
+        let events_applied_model = |s: &serde_json::Value| itf_int(&s["eventsApplied"]) as u64;
         fn action<'a>(name: &str, s: &'a serde_json::Value) -> &'a str {
             s["lastAction"].as_str()
                 .unwrap_or_else(|| panic!("{name}: a state is missing lastAction"))
@@ -1227,12 +1249,28 @@ mod tests {
         for _ in 0..8 {
             b.versus.game_mut(side).grant_weapon(bt_core::WeaponToken::RiseUp);
         }
+        // The real client alongside the mock server, seeded to match side A (`Bout::new`
+        // above gives side A seed 7), stocked with the same 8 RiseUp grants as the bout
+        // side so a held event (a RiseUp launch) applies cleanly to its local sim too.
+        let mut predictor = bt_netcode::Predictor::new(7);
+        for _ in 0..8 {
+            predictor.game_mut().grant_weapon(bt_core::WeaponToken::RiseUp);
+        }
+        // Cross-player events the relay has emitted but the client hasn't applied yet
+        // (emitted-but-unapplied, mirrors the model's `eventsInFlight`), oldest first.
+        let mut held: Vec<Input> = Vec::new();
+        // How many cross-player events the client has applied to its local sim
+        // (mirrors the model's cumulative `eventsApplied`).
+        let mut events_applied: u64 = 0;
         // Our independent oracle of the model's `weaponsApplied`: count the "W" inputs the
         // real `apply_input` ACCEPTS (a weapon delivered in normal play). It must track
         // the model's cumulative counter at every state.
         let mut weapons_applied: u64 = 0;
         let mut saw_crossing = false;
         let mut saw_reconnect = false;
+        let mut saw_late_event = false;
+        let mut saw_resync_kf = false;
+        let mut saw_drift_rejoin = false;
 
         // State 0 must match the model's initial state.
         assert_eq!(b.snapshot_for(side, false).ack, ack(&states[0]), "{name}: ack @ state 0");
@@ -1241,17 +1279,117 @@ mod tests {
         for i in 1..states.len() {
             let (prev, cur) = (&states[i - 1], &states[i]);
             match action(name, cur) {
-                // Pure client/transport steps: no server-side `Bout` effect.
-                "ClientSendGameplay" | "ClientFireWeapon" | "ClientSendLeave" | "Disconnect" => {}
+                // The client predicts a gameplay input locally and sends it: assert the
+                // real client's seq stream matches the model's clientSeq (the send-side
+                // conformance point). The predictor's barrier flags are never set true by
+                // this harness (every `on_snapshot` call below passes false/false), so
+                // `predict` never suppresses here.
+                "ClientSendGameplay" => {
+                    let (seq, _) = predictor.predict(Input::MoveLeft).expect("gameplay predicts");
+                    assert_eq!(seq, itf_int(&cur["clientSeq"]) as u64,
+                        "{name}@{i}: predictor seq diverged from the model's clientSeq");
+                }
+                "ClientFireWeapon" => {
+                    let (seq, _) = predictor.predict(Input::LaunchWeapon(0)).expect("weapon predicts");
+                    assert_eq!(seq, itf_int(&cur["clientSeq"]) as u64,
+                        "{name}@{i}: predictor seq diverged from the model's clientSeq");
+                }
+                "ClientSendLeave" => {
+                    let (seq, _) = predictor.predict(Input::LeaveBazaar).expect("leave predicts");
+                    assert_eq!(seq, itf_int(&cur["clientSeq"]) as u64,
+                        "{name}@{i}: predictor seq diverged from the model's clientSeq");
+                }
+                // Pure transport step: no server-side `Bout` effect.
+                "Disconnect" => {}
                 // The opponent's lines crossed: drive the real server into the bazaar.
                 "ServerEnterBazaar" => force_into_bazaar(&mut b, side),
+                // Realize a real cross-player emission: grant side B a weapon and launch
+                // it, then tick both sims in lockstep until the relay actually flushes an
+                // event to side A. Ticking the predictor alongside the bout on every tick
+                // is what keeps the two sims' clocks identical, which is what makes the
+                // lock-pair conformance below meaningful; the total tick budget across a
+                // trace this short (<= 12 states) stays far below one 512ms gravity step,
+                // so no piece ever moves or locks from these ticks.
+                "EmitEvent" => {
+                    b.versus.game_mut(Side::B).grant_weapon(bt_core::WeaponToken::RiseUp);
+                    b.versus.game_mut(Side::B).launch_weapon(0);
+                    let mut delivered = Vec::new();
+                    for _ in 0..8 {
+                        b.tick(16);
+                        predictor.tick(16);
+                        delivered = b.take_events_for(Side::A);
+                        if !delivered.is_empty() {
+                            break;
+                        }
+                    }
+                    assert!(!delivered.is_empty(),
+                        "{name}@{i}: EmitEvent produced no cross-player event within the tick budget");
+                    held.extend(delivered);
+                }
+                // The model's "late" is an over-approximating abstraction: a late-applied
+                // event MAY diverge the real sims. The harness therefore asserts real
+                // lockstep only when the model claims "consistent", never the converse
+                // (see the per-state check below); both arms apply the held event the
+                // same way against the real predictor.
+                "ClientApplyEvent" | "ClientApplyEventLate" => {
+                    assert!(!held.is_empty(), "{name}@{i}: no held event to apply");
+                    let ev = held.remove(0);
+                    predictor.apply_event(&ev);
+                    events_applied += 1;
+                    if action(name, cur) == "ClientApplyEventLate" {
+                        saw_late_event = true;
+                    }
+                }
+                // Forcing the real two-strike detector to fire would need lock traffic
+                // these short traces do not carry; the detector's own firing semantics are
+                // pinned by bt-netcode's unit and property tests. Here we just feed the
+                // real authoritative pair and ignore the verdict.
+                "HashMismatch" => {
+                    let _ = predictor.on_lock_hash(
+                        b.versus.game(side).lock_seq(),
+                        b.versus.game(side).lock_hash(),
+                    );
+                }
+                // The grant, keyframe delivery, and restore, realized against the real
+                // client: assert the restore actually reconciled the predictor to the
+                // authoritative side (the ResyncConvergence conformance point). false/false
+                // for the bazaar flags: the barrier protocol has its own fixtures and
+                // tests, and feeding the real flags here could suppress later predicts and
+                // desync the seq oracle from the model, which never gates sends.
+                "ResyncKeyframe" => {
+                    let snap = b.snapshot_for(side, true);
+                    let kf = snap.keyframe.expect("resync snapshot carries a keyframe");
+                    predictor.on_snapshot(snap.ack, false, false, Some(&kf));
+                    assert_eq!(predictor.game().lock_seq(), b.versus.game(side).lock_seq(),
+                        "{name}@{i}: resync did not reconcile lock_seq");
+                    assert_eq!(predictor.game().lock_hash(), b.versus.game(side).lock_hash(),
+                        "{name}@{i}: resync did not reconcile lock_hash");
+                    saw_resync_kf = true;
+                }
                 // The client reloaded + reconnected: the server runs reset_ack. This is
                 // the snap-back fix's conformance point: the model drops serverAck to 0
                 // here, so the real Bout must too (the per-state ack check below fires if
-                // reset_ack is reverted).
+                // reset_ack is reverted). The real client also restarts its seq at 0 on
+                // rejoin, exactly like the model, so it gets a fresh Predictor restocked
+                // with the same 8 RiseUp grants; the reattach keyframe then restores it,
+                // exactly like ResyncKeyframe.
                 "Reconnect" => {
                     b.reset_ack(side);
                     saw_reconnect = true;
+                    if client_state(prev) == "drifted" {
+                        saw_drift_rejoin = true;
+                    }
+                    predictor = bt_netcode::Predictor::new(7);
+                    for _ in 0..8 {
+                        predictor.game_mut().grant_weapon(bt_core::WeaponToken::RiseUp);
+                    }
+                    let snap = b.snapshot_for(side, true);
+                    let kf = snap.keyframe.expect("reattach snapshot carries a keyframe");
+                    predictor.on_snapshot(snap.ack, false, false, Some(&kf));
+                    assert_eq!(predictor.game().lock_seq(), b.versus.game(side).lock_seq(),
+                        "{name}@{i}: reattach keyframe did not reconcile lock_seq");
+                    assert_eq!(predictor.game().lock_hash(), b.versus.game(side).lock_hash(),
+                        "{name}@{i}: reattach keyframe did not reconcile lock_hash");
                 }
                 // Process the next client input: feed the delivered HEAD of the previous
                 // state's channel to the real apply_input (the model's ServerDeliverInput).
@@ -1312,10 +1450,40 @@ mod tests {
                 "{name}@{i}: weapons-applied diverged from the model's weaponsApplied \
                  (action {:?})", action(name, cur)
             );
+            // Client-consistency conformance: the held-event queue and the applied-event
+            // counter must track the model's eventsInFlight/eventsApplied at every state,
+            // and while the model claims the client is "consistent" the real predictor's
+            // lock pair must equal the bout's (the over-approximation only runs the other
+            // direction: see the "late" comment above).
+            assert_eq!(
+                held.len() as u64, events_in_flight(cur),
+                "{name}@{i}: held event count diverged from the model's eventsInFlight \
+                 (action {:?})", action(name, cur)
+            );
+            assert_eq!(
+                events_applied, events_applied_model(cur),
+                "{name}@{i}: events-applied diverged from the model's eventsApplied \
+                 (action {:?})", action(name, cur)
+            );
+            if client_state(cur) == "consistent" {
+                assert_eq!(predictor.game().lock_seq(), b.versus.game(side).lock_seq(),
+                    "{name}@{i}: predictor lock_seq diverged from the bout while the model \
+                     claims \"consistent\" (action {:?})", action(name, cur));
+                assert_eq!(predictor.game().lock_hash(), b.versus.game(side).lock_hash(),
+                    "{name}@{i}: predictor lock_hash diverged from the bout while the model \
+                     claims \"consistent\" (action {:?})", action(name, cur));
+            }
         }
         // `weapons_applied` only increments and equals the model at every state, so its
         // final value is the max reached in this trace.
-        TraceCoverage { saw_crossing, saw_reconnect, max_weapons_applied: weapons_applied }
+        TraceCoverage {
+            saw_crossing,
+            saw_reconnect,
+            max_weapons_applied: weapons_applied,
+            saw_late_event,
+            saw_resync_kf,
+            saw_drift_rejoin,
+        }
     }
 
     #[test]
@@ -1325,6 +1493,9 @@ mod tests {
         let mut any_crossing = false;
         let mut any_reconnect = false;
         let mut max_weapons = 0u64;
+        let mut any_late_event = false;
+        let mut any_resync_kf = false;
+        let mut any_drift_rejoin = false;
         let mut seen: Vec<String> = Vec::new();
         for entry in std::fs::read_dir(dir).expect("read the traces dir") {
             let path = entry.expect("dir entry").path();
@@ -1342,14 +1513,17 @@ mod tests {
             any_crossing |= cov.saw_crossing;
             any_reconnect |= cov.saw_reconnect;
             max_weapons = max_weapons.max(cov.max_weapons_applied);
+            any_late_event |= cov.saw_late_event;
+            any_resync_kf |= cov.saw_resync_kf;
+            any_drift_rejoin |= cov.saw_drift_rejoin;
             replayed += 1;
             seen.push(name);
         }
         seen.sort();
         // Guard against an empty/renamed corpus silently passing (no traces => nothing
-        // checked). We commit several fixtures; require the harness actually ran them.
-        assert!(replayed >= 4,
-            "expected >= 4 trace fixtures in tests/traces, replayed {replayed}: {seen:?}");
+        // checked). We commit six fixtures; require the harness actually ran them.
+        assert!(replayed >= 6,
+            "expected >= 6 trace fixtures in tests/traces, replayed {replayed}: {seen:?}");
         // Teeth (ack-on-barrier-reject): SOMEWHERE in the corpus a barrier crossing must
         // occur, where reverting the ack fix makes a per-state ack assertion fire.
         assert!(any_crossing,
@@ -1360,6 +1534,18 @@ mod tests {
         // same-SCHEMA but reconnect-free trace) and silently go untested.
         assert!(any_reconnect,
             "no trace in the corpus exercised a Reconnect; the reset_ack teeth are gone");
+        // Teeth (drift / resync / drifted-reconnect): SOMEWHERE in the corpus a
+        // late-applied event, a resync keyframe, and a reconnect while drifted must each
+        // occur, or the new client-consistency conformance points could silently rot (a
+        // regen that stopped exercising one of them would otherwise pass unnoticed).
+        assert!(any_late_event,
+            "no trace in the corpus exercised a late-applied event; the drift teeth are gone");
+        assert!(any_resync_kf,
+            "no trace in the corpus exercised a resync keyframe; the resync-convergence \
+             teeth are gone");
+        assert!(any_drift_rejoin,
+            "no trace in the corpus exercised a reconnect while drifted; the \
+             drifted-reconnect teeth are gone");
         // Non-vacuity for the weapons-applied oracle: at least one trace must actually
         // deliver a weapon in normal play (weaponsApplied > 0), so the per-state
         // weapons-applied conformance assert (and its arsenal-decrement witness) is

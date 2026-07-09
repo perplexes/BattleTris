@@ -41,3 +41,7 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 proptest = "1"
+# The Predictor drives a REAL client alongside the ITF-trace-driven mock server in
+# the conformance harness (see `replay_itf_trace` in `src/bout.rs`), so the harness
+# checks the client and server share one seq/event/resync model, not just the server.
+bt-netcode = { path = "../bt-netcode" }

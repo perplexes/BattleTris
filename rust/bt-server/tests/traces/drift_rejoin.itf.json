@@ -62,7 +62,7 @@
         "#bigint": "3"
       },
       "MaxSeq": {
-        "#bigint": "6"
+        "#bigint": "4"
       },
       "ResetAckOnReattach": true,
       "ackAtReconnect": {
@@ -108,7 +108,7 @@
         "#bigint": "3"
       },
       "MaxSeq": {
-        "#bigint": "6"
+        "#bigint": "4"
       },
       "ResetAckOnReattach": true,
       "ackAtReconnect": {
@@ -118,7 +118,7 @@
         "#bigint": "0"
       },
       "clientSeq": {
-        "#bigint": "1"
+        "#bigint": "0"
       },
       "clientState": "consistent",
       "connected": true,
@@ -126,18 +126,11 @@
         "#bigint": "0"
       },
       "eventsInFlight": {
-        "#bigint": "0"
+        "#bigint": "1"
       },
       "hashMismatchPending": false,
-      "inputChan": [
-        {
-          "kind": "L",
-          "seq": {
-            "#bigint": "1"
-          }
-        }
-      ],
-      "lastAction": "ClientSendLeave",
+      "inputChan": [],
+      "lastAction": "EmitEvent",
       "reachedCross": false,
       "reachedDriftRejoin": false,
       "reachedLateEvent": false,
@@ -161,46 +154,39 @@
         "#bigint": "3"
       },
       "MaxSeq": {
-        "#bigint": "6"
+        "#bigint": "4"
       },
       "ResetAckOnReattach": true,
       "ackAtReconnect": {
         "#bigint": "0"
       },
       "bazaarVisits": {
-        "#bigint": "1"
+        "#bigint": "0"
       },
       "clientSeq": {
-        "#bigint": "1"
+        "#bigint": "0"
       },
-      "clientState": "consistent",
+      "clientState": "drifted",
       "connected": true,
       "eventsApplied": {
-        "#bigint": "0"
+        "#bigint": "1"
       },
       "eventsInFlight": {
         "#bigint": "0"
       },
       "hashMismatchPending": false,
-      "inputChan": [
-        {
-          "kind": "L",
-          "seq": {
-            "#bigint": "1"
-          }
-        }
-      ],
-      "lastAction": "ServerEnterBazaar",
+      "inputChan": [],
+      "lastAction": "ClientApplyEventLate",
       "reachedCross": false,
       "reachedDriftRejoin": false,
-      "reachedLateEvent": false,
+      "reachedLateEvent": true,
       "reachedReconnect": false,
       "reachedResyncKf": false,
       "reachedWeaponApply": false,
       "serverAck": {
         "#bigint": "0"
       },
-      "serverBazaar": true,
+      "serverBazaar": false,
       "weaponsApplied": {
         "#bigint": "0"
       }
@@ -214,37 +200,37 @@
         "#bigint": "3"
       },
       "MaxSeq": {
-        "#bigint": "6"
+        "#bigint": "4"
       },
       "ResetAckOnReattach": true,
       "ackAtReconnect": {
         "#bigint": "0"
       },
       "bazaarVisits": {
-        "#bigint": "1"
+        "#bigint": "0"
       },
       "clientSeq": {
-        "#bigint": "1"
-      },
-      "clientState": "consistent",
-      "connected": true,
-      "eventsApplied": {
         "#bigint": "0"
+      },
+      "clientState": "drifted",
+      "connected": false,
+      "eventsApplied": {
+        "#bigint": "1"
       },
       "eventsInFlight": {
         "#bigint": "0"
       },
       "hashMismatchPending": false,
       "inputChan": [],
-      "lastAction": "ServerDeliverInput",
+      "lastAction": "Disconnect",
       "reachedCross": false,
       "reachedDriftRejoin": false,
-      "reachedLateEvent": false,
+      "reachedLateEvent": true,
       "reachedReconnect": false,
       "reachedResyncKf": false,
       "reachedWeaponApply": false,
       "serverAck": {
-        "#bigint": "1"
+        "#bigint": "0"
       },
       "serverBazaar": false,
       "weaponsApplied": {
@@ -260,39 +246,39 @@
         "#bigint": "3"
       },
       "MaxSeq": {
-        "#bigint": "6"
+        "#bigint": "4"
       },
       "ResetAckOnReattach": true,
       "ackAtReconnect": {
         "#bigint": "0"
       },
       "bazaarVisits": {
-        "#bigint": "2"
+        "#bigint": "0"
       },
       "clientSeq": {
-        "#bigint": "1"
+        "#bigint": "0"
       },
       "clientState": "consistent",
       "connected": true,
       "eventsApplied": {
-        "#bigint": "0"
+        "#bigint": "1"
       },
       "eventsInFlight": {
         "#bigint": "0"
       },
       "hashMismatchPending": false,
       "inputChan": [],
-      "lastAction": "ServerEnterBazaar",
+      "lastAction": "Reconnect",
       "reachedCross": false,
-      "reachedDriftRejoin": false,
-      "reachedLateEvent": false,
-      "reachedReconnect": false,
+      "reachedDriftRejoin": true,
+      "reachedLateEvent": true,
+      "reachedReconnect": true,
       "reachedResyncKf": false,
       "reachedWeaponApply": false,
       "serverAck": {
-        "#bigint": "1"
+        "#bigint": "0"
       },
-      "serverBazaar": true,
+      "serverBazaar": false,
       "weaponsApplied": {
         "#bigint": "0"
       }
