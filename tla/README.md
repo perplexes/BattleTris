@@ -5,7 +5,8 @@ Formal models of the client⇄server protocol, checked with
 counterexample **traces**). These complement the Rust property tests: the PBT in
 `bt-server` guards the *code* in CI; these models explore the *design's* state space
 to find — and explain, via traces — bugs in the interaction of features
-(bazaar barrier × network delay × reload-rejoin × weapon relay × weapon timing).
+(bazaar barrier × network delay × reload-rejoin × weapon relay × weapon timing ×
+event-channel consistency).
 
 ## `Bazaar.tla` — the bazaar barrier under network delay
 
@@ -49,7 +50,7 @@ The buggy counterexample is the real bug in 3 steps:
 | 2 | `ClientSendGameplay` | `clientSeq=1`, input `G#1` in flight, client still thinks it's playing |
 | 3 | `ServerDeliverInput` | barrier-rejects `G#1`; **buggy: `serverAck` stays 0** ⇒ `ack(0) < sent(1)`, nothing in flight = stuck forever |
 
-## `Netcode.tla` — the full protocol (bazaar × reconnect × weapons × timing)
+## `Netcode.tla` — the full protocol (bazaar × reconnect × weapons × timing × consistency)
 
 `Bazaar.tla` is the teaching model. `Netcode.tla` layers on the rest of the
 complexity that motivated formalising this at all, as **toggleable fixes** and
@@ -61,6 +62,10 @@ matching invariants:
 | Reload-rejoin / reattach | `ResetAckOnReattach` | `AckBounds` — `serverAck ≤ clientSeq` (a reconnect that resets seq but not ack = the **snap-back**) |
 | Weapon firing | *(none — same barrier class as gameplay)* | `WeaponsAccounted` — `weaponsApplied ≤ weaponsFired` |
 | Weapon-timing local prediction | `LeaveNeedsAuth` | `LeaveOnlyWhenReal` — no `LeaveBazaar` wasted on a not-yet-bazaar server (the **predicted-leave** freeze) |
+| (D) keyframe restore | `KeyframeRestores` | `ResyncConvergence`: a keyframe or reattach delivery never leaves a drifted client drifted |
+| (D) resync-request gating | `ResyncOnlyWhenDrifted` | `NoResyncStorm`: the client never requests a resync while already consistent |
+| (D) replay guard | `EventsNotReplayed` | `EventDeliveryAccounted`: the client never applies more events than the relay emitted |
+| (D) resync-grant purity | `ResyncReadOnly` | `ResultIndependence`: a resync grant never mutates server sim state |
 
 Weapons aren't special: a launched weapon is a non-shopping input that crosses the
 **same** bazaar barrier as gameplay, so the same `AckOnBarrierReject` fix covers it.
@@ -68,18 +73,51 @@ Weapon timing effects matter because they let the client's *local* bazaar predic
 lead the authoritative server — which is exactly the original predicted-leave bug, so
 shopping must gate on the authoritative view (`LeaveNeedsAuth`).
 
+### (D) the Model-B consistency layer
+
+Trigger keyframes are rare (first frame, bazaar entry, Swap/Susan, rejoin, debug grant,
+granted resync, final), so between them the relay forwards each cross-player effect
+straight to the client's local sim as an event on an ordered channel (`ServerEmitEvent`,
+`eventsInFlight` in flight, cumulative `eventsEmitted` / `eventsApplied`). An event
+applied inside the same inter-lock window keeps the two sims in lockstep
+(`ClientApplyEvent`); an event that straddles a piece lock (`ClientApplyEventLate`) is
+the race the model accepts and flags, moving `clientState` from `"consistent"` to
+`"drifted"`. This is deliberately an over-approximation: the real detector needs two
+consecutive judged per-lock hash mismatches before it fires, since a single-lock
+divergence can self-heal, so a modelled `"drifted"` state means the local sim may have
+diverged, without asserting that it has. Once the detector fires, the client asks for a
+resync (`ClientRequestResync`), gated by `ResyncOnlyWhenDrifted` so it never asks while
+already consistent (`NoResyncStorm`), and single-flighted by `resyncPending`, the
+model's abstraction of both the client's own throttle and the server's per-side grant
+rate limit. The server grants it (`ServerGrantResync`) by raising `pendingKf`; the grant
+must be read only (`ResyncReadOnly`) so requesting a resync never itself perturbs server
+sim state (`ResultIndependence`). The next delivered keyframe, or the reattach keyframe
+on `Reconnect`, then reconciles the local sim back to `"consistent"` (`KeyframeRestores`,
+guarded by `ResyncConvergence`), without replaying an event the keyframe already
+contains on top of it (`EventsNotReplayed`, guarded by `EventDeliveryAccounted`).
+
+In total `Netcode.tla` has eight toggles (all TRUE = the shipped system: the four fix
+toggles above, `DefensiveReLeave` (the hardening toggle described below), and the four
+(D) toggles) and eight invariants folded into `AllSafe`: `AckBounds`,
+`WeaponsAccounted`, `LeaveOnlyWhenReal`, `NoDeadlock`, `EventDeliveryAccounted`,
+`ResyncConvergence`, `NoResyncStorm`, `ResultIndependence`.
+
 ### Run it
 
 ```sh
 cd tla
 
-# THE SHIPPED SYSTEM — every fix on; all four invariants hold (≈6.5 min, length 14):
+# THE SHIPPED SYSTEM — every fix on; all eight invariants hold (about 5 min, length 14):
 apalache-mc check --length=14 --config=Netcode.cfg Netcode.tla        # -> NoError
 
-# EACH FIX IS NECESSARY — flip one off, its invariant breaks (each ≈2 s, with a trace):
-apalache-mc check --length=10 --config=NetcodeBugAck.cfg   Netcode.tla # NoDeadlock        violated
-apalache-mc check --length=10 --config=NetcodeBugReset.cfg Netcode.tla # AckBounds         violated
-apalache-mc check --length=10 --config=NetcodeBugLeave.cfg Netcode.tla # LeaveOnlyWhenReal violated
+# EACH FIX IS NECESSARY — flip one off, its invariant breaks (fast, with a trace):
+apalache-mc check --length=10 --config=NetcodeBugAck.cfg         Netcode.tla # NoDeadlock             violated
+apalache-mc check --length=10 --config=NetcodeBugReset.cfg       Netcode.tla # AckBounds              violated
+apalache-mc check --length=10 --config=NetcodeBugLeave.cfg       Netcode.tla # LeaveOnlyWhenReal       violated
+apalache-mc check --length=10 --config=NetcodeBugKfRestore.cfg   Netcode.tla # ResyncConvergence       violated
+apalache-mc check --length=10 --config=NetcodeBugStorm.cfg       Netcode.tla # NoResyncStorm           violated
+apalache-mc check --length=10 --config=NetcodeBugReplay.cfg      Netcode.tla # EventDeliveryAccounted  violated
+apalache-mc check --length=10 --config=NetcodeBugResyncWrite.cfg Netcode.tla # ResultIndependence      violated
 ```
 
 ### What the model taught us
@@ -136,12 +174,14 @@ implementation's `(ack, in_bazaar, weapons-applied)` tracks the model's
   single bazaar *crossing* (a gameplay input the barrier rejects).
 - **`Gen.tla`** is the production generator — a superset model driving the SAME server
   semantics as `Netcode.tla`'s `ServerDeliverInput` across the whole feature space
-  (bazaar entry/exit, barrier crossings, weapon delivery, reconnect/`reset_ack`). It
-  stamps every state with an **explicit `lastAction` string** so the Rust harness maps
-  each step to exactly one `Bout` op by NAME, not by guessing from a state diff (two
-  different actions can produce the same diff — an explicit action makes the mapping
-  total and unambiguous, and any unmapped action is a hard failure). Each scenario is
-  carved out by its own trap invariant in a `Gen*.cfg`:
+  (bazaar entry/exit, barrier crossings, weapon delivery, reconnect/`reset_ack`, and an
+  abstract client-consistency layer: `EmitEvent`, `ClientApplyEvent`,
+  `ClientApplyEventLate`, `HashMismatch`, `ResyncKeyframe`). It stamps every state with
+  an **explicit `lastAction` string** so the Rust harness maps each step to exactly one
+  `Bout`/`Predictor` op by NAME, not by guessing from a state diff (two different
+  actions can produce the same diff — an explicit action makes the mapping total and
+  unambiguous, and any unmapped action is a hard failure). Each scenario is carved out
+  by its own trap invariant in a `Gen*.cfg`:
 
   | Fixture | cfg / trap | What it exercises |
   |---|---|---|
@@ -149,24 +189,65 @@ implementation's `(ack, in_bazaar, weapons-applied)` tracks the model's
   | `weapon_then_cross.itf.json` | `GenWeaponCross` / `NotWeaponThenCross` | a weapon delivered in play, then a later crossing |
   | `reconnect_snapback.itf.json` | `GenReconnect` / `NotReconnectedWithHistory` | the disconnect → reconnect → `reset_ack` snap-back path |
   | `two_bazaar_visits.itf.json` | `GenTwoVisits` / `NotTwoVisits` | the server enters the bazaar twice in one trace |
+  | `event_then_resync.itf.json` | `GenEventResync` / `NotEventThenResync` | a cross-player event applied late (drift), then a resync keyframe restores it |
+  | `drift_rejoin.itf.json` | `GenDriftRejoin` / `NotDriftRejoin` | the client reconnects while drifted, so the reattach keyframe is what restores it |
 
 ### The harness
 
 **`apply_input_conforms_to_every_tla_trace`** (in `bt-server/src/bout.rs`) is
-data-driven: it loads EVERY `*.itf.json` in `rust/bt-server/tests/traces/`, drives a
-real `Bout` along each (`force_into_bazaar` on `ServerEnterBazaar`, `apply_input` on
+data-driven: it loads EVERY `*.itf.json` in `rust/bt-server/tests/traces/` (a floor of
+six fixtures is asserted; a corpus of five or fewer fails the test), drives a real
+`Bout` along each (`force_into_bazaar` on `ServerEnterBazaar`, `apply_input` on
 `ServerDeliverInput`, `reset_ack` on `Reconnect`), and asserts `(ack, in_bazaar,
 weapons-applied)` conformance after every state. It panics loudly on any `lastAction` it
-can't map — no silent skips — and requires the corpus to contain a crossing (the teeth).
+can't map, no silent skips.
+
+Stage 5 also drives a real `bt_netcode::Predictor` alongside the `Bout`, seeded and
+stocked to match, and checks it against the model's client-consistency fields at every
+state:
+
+- **Seq-stream conformance on sends**: `ClientSendGameplay` / `ClientFireWeapon` /
+  `ClientSendLeave` each call `predictor.predict(...)` and assert the returned seq
+  equals the model's `clientSeq`.
+- **Real event emission**: `EmitEvent` is realized by actually granting and launching a
+  weapon for the opponent (`Side::B`) and ticking both the `Bout` and the `Predictor` in
+  lockstep until the relay flushes an event to side A (`take_events_for`), so the events
+  applied later are genuine cross-player weapon launches.
+- **Held-event and applied-event tracking**: a local `held` queue and an
+  `events_applied` counter are asserted equal to the model's `eventsInFlight` /
+  `eventsApplied` after every state, for both `ClientApplyEvent` and
+  `ClientApplyEventLate`.
+- **Real keyframe restores**: `ResyncKeyframe` and `Reconnect` each pull a real keyframe
+  off `Bout::snapshot_for` and feed it to `predictor.on_snapshot`, then assert the
+  predictor's `lock_seq` / `lock_hash` now equal the `Bout`'s, so the restore actually
+  reconciled the two sims.
+- **Consistent-implies-equal-lock-pair, the over-approximation direction**: the model's
+  `"drifted"` means the local sim MAY have diverged, so the harness only asserts real
+  lockstep where the model claims `"consistent"`: after every such state the
+  predictor's `(lock_seq, lock_hash)` must equal the `Bout`'s. A `"drifted"` state where
+  the two real sims happen to still be in lockstep is not a conformance failure; the
+  check never runs the other direction.
+
+The corpus-level test also requires non-vacuity, so a regen that stopped exercising a
+path fails loudly instead of rotting silently: at least one trace with a barrier
+crossing, one with a `Reconnect`, one with a weapon delivered in normal play
+(`weaponsApplied > 0`), one with a `ClientApplyEventLate`, one with a `ResyncKeyframe`,
+and one with a `Reconnect` while the previous state's `clientState` was `"drifted"`.
 
 The teeth are real and independent:
 - revert the ack-on-barrier-reject fix → fails at `bazaar_crossing.itf.json@3`
   (`ACK DIVERGED from the model (1)`);
-- revert `reset_ack` → fails at `reconnect_snapback.itf.json@4`.
+- revert `reset_ack` → fails at `reconnect_snapback.itf.json@4`;
+- strip every late-applied event from the corpus → `any_late_event` fails ("the drift
+  teeth are gone");
+- strip every resync keyframe from the corpus → `any_resync_kf` fails ("the
+  resync-convergence teeth are gone");
+- strip every drifted reconnect from the corpus → `any_drift_rejoin` fails ("the
+  drifted-reconnect teeth are gone").
 
 ### Regenerating the fixtures
 
-`regen-traces.sh` regenerates all four committed fixtures from the `Gen*.cfg` traps
+`regen-traces.sh` regenerates all six committed fixtures from the `Gen*.cfg` traps
 (normalizing Apalache's per-run timestamp so the committed files are stable):
 
 ```sh
@@ -189,9 +270,12 @@ Two checked-in scripts back the GitHub Actions `tla` job (see `.github/workflows
 - **`ci-check.sh`** runs the FAST model checks and **asserts the expected outcome of
   each** — a buggy cfg MUST report `Error` (its invariant violated), a fixed cfg MUST
   report `NoError`; anything else fails the build, so a check can never pass silently.
-  Covers `Bazaar` buggy/fixed, the `Cross` trap, the three `NetcodeBug*` teeth, and a
-  reduced-length all-fixed `Netcode` run.
-- **`regen-traces.sh --check`** asserts the committed trace fixtures aren't stale.
+  Covers `Bazaar` buggy/fixed, the `Cross` trap, the seven `NetcodeBug*` teeth
+  (`NetcodeBugAck`, `NetcodeBugReset`, `NetcodeBugLeave`, `NetcodeBugKfRestore`,
+  `NetcodeBugStorm`, `NetcodeBugReplay`, `NetcodeBugResyncWrite`), and a reduced-length
+  all-fixed `Netcode` run: 11 checks total, about half a minute for the fast suite.
+- **`regen-traces.sh --check`** asserts the committed trace fixtures (six of them)
+  aren't stale.
 
-The full all-fixed `Netcode` check (length 14, ~6.5 min) is too slow for the PR path; it
+The full all-fixed `Netcode` check (length 14, about 5 min) is too slow for the PR path; it
 runs only in the `tla-full` job, gated on `workflow_dispatch` / the nightly schedule.

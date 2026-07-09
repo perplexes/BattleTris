@@ -1,29 +1,49 @@
-//! Shared client-side prediction + reconciliation for a server-authoritative
-//! BattleTris match. Both the browser (via `bt-wasm`'s `WasmClient`) and the
-//! bot (`bt-bot`) run this crate.
+//! Shared client-side prediction for a server-authoritative BattleTris match.
+//! Both the browser (via `bt-wasm`'s `WasmClient`) and the bot (`bt-bot`) run
+//! this crate.
 //!
 //! # Why this crate exists
 //!
 //! The server runs the only authoritative sim; each client keeps a local
-//! [`bt_core::Game`] seeded from the same piece stream, predicts its own inputs
-//! immediately (so play feels instant), and reconciles to the server's keyframes.
-//! That prediction/reconciliation logic is delicate (replaying unacked inputs
-//! on top of a keyframe, gating inputs at the bazaar barrier), so it lives in
-//! one place, [`Predictor`], driven identically by both clients. Its invariants
-//! are pinned by the proptests here; sharing the single implementation is what
-//! keeps the browser and the bot consistent.
+//! [`bt_core::Game`] seeded from the same piece stream and predicts its own
+//! inputs immediately (so play feels instant). A client's own board is driven
+//! almost entirely by that local sim: the server forwards every cross-player
+//! effect (an opponent weapon, the score mirror, a funds credit) as an ordered
+//! `event` the client applies directly, rather than by re-sending the whole
+//! board. A full keyframe is the exception, sent only on a trigger (match
+//! start, a bazaar visit, a swap-like exchange, a reconnect, a granted resync,
+//! the final frame), not on a cadence. This machinery (the unacked-input queue,
+//! event application, keyframe restore, divergence detection) is delicate
+//! enough that it lives in one place, [`Predictor`], driven identically by both
+//! clients. Its invariants are pinned by the proptests here (`pbt_convergence`,
+//! `pbt_divergence`); sharing the single implementation is what keeps the
+//! browser and the bot consistent.
 //!
 //! # The model
 //!
 //! - [`Predictor::predict`] applies an input to the local sim, queues it as
 //!   *unacked*, and hands back the `(seq, Input)` to send. Inputs carry a monotonic
 //!   per-bout `seq`.
-//! - [`Predictor::on_snapshot`] reconciles against an authoritative frame: it drops
-//!   inputs the server has now acked (`seq <= ack`), and on a keyframe overwrites
-//!   the local state with the authoritative one and *replays the still-unacked tail*
-//!   on top. Replaying the unacked tail is exactly what stops a not-yet-acked input
-//!   from being lost (the snap-back): the predicted-but-unconfirmed move survives the
-//!   restore. See the property tests in `tests/`.
+//! - [`Predictor::apply_event`] applies a server-forwarded cross-player effect
+//!   straight to the local sim, without touching the unacked queue. This is the
+//!   primary way an opponent's action reaches a client's board between keyframes.
+//! - [`Predictor::on_snapshot`] drops inputs the server has now acked (`seq <=
+//!   ack`), and, when the frame carries a keyframe, overwrites the local state
+//!   with the authoritative one and *replays the still-unacked tail* on top.
+//!   Replaying the unacked tail is exactly what stops a not-yet-acked input
+//!   from being lost (the snap-back): the predicted-but-unconfirmed move survives
+//!   the restore. Because keyframes are trigger-only, this restore path mostly
+//!   fires as the resync response described next, rather than every frame.
+//! - [`Predictor::on_lock_hash`] judges the authoritative per-lock hash carried
+//!   on every snapshot against a ring of the local sim's own recent
+//!   `(lock_seq, lock_hash)` pairs. A single mismatch does not report a
+//!   divergence: an event that straddles a lock by one tick can disagree for
+//!   exactly one lock and then self-heal, so two consecutive judged mismatches
+//!   are required before the caller is told to resync, which sends
+//!   `{"type":"resync"}` and gets reconciled through the same `on_snapshot`
+//!   restore path above.
+//!
+//! See the property tests in `tests/`.
 //!
 //! The bot layers its own pure policy (`bt-bot`'s `sync::decide`) on top to decide
 //! *when* to predict; this crate owns only the mechanics.
@@ -40,11 +60,14 @@ use std::collections::VecDeque;
 /// a cheap fixed-size buffer.
 const LOCK_HISTORY: usize = 8;
 
-/// A client's local predicted game plus the bookkeeping needed to reconcile it to
-/// the server's authoritative keyframes.
+/// A client's local predicted game plus the bookkeeping needed to keep it in step
+/// with the server: applying forwarded cross-player events, restoring a trigger
+/// keyframe when one arrives, and judging the authoritative per-lock hash to
+/// detect a divergence.
 pub struct Predictor {
     /// The local predicted sim. Seeded from the same value as the server's side, so
-    /// it stays in lockstep until a cross-player event makes a keyframe necessary.
+    /// it stays in lockstep on its own; a cross-player event keeps it that way
+    /// without needing a keyframe, which is reserved for the rarer triggers.
     game: Game,
     /// Monotonic input counter for THIS bout. Starts at 0 with each `Predictor`, so
     /// it lines up with the server's per-bout `ack` baseline (a fresh bout is never

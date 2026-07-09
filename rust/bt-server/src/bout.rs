@@ -4,7 +4,12 @@
 //! [`bt_core::Versus`] holding both boards. Clients send inputs; the server
 //! applies them to the authoritative match, ticks the deterministic engine on its
 //! own clock, and ships authoritative [`Snapshot`](crate::bout::Snapshot)s back.
-//! Clients predict locally and reconcile against those snapshots.
+//! Clients predict locally; the server forwards every cross-player effect on
+//! those snapshots as an ordered `event` the client applies directly to its own
+//! sim, sends a full keyframe only on a trigger (bazaar entry, a swap-like
+//! exchange, a reconnect, the final frame), and carries a per-lock hash (see
+//! [`Snapshot::lock_seq`] / [`Snapshot::lock_hash`]) each client compares
+//! against its own to detect a divergence and request a resync.
 //!
 //! Centralizing authority on the server gives two properties:
 //!   * Anti-cheat: a client can only send legal *inputs*
@@ -78,10 +83,11 @@ fn is_bazaar_input(input: &Input) -> bool {
 }
 
 /// The slim per-frame view of a player's OWN status that local prediction can't
-/// derive between keyframes: `funds` (changed by an opponent's Mondale/Keating)
-/// and the bazaar barrier (entry depends on COMBINED lines, so a client can't
-/// foresee it). The board/score/lines come from local prediction + the periodic
-/// keyframe; these three keep the HUD and the bazaar overlay prompt.
+/// derive on its own: `funds` (changed by an opponent's Mondale/Keating) and the
+/// bazaar barrier (entry depends on COMBINED lines, so a client can't foresee
+/// it). The board/score/lines come from local prediction plus the event
+/// channel, corrected by a trigger keyframe when one is sent; these three keep
+/// the HUD and the bazaar overlay prompt.
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct SelfStatus {
     pub funds: i64,
@@ -108,11 +114,12 @@ pub struct OppView {
 }
 
 /// One authoritative frame sent to a client. Per-frame frames are intentionally
-/// small: the client renders its own board from local prediction, and `ack` (the
-/// last input seq the server applied from this client) lets it discard those
-/// inputs. The full authoritative state rides `keyframe` (the byte form of
-/// `Game::snapshot`) on a throttle; the client restores it and re-applies its
-/// unacked inputs.
+/// small: the client renders its own board from local prediction, kept in step
+/// by the `event` frames the server forwards for cross-player effects, and
+/// `ack` (the last input seq the server applied from this client) lets it
+/// discard those inputs. The full authoritative state rides `keyframe` (the
+/// byte form of `Game::snapshot`) only on a trigger, not periodically; when it
+/// arrives the client restores it and re-applies its unacked inputs.
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct Snapshot {
     pub tick: u64,
@@ -127,8 +134,9 @@ pub struct Snapshot {
     pub spying: bool,
     /// The opponent's FULL board as revealed by this client's active spy (render
     /// ids, empty = -2). The client degrades it to the spy's accuracy for display,
-    /// flickering `spy_hide` percent of the cells each frame. Rides the throttled
-    /// keyframe frames, like `keyframe`. Present only while spying.
+    /// flickering `spy_hide` percent of the cells each frame. Rides its own
+    /// cadence (`include_spy`, independent of `keyframe`; see `run_bout`).
+    /// Present only while spying.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spy_board: Option<Vec<i32>>,
     /// The percent of `spy_board`'s cells the client hides each frame to render the
@@ -138,8 +146,9 @@ pub struct Snapshot {
     pub spy_hide: Option<u32>,
     /// The opponent's funds as revealed by this client's active spy, computed
     /// server-side per [`adjust_funds`] (Ames perturbed, Ace mostly exact, Condor
-    /// exact). Present only while spying, on the same throttled keyframe frames as
-    /// `spy_board`. The default (non-spy) opponent view never carries funds.
+    /// exact). Present only while spying, on the same cadence as `spy_board`
+    /// (independent of `keyframe`). The default (non-spy) opponent view never
+    /// carries funds.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spy_funds: Option<i64>,
     /// Full-state reconciliation keyframe (bytes, op_funds redacted), present

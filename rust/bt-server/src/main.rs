@@ -2,8 +2,9 @@
 //! the online backend on the same port.
 //!    * `GET /ws`        WebSocket: matchmaking (paired by TrueSkill match
 //!      quality) and the server-authoritative match itself. The server runs the
-//!      deterministic engine (a [`bout::Bout`]); clients send inputs and
-//!      reconcile against snapshots; results are persisted as rating updates.
+//!      deterministic engine (a [`bout::Bout`]); clients predict locally and
+//!      reconcile against snapshots and forwarded events; results are
+//!      persisted as rating updates.
 //!    * everything else  static files from `STATIC_DIR` (default `bt-wasm`,
 //!      which holds `www/` and `pkg/`); `/` redirects to `/www/`.
 //!
@@ -35,9 +36,12 @@
 //!     {"type":"rejoinFailed"}               (no such live bout for this identity)
 //! ```
 //!
-//! In a bout, clients send legal inputs and reconcile against server-authoritative
-//! snapshots. The server runs the only simulation, so a client cannot inject board
-//! state or cross-player effects.
+//! In a bout, clients send legal inputs; the server is the only side that ticks
+//! the sim, so a client cannot inject board state or cross-player effects. Each
+//! client's own board runs on local prediction, kept in step by the
+//! server-forwarded `event` frames for cross-player effects, corrected by a
+//! full keyframe only on a trigger, with the per-lock hash on each snapshot
+//! driving a `resync` request when the two sims disagree.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

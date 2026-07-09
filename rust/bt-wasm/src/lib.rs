@@ -371,13 +371,18 @@ impl WasmGame {
 // --- online (server-authoritative) client -------------------------------
 
 /// The browser's client for a server-authoritative online match: a thin wasm-facing
-/// wrapper over [`bt_netcode::Predictor`], the same prediction/reconciliation core the
-/// bot (`bt-bot`) runs. The front-end drives this exactly like a [`WasmGame`] for
+/// wrapper over [`bt_netcode::Predictor`], the same prediction core the bot
+/// (`bt-bot`) runs. The front-end drives this exactly like a [`WasmGame`] for
 /// rendering/HUD (the read methods mirror it, as [`WasmVsComputer`] does). Inputs
-/// go through `predict_*` (which queue and return the ready-to-send wire frame) and
-/// server frames through [`on_snapshot`](WasmClient::on_snapshot), so the seq/ack/
-/// keyframe-replay invariants are the proptested ones in `bt-netcode`. There is no
-/// `Recorder`: online matches are recorded authoritatively server-side.
+/// go through `predict_*` (which queue and return the ready-to-send wire frame);
+/// a server `event` frame goes through [`apply_event`](WasmClient::apply_event),
+/// the primary path for a cross-player effect; a snapshot goes through
+/// [`on_snapshot`](WasmClient::on_snapshot), which reconciles acks and, on a
+/// trigger keyframe, restores and replays the unacked tail; and
+/// [`on_lock_hash`](WasmClient::on_lock_hash) judges the authoritative per-lock
+/// hash to decide when to ask for a resync. These are the proptested invariants
+/// from `bt-netcode`. There is no `Recorder`: online matches are recorded
+/// authoritatively server-side.
 #[wasm_bindgen]
 pub struct WasmClient {
     inner: Predictor,
@@ -428,7 +433,8 @@ impl WasmClient {
         self.send(Input::SellWeapon(token))
     }
     /// Tell the server we're done shopping. Forwarded but not applied locally; the
-    /// barrier clears via the next keyframe once both sides leave.
+    /// barrier clears once both sides leave, via the bazaar flag on the next
+    /// plain snapshot (no keyframe required).
     pub fn predict_leave_bazaar(&mut self) -> String {
         self.send(Input::LeaveBazaar)
     }

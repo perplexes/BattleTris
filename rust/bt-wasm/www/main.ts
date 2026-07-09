@@ -34,12 +34,19 @@ let searching = false;    // background matchmaking in progress (queued, not yet
 
 // Server-authoritative online play (the client-server migration). In an
 // authoritative match the server runs the real simulation; the client predicts
-// locally for a 0-latency feel, sends each input to the server, and reconciles
-// against the server's keyframes. The prediction/reconciliation core — the input
-// seq, the unacked-input queue, and the keyframe-restore-then-replay — lives in
-// the shared `WasmClient` (bt-netcode's Predictor), the SAME code the bot runs, so
-// `game` is a `WasmClient` during an online match (and a `WasmGame` /
-// `WasmVsComputer` otherwise; all three expose the same read API for rendering).
+// locally for a 0-latency feel and sends each input to the server. Cross-player
+// effects (an opponent weapon, the score mirror, a funds credit) arrive as
+// ordered `event` frames the client applies straight to its own sim; that is
+// the primary path for an opponent's action to reach this board. A keyframe is
+// sent only on a trigger (match start, a bazaar visit, a swap-like exchange, a
+// reconnect, a granted resync, the final frame); a per-lock hash on every
+// snapshot lets the client detect when its sim has drifted and ask for one
+// (see `requestResync`). This machinery (the input seq, the unacked-input
+// queue, event application, and the keyframe-restore-then-replay) lives in the
+// shared `WasmClient`
+// (bt-netcode's Predictor), the SAME code the bot runs, so `game` is a
+// `WasmClient` during an online match (and a `WasmGame` / `WasmVsComputer`
+// otherwise; all three expose the same read API for rendering).
 let authoritative = false; // true during a server-authoritative online match
 let currentMatchId: string | null = null; // the live bout's id (`match-<uuid>`); parked in the URL for rejoin-on-refresh
 let currentSeed: number | null = null;    // the game's RNG seed (shown in the debug overlay)
@@ -51,7 +58,7 @@ let resyncLastSentMs: number | null = null;
 let authSelf: SideStatus | null = null;       // latest authoritative own-status {funds,in_bazaar,lines_til_bazaar}
 let authOpp: OppStatus | null = null;        // latest authoritative opponent view {score,lines,game_over,in_bazaar?}
 let authSpying = false;    // is a spy of ours active (server-authorized)?
-let authSpyBoard: Int32Array | null = null;   // latest opponent board (FULL, from a keyframe), or null; degraded client-side per frame
+let authSpyBoard: Int32Array | null = null;   // latest opponent board (FULL, from the spy reveal frames), or null; degraded client-side per frame
 let authSpyHide = 0;       // percent of spy_board cells to hide each frame (per-spy accuracy: Ames 50, Ace 15, Condor 0)
 let authSpyFunds: number | null = null;       // latest server-computed opponent funds our spy reveals, or null
 // The per-frame spy static: a hide mask over the spy board, re-rolled on a timer
@@ -826,7 +833,8 @@ function applySnapshot(msg: Extract<ServerMessage, { type: 'snapshot' }>) {
     authSelf = msg.you;
     authOpp = msg.opp;
     // Server-authorized spy: `spying` every frame; the FULL opponent board and the
-    // hide level ride keyframes. Keep the last board while spying; drop it when it
+    // hide level ride their own cadence, independent of `keyframe` (see the
+    // server's `include_spy`). Keep the last board while spying; drop it when it
     // ends. The board is flickered to `authSpyHide`% accuracy at render time.
     authSpying = !!msg.spying;
     if (msg.spy_board) authSpyBoard = Int32Array.from(msg.spy_board);
