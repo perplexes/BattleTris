@@ -3768,7 +3768,7 @@ mod tests {
         }
 
         let app = shared.lock().await;
-        assert!(app.bouts.get(&mid).is_some(), "the bout is still registered");
+        assert!(app.bouts.contains_key(&mid), "the bout is still registered");
     }
 
     // A client not currently in a bout (no `match_id`/`bout` binding) sends `resync`:

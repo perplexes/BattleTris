@@ -459,7 +459,11 @@ impl Bout {
 
     /// Build the authoritative snapshot for `side`, with the spy reveal riding the same
     /// frames as the keyframe (the 2-arg test/inspection view). The wire path uses
-    /// [`build_snapshot`](Self::build_snapshot) to throttle the spy independently.
+    /// [`build_snapshot`](Self::build_snapshot) to throttle the spy independently; since
+    /// stage 3 retired the periodic keyframe this wrapper has only test callers, so it is
+    /// test-gated like [`arsenal_count`](Self::arsenal_count) to keep the shipped binary
+    /// free of dead code.
+    #[cfg(test)]
     pub fn snapshot_for(&self, side: Side, include_keyframe: bool) -> Snapshot {
         self.build_snapshot(side, include_keyframe, include_keyframe)
     }
