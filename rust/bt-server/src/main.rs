@@ -674,14 +674,8 @@ fn start_bout(app: &mut App, a: &str, b: &str, quality: Option<f64>) -> Option<P
         c.peer = Some(a.to_string());
     }
 
-    let a_name = match app.clients.get(a) {
-        Some(c) => c.name.clone(),
-        None => return None,
-    };
-    let b_name = match app.clients.get(b) {
-        Some(c) => c.name.clone(),
-        None => return None,
-    };
+    let a_name = app.clients.get(a)?.name.clone();
+    let b_name = app.clients.get(b)?.name.clone();
     // Settle against each name's CURRENT stored rating, looked up here rather than
     // read from the connection's cached `c.state`. The queue and available handlers
     // refresh `c.state`, but a directed challenge sets only `c.name`, so reading
