@@ -130,7 +130,9 @@ jobs:
       - name: flyctl deploy bots
         working-directory: rust
         env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          # A separate app-scoped deploy token: FLY_API_TOKEN is scoped to the
+          # battletris app only and gets `unauthorized` for battletris-bots.
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_BOTS }}
         # The bots are CLIENTS of the wire protocol and the keyframe codec, so they
         # must ship with every server deploy. Leaving them behind is how the
         # KEYFRAME_VERSION 1->2 bump stranded the June 7 bot fleet: they rejected
