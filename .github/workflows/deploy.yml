@@ -127,3 +127,16 @@ jobs:
         # BT_ADMIN_TOKEN secrets are set, switch this step to `./deploy-quiesce.sh`
         # (quiesce-in-place) so deploys stop severing live games. See that script.
         run: flyctl deploy --remote-only --ha=false --build-arg BT_GIT_SHA="${GITHUB_SHA::7}"
+      - name: flyctl deploy bots
+        working-directory: rust
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        # The bots are CLIENTS of the wire protocol and the keyframe codec, so they
+        # must ship with every server deploy. Leaving them behind is how the
+        # KEYFRAME_VERSION 1->2 bump stranded the June 7 bot fleet: they rejected
+        # every new keyframe, their local sims never entered the bazaar, they never
+        # sent LeaveBazaar, and human opponents froze at the bazaar barrier.
+        # Replacing the bot machines also forfeits any bout they are mid-game in
+        # (a dropped bot forfeits at once), which is the intended cleanup for
+        # matches stranded by a stale fleet.
+        run: flyctl deploy -a battletris-bots -c fly.bots.toml --remote-only
