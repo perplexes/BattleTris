@@ -59,6 +59,12 @@ use bt_replay::{Input, Replay, ReplayPlayer, VersusReplay, VersusReplayPlayer};
 use bt_trueskill::ts2::{rate_match, MatchOutcome, PlayerState, Ts2Params, Winner};
 use bt_trueskill::{quality_1v1, Rating};
 use futures_util::{SinkExt, StreamExt};
+// Replay blob storage: `ObjectStore` is the trait `ReplayStore::Bucket` stores a
+// trait object of; `ObjectStoreExt` supplies the ergonomic `put`/`get` methods
+// used against it. Aliased to `ObjectPath` because axum's extractor is also
+// named `Path` (imported above).
+use object_store::path::Path as ObjectPath;
+use object_store::{ObjectStore, ObjectStoreExt};
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, Mutex};
@@ -91,12 +97,71 @@ type Shared = Arc<Mutex<App>>;
 /// while the guard is held, so a blocking lock on the async runtime is fine here.
 type Db = Arc<std::sync::Mutex<Connection>>;
 
+/// Where a replay's JSON blob lives. Two explicit modes, not an `Option`
+/// fallback: an unconfigured bucket means every replay lives in SQLite, exactly
+/// as before blob storage existed; a HALF-configured bucket is refused at boot
+/// (see [`replay_store_config`]) rather than silently landing in one of the two
+/// real modes. `Bucket` holds a trait object (not a concrete `AmazonS3`) so
+/// tests can swap in [`object_store::memory::InMemory`] with no network.
+#[derive(Clone)]
+enum ReplayStore {
+    /// The `replays.json` column holds the full replay text, same as before
+    /// blob storage existed.
+    Sqlite,
+    /// The `json` column is written NULL; the blob lives at `replays/<id>.json`
+    /// in the wrapped store (see [`replay_blob_path`]).
+    Bucket(Arc<dyn ObjectStore>),
+}
+
+/// The bucket key one replay's blob lives at: one JSON object per content-hash
+/// id, mirroring the DB's own primary key so the two stay trivially correlated.
+fn replay_blob_path(id: &str) -> ObjectPath {
+    ObjectPath::from(format!("replays/{id}.json"))
+}
+
+/// Decide the replay blob storage mode from env, via an injected lookup so
+/// tests exercise every branch without mutating process env (production passes
+/// `|k| std::env::var(k).ok()`; tests pass a `HashMap` lookup). `BUCKET_NAME`
+/// unset means Sqlite, today's behavior. `BUCKET_NAME` set means Bucket, built
+/// from the Tigris-injected `AWS_*` vars; a companion var missing while
+/// `BUCKET_NAME` is set is a misconfiguration, not a reason to fall back to
+/// Sqlite, so it panics loudly naming the missing var rather than degrading
+/// silently. `AWS_REGION` is the one exception: Tigris doesn't need a real
+/// region, so a missing one just defaults to `"auto"`.
+fn replay_store_config(get: impl Fn(&str) -> Option<String>) -> ReplayStore {
+    let Some(bucket) = get("BUCKET_NAME") else {
+        println!("replay blobs: sqlite (no BUCKET_NAME configured)");
+        return ReplayStore::Sqlite;
+    };
+    let require = |name: &str| {
+        get(name).unwrap_or_else(|| {
+            panic!("BUCKET_NAME is set but {name} is missing (Tigris sets both together via fly secrets)")
+        })
+    };
+    let endpoint = require("AWS_ENDPOINT_URL_S3");
+    let access_key_id = require("AWS_ACCESS_KEY_ID");
+    let secret_access_key = require("AWS_SECRET_ACCESS_KEY");
+    let region = get("AWS_REGION").unwrap_or_else(|| "auto".to_string());
+    let s3 = object_store::aws::AmazonS3Builder::new()
+        .with_bucket_name(&bucket)
+        .with_endpoint(&endpoint)
+        .with_region(&region)
+        .with_access_key_id(&access_key_id)
+        .with_secret_access_key(&secret_access_key)
+        .build()
+        .unwrap_or_else(|e| panic!("build S3 client for bucket {bucket} at {endpoint}: {e}"));
+    println!("replay blobs: bucket {bucket} via {endpoint}");
+    ReplayStore::Bucket(Arc::new(s3))
+}
+
 /// Combined router state. `FromRef` lets each handler extract just the piece it
-/// needs: `State<Shared>` for the websocket, `State<Db>` for replay endpoints.
+/// needs: `State<Shared>` for the websocket, `State<Db>` for replay endpoints,
+/// `State<ReplayStore>` for the ones that read/write the replay blob.
 #[derive(Clone)]
 struct AppState {
     app: Shared,
     db: Db,
+    store: ReplayStore,
 }
 
 impl FromRef<AppState> for Shared {
@@ -108,6 +173,12 @@ impl FromRef<AppState> for Shared {
 impl FromRef<AppState> for Db {
     fn from_ref(s: &AppState) -> Db {
         s.db.clone()
+    }
+}
+
+impl FromRef<AppState> for ReplayStore {
+    fn from_ref(s: &AppState) -> ReplayStore {
+        s.store.clone()
     }
 }
 
@@ -234,6 +305,11 @@ struct App {
     /// Replay/counters DB (shared with the HTTP handlers). Backs the hit counter
     /// and the per-player stats (`players`) table.
     db: Db,
+    /// Where a finished bout's replay blob is written (shared with the HTTP
+    /// handlers, which read it back). Cloned once per bout at the top of
+    /// [`run_bout`] rather than read through `App` at settle time, so the
+    /// Bucket-mode upload's `.await` never happens while this mutex is held.
+    store: ReplayStore,
     /// Outstanding directed challenges: challenger id -> (target id, expires_at).
     /// One in-flight challenge per challenger; superseded/cleared on
     /// accept/decline/timeout/disconnect.
@@ -254,11 +330,12 @@ struct App {
 }
 
 impl App {
-    /// Boot the shared state over a replay/counters DB. `ratings.json` is the
-    /// working source-of-truth for matchmaking ratings; the `players` table is
-    /// seeded from it once (idempotently) so the per-player profile endpoint can
-    /// answer from one indexed lookup rather than re-reading the JSON.
-    fn new(db: Db) -> App {
+    /// Boot the shared state over a replay/counters DB and a replay blob store
+    /// (see [`ReplayStore`]). `ratings.json` is the working source-of-truth for
+    /// matchmaking ratings; the `players` table is seeded from it once
+    /// (idempotently) so the per-player profile endpoint can answer from one
+    /// indexed lookup rather than re-reading the JSON.
+    fn new(db: Db, store: ReplayStore) -> App {
         let ratings = {
             // Seed the players table from ratings.json on first boot (idempotent),
             // then load ratings from disk as the working rating source-of-truth.
@@ -276,6 +353,7 @@ impl App {
             settled: HashSet::new(),
             params: Ts2Params::default(),
             db,
+            store,
             challenges: HashMap::new(),
             last_players: Vec::new(),
             bouts: HashMap::new(),
@@ -1073,6 +1151,16 @@ async fn run_bout(state: Shared, pb: PendingBout) {
         frame += 1;
     };
 
+    // Snapshot the replay blob store once, up front (a cheap `Arc` clone), and
+    // resolve the finished match's replay write BEFORE taking the app lock
+    // below: in Bucket mode that's an async `put`, and `Shared`'s doc comment
+    // requires the app mutex never be held across an `.await`.
+    let store = state.lock().await.store.clone();
+    let replay_write: Option<ReplayWrite> = match outcome {
+        Some(_) if bout.is_over() => Some(prepare_replay_write(&store, &bout, &match_id, &name_a, &name_b).await),
+        _ => None,
+    };
+
     let mut app = state.lock().await;
     // The bout is over; drop its reattach registry entry so a late `rejoin` for
     // this match cleanly fails (`rejoinFailed`) instead of finding a dead loop.
@@ -1120,28 +1208,35 @@ async fn run_bout(state: Shared, pb: PendingBout) {
         // Persist the match as a VersusReplay for natural finishes only (a real
         // top-out the board reaches). A forfeit (a client disconnected) is not in
         // the seed+input stream, so its playback would never latch a winner; we
-        // don't store those.
-        if bout.is_over() {
-            let replay = bout.to_replay(bout::TICK_MS, ENGINE_SHA);
-            let json = replay.to_json();
-            let id = replay_id(&json);
-            let stored = app
-                .db
-                .lock()
-                .ok()
-                .and_then(|conn| {
-                    let total_lines = bout.lines(Side::A) as i64 + bout.lines(Side::B) as i64;
-                    db_insert_versus(&conn, &id, &replay, &json, now_secs(), &name_a, &name_b, total_lines).ok()
-                })
-                .is_some();
-            if stored {
-                println!("stored online replay {id} ({} ticks)", replay.tick_count);
+        // don't store those. `replay_write` was already resolved (and, in Bucket
+        // mode, uploaded) above, before the app lock was taken.
+        if let Some(write) = replay_write {
+            match write {
+                // Sampled out by the bot-vs-bot filler policy, or (Bucket mode) the
+                // blob `put` failed: either way no row exists, so there's nothing to
+                // insert and no `matchReplay` id to announce (one would point the
+                // game-over screen's "Watch replay" button at nothing).
+                ReplayWrite::Skip => {}
+                ReplayWrite::Row { id, replay, json_col, lines } => {
+                    let stored = app
+                        .db
+                        .lock()
+                        .ok()
+                        .and_then(|conn| {
+                            db_insert_versus(&conn, &id, &replay, json_col.as_deref(), now_secs(), &name_a, &name_b, lines).ok()
+                        })
+                        .is_some();
+                    if stored {
+                        println!("stored online replay {id} ({} ticks)", replay.tick_count);
+                    }
+                    // Tell both clients the replay id so the game-over screen can offer
+                    // a "Watch replay" button (best-effort; a disconnected client
+                    // ignores it).
+                    let msg = json!({ "type": "matchReplay", "id": id }).to_string();
+                    let _ = tx_a.send(Message::Text(msg.clone()));
+                    let _ = tx_b.send(Message::Text(msg));
+                }
             }
-            // Tell both clients the replay id so the game-over screen can offer a
-            // "Watch replay" button (best-effort; a disconnected client ignores it).
-            let msg = json!({ "type": "matchReplay", "id": id }).to_string();
-            let _ = tx_a.send(Message::Text(msg.clone()));
-            let _ = tx_b.send(Message::Text(msg));
         }
     }
     // Both players went back to Available (or left); refresh the lobby roster.
@@ -1759,6 +1854,9 @@ fn now_secs() -> i64 {
 /// `counters` (the persistent visit counter), and `players` (per-player stats).
 /// Columns present in `SCHEMA` but missing from an older existing table are
 /// reconciled by [`init_schema`] using idempotent `ALTER TABLE ADD COLUMN`.
+/// `json` is nullable (not the original constraint; see
+/// [`relax_replays_json_not_null`]) so a Bucket-mode or migrated row can leave
+/// it NULL once its blob lives in the store instead.
 const SCHEMA: &str = "\
 CREATE TABLE IF NOT EXISTS replays (
     id          TEXT PRIMARY KEY,
@@ -1769,7 +1867,7 @@ CREATE TABLE IF NOT EXISTS replays (
     inputs      INTEGER NOT NULL,
     engine_sha  TEXT NOT NULL,
     created_at  INTEGER NOT NULL,
-    json        TEXT NOT NULL,
+    json        TEXT,
     title       TEXT,
     name_a      TEXT,
     name_b      TEXT,
@@ -1811,7 +1909,60 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     // Total lines cleared in the recording (shown in the library); a NULL is
     // filled in by `backfill_lines`.
     let _ = conn.execute("ALTER TABLE replays ADD COLUMN lines INTEGER", []);
+    // Must run after the ADD COLUMNs above: it rebuilds the table from whatever
+    // columns already exist, so an old db missing e.g. `lines` needs that column
+    // added FIRST or the rebuild would drop it.
+    relax_replays_json_not_null(conn)?;
     Ok(())
+}
+
+/// Blob storage moves the replay JSON out of the row and into a bucket object,
+/// leaving `json` NULL for a migrated or Bucket-mode row (see
+/// [`ReplayStore::Bucket`] and [`migrate_replay_blobs`]). The original schema
+/// declared `json TEXT NOT NULL`; SQLite has no `ALTER TABLE` form that drops a
+/// column constraint, so relaxing it means rebuilding the table once, the same
+/// one-time-then-forever-idempotent shape as the `ALTER TABLE ADD COLUMN`
+/// reconciliations above, just done as a full rebuild instead of an add. A
+/// table that's never had the constraint (a brand-new db, or one already
+/// rebuilt by a prior boot) is left untouched: this is a no-op after the first
+/// boot that runs it.
+fn relax_replays_json_not_null(conn: &Connection) -> rusqlite::Result<()> {
+    // `notnull` is quoted: unquoted, SQLite parses it as the `NOTNULL` postfix
+    // operator (a spelling of `IS NOT NULL`) rather than the pragma's column name.
+    let not_null: i64 = conn.query_row(
+        "SELECT \"notnull\" FROM pragma_table_info('replays') WHERE name = 'json'",
+        [],
+        |r| r.get(0),
+    )?;
+    if not_null == 0 {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "BEGIN;
+         ALTER TABLE replays RENAME TO replays_pre_blob_storage;
+         CREATE TABLE replays (
+             id          TEXT PRIMARY KEY,
+             mode        TEXT NOT NULL,
+             seed        INTEGER NOT NULL,
+             ai_level    INTEGER,
+             tick_count  INTEGER NOT NULL,
+             inputs      INTEGER NOT NULL,
+             engine_sha  TEXT NOT NULL,
+             created_at  INTEGER NOT NULL,
+             json        TEXT,
+             title       TEXT,
+             name_a      TEXT,
+             name_b      TEXT,
+             lines       INTEGER
+         );
+         INSERT INTO replays
+             (id, mode, seed, ai_level, tick_count, inputs, engine_sha, created_at, json, title, name_a, name_b, lines)
+         SELECT id, mode, seed, ai_level, tick_count, inputs, engine_sha, created_at, json, title, name_a, name_b, lines
+             FROM replays_pre_blob_storage;
+         DROP TABLE replays_pre_blob_storage;
+         CREATE INDEX IF NOT EXISTS idx_replays_created ON replays(created_at);
+         COMMIT;",
+    )
 }
 
 /// Open (creating if needed) the replay DB and ensure the schema exists. WAL +
@@ -1830,6 +1981,55 @@ fn open_db() -> Connection {
     init_schema(&conn).expect("init replay schema");
     backfill_lines(&conn);
     conn
+}
+
+/// One-time (per row, then forever a no-op) boot migration: move every
+/// existing row's JSON out of SQLite and into the bucket. Runs before the
+/// server starts listening, right after the bot-replay prune, and only in
+/// Bucket mode; there's nowhere to move a blob to in Sqlite mode, so that mode
+/// skips this entirely.
+///
+/// Per row, the blob is `put` BEFORE the `json` column is NULLed, so a crash
+/// mid-migration only ever leaves a re-uploadable row (json still inline)
+/// behind, never a NULLed row with no blob: the metadata-row-pointing-at-a-
+/// missing-blob failure mode is impossible by the same construction as the
+/// settle path's write (see [`prepare_replay_write`]). The predicate (`json IS
+/// NOT NULL`) is exactly what makes a re-run resumable: a crash-interrupted or
+/// already-finished pass both leave nothing further for the query to find.
+///
+/// Rows are pulled in bounded batches (the NULLing makes `LIMIT` re-queries
+/// walk forward on their own) so peak memory stays a few MB no matter how many
+/// rows are pending. The machine has 256MB; loading the whole pre-prune corpus
+/// (~1GB of JSON) in one Vec would OOM the server into a boot loop precisely
+/// when the prune had failed and the migration mattered most.
+async fn migrate_replay_blobs(conn: &Connection, store: &Arc<dyn ObjectStore>) -> Result<usize, Box<dyn std::error::Error>> {
+    const BATCH: usize = 500;
+    let started = Instant::now();
+    let mut migrated = 0usize;
+    loop {
+        let batch: Vec<(String, String)> = {
+            let mut stmt =
+                conn.prepare("SELECT id, json FROM replays WHERE json IS NOT NULL LIMIT ?1")?;
+            let rows = stmt
+                .query_map([BATCH as i64], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            rows
+        };
+        if batch.is_empty() {
+            break;
+        }
+        for (id, json) in batch {
+            let path = replay_blob_path(&id);
+            store.put(&path, json.into()).await?;
+            conn.execute("UPDATE replays SET json = NULL WHERE id = ?1", [&id])?;
+            migrated += 1;
+            if migrated.is_multiple_of(500) {
+                println!("replay blob migration: {migrated} row(s) so far");
+            }
+        }
+    }
+    println!("replay blob migration: moved {migrated} row(s) in {:.1}s", started.elapsed().as_secs_f64());
+    Ok(migrated)
 }
 
 /// Total lines cleared across all boards of a single-board (practice / vs-Computer)
@@ -1854,9 +2054,13 @@ fn versus_replay_lines(r: &VersusReplay) -> i64 {
 /// Fill the `lines` column for any row that still has it NULL, by deterministically
 /// replaying the recording to count cleared lines (best-effort: malformed JSON is
 /// skipped). Once every row has a value the query matches nothing, so later boots
-/// are no-ops.
+/// are no-ops. `json IS NOT NULL` is belt-and-suspenders: every write path fills
+/// `lines` at insert time, so a Bucket-mode row (json NULL) should never reach
+/// here with `lines` still NULL, but this runs before the blob migration ever
+/// gets a chance to NULL a row's json, so nothing here needs to reach the bucket.
 fn backfill_lines(conn: &Connection) {
-    let rows: Vec<(String, String)> = match conn.prepare("SELECT id, json FROM replays WHERE lines IS NULL") {
+    let rows: Vec<(String, String)> =
+        match conn.prepare("SELECT id, json FROM replays WHERE lines IS NULL AND json IS NOT NULL") {
         Ok(mut stmt) => stmt
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
             .and_then(|m| m.collect())
@@ -1899,16 +2103,199 @@ fn db_insert(conn: &Connection, id: &str, r: &Replay, json: &str, created_at: i6
     )
 }
 
+// --- bot-vs-bot replay retention policy --------------------------------
+//
+// The always-on house bot ("The Count") duels the regional bots around the
+// clock; every natural finish used to persist a replay, and 87k of those
+// filled the volume with games nobody will ever watch. Human games are rare
+// and precious and are always kept; bot-vs-bot filler is sampled down to 5%,
+// both for new matches as they settle and, once, for the existing backlog.
+
+/// True for a server-controlled bot identity: the roaming "The Count", or a
+/// regional persona named "<Region>-Bert" / "<Region>-Ernie" (see bt-bot's
+/// `Persona`). A replay row only carries `name_a`/`name_b`, not a bot flag,
+/// so the retention policy below has to classify by name alone. A human who
+/// registers a name ending in "-Bert" or "-Ernie" would have their games
+/// against an actual bot swept into the same-name bucket and sampled at 5%;
+/// that's an acceptable misclassification for untitled throwaway games, and
+/// a real human opponent (see `bot_filler_replay`) or a titled showcase
+/// still keeps the replay regardless.
+fn is_bot_name(name: &str) -> bool {
+    name == "The Count" || name.ends_with("-Bert") || name.ends_with("-Ernie")
+}
+
+/// Deterministic 5% sampler over a stable string key. Hashes with FNV-1a
+/// (hand-rolled, like `bt_core`'s lock hash) because the sampler's answer must
+/// be stable across BINARY versions, and std's `DefaultHasher` documents its
+/// algorithm as unspecified between Rust releases: a toolchain bump changing
+/// the hash would re-roll every already-decided row at the next boot prune and
+/// delete formerly-kept survivors. With a fixed hash, the persist-time skip
+/// decision (keyed on the match id) and the startup prune (keyed on the stored
+/// replay id) enforce exactly the same predicate, just over two different keys
+/// (see `db_prune_bot_replays` for why the prune can't reuse the match id),
+/// and a key that says "keep" keeps saying "keep" forever.
+fn replay_retained(key: &str) -> bool {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in key.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h.is_multiple_of(20)
+}
+
+/// True when a replay is disposable bot-vs-bot filler: both names classify
+/// as bot names ([`is_bot_name`]) and the replay carries no title. A title
+/// marks a curated showcase, kept regardless of who played it; a replay with
+/// a human on either side is precious regardless of title. Only the
+/// intersection, an untitled bot-vs-bot grind, is filler.
+fn bot_filler_replay(name_a: &str, name_b: &str, title: Option<&str>) -> bool {
+    title.is_none() && is_bot_name(name_a) && is_bot_name(name_b)
+}
+
+/// Delete bot-vs-bot filler rows down to the [`replay_retained`] 5% policy.
+/// Called once at boot, right after `db_init`, to prune the existing backlog
+/// under the same rule new matches are sampled with at persist time (see
+/// [`prepare_replay_write`]'s sampling gate). Does NOT `VACUUM`; the boot
+/// sequence runs [`db_vacuum_if_worthwhile`] once at the very end, after this
+/// AND the blob migration have each freed their own space, rather than paying
+/// the rewrite cost twice.
+///
+/// The stored `id` column is the replay's content hash, not the match id the
+/// persist-time decision hashed; a match id is never written anywhere a
+/// prune could read it back from, so this samples by content-hash id instead.
+/// That's a different key from the persist-time decision, but the same
+/// policy and the same hash function: two keys, one policy, and each row's
+/// fate is fixed forever by whichever key governs it. That's what keeps this
+/// idempotent across boots. Re-running it after a prior prune finds every
+/// surviving row still hashing "keep" and deletes nothing.
+///
+/// The name predicate mirrors [`is_bot_name`] directly in SQL (there are only
+/// two suffixes and one fixed name, so keeping them in sync by hand is
+/// cheap) so SQLite can select candidate rows itself; the 5% hash selection
+/// stays in Rust, in the one place [`replay_retained`] is defined, instead of
+/// reimplementing `DefaultHasher` as a SQL expression.
+fn db_prune_bot_replays(conn: &Connection) -> rusqlite::Result<usize> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM replays WHERE title IS NULL \
+         AND (name_a = 'The Count' OR name_a LIKE '%-Bert' OR name_a LIKE '%-Ernie') \
+         AND (name_b = 'The Count' OR name_b LIKE '%-Bert' OR name_b LIKE '%-Ernie')",
+    )?;
+    let candidates: Vec<String> =
+        stmt.query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<_>>()?;
+    let to_delete: Vec<&str> = candidates.iter().map(String::as_str).filter(|id| !replay_retained(id)).collect();
+    if to_delete.is_empty() {
+        return Ok(0);
+    }
+
+    conn.execute_batch("BEGIN;")?;
+    for id in &to_delete {
+        if let Err(e) = conn.execute("DELETE FROM replays WHERE id = ?1", [*id]) {
+            let _ = conn.execute_batch("ROLLBACK;");
+            return Err(e);
+        }
+    }
+    conn.execute_batch("COMMIT;")?;
+    Ok(to_delete.len())
+}
+
+/// `VACUUM` the replay DB if its freelist has grown past a worthwhile amount.
+/// Split out of `db_prune_bot_replays` so the boot sequence can run this ONCE,
+/// after both the bot-replay prune and (in Bucket mode) the blob migration have
+/// each freed their own space, instead of vacuuming twice.
+///
+/// `VACUUM` rewrites the whole file and needs scratch space roughly the size of
+/// the DB, so it only runs once whatever freed space is worth the rewrite; the
+/// fly volume must already have that headroom before the first such boot, since
+/// that boot is the one walking the largest backlog.
+fn db_vacuum_if_worthwhile(conn: &Connection) -> rusqlite::Result<bool> {
+    let freelist_pages: i64 = conn.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
+    let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+    let vacuumed = if freelist_pages * page_size > 100 * 1024 * 1024 {
+        conn.execute_batch("VACUUM;")?;
+        true
+    } else {
+        false
+    };
+    Ok(vacuumed)
+}
+
+/// What a finished bout's replay resolves to, decided (and in Bucket mode,
+/// already uploaded) by [`prepare_replay_write`] before the settle path takes
+/// the app lock.
+enum ReplayWrite {
+    /// Sampled out by the bot-vs-bot filler policy, or (Bucket mode) the blob
+    /// `put` failed: either way no row is written. A metadata row that points at
+    /// a missing blob is the failure mode blob storage is designed to make
+    /// impossible; an orphan blob left behind by a skipped row is harmless.
+    Skip,
+    /// A row to insert. `json_col` is the full replay text in Sqlite mode, or
+    /// `None` in Bucket mode once the blob is already durably stored at
+    /// `replays/<id>.json`.
+    Row { id: String, replay: VersusReplay, json_col: Option<String>, lines: i64 },
+}
+
+/// Resolve a finished bout's replay write. The bot-vs-bot 5% sampling gate
+/// (see [`bot_filler_replay`]/[`replay_retained`]) runs first and is untouched
+/// by blob storage; only what happens to a replay that survives it depends on
+/// `store`. In Bucket mode the JSON is uploaded to `replays/<id>.json` here,
+/// before the caller ever touches SQLite, so a metadata row is only ever
+/// written once its blob is confirmed durable. A failed upload is logged loudly
+/// with the match id and the whole row is skipped rather than written pointing
+/// at nothing.
+///
+/// Async only for the Bucket-mode upload; called before the settle path's app
+/// lock is taken (see the `.await` discipline noted on [`Shared`]).
+async fn prepare_replay_write(
+    store: &ReplayStore,
+    bout: &Bout,
+    match_id: &str,
+    name_a: &str,
+    name_b: &str,
+) -> ReplayWrite {
+    let replay = bout.to_replay(bout::TICK_MS, ENGINE_SHA);
+    let json = replay.to_json();
+    let id = replay_id(&json);
+    let lines = bout.lines(Side::A) as i64 + bout.lines(Side::B) as i64;
+    // The Count's regional bot-vs-bot filler is sampled to 5% here, before
+    // anything is written or uploaded (see `bot_filler_replay`/`replay_retained`).
+    // The sampling key is `match_id`, the bout's wire id, not the content hash
+    // `id` above: a sampled-out replay never gets a row, so there's nothing to
+    // hash by content, and `match_id` is what's already in scope at settle time.
+    // (The startup prune in `db_prune_bot_replays` samples EXISTING rows
+    // instead, keyed on the stored content-hash `id`, since a match id is never
+    // written anywhere the prune could read it back from.)
+    if bot_filler_replay(name_a, name_b, None) && !replay_retained(match_id) {
+        println!("bout {match_id}: bot-vs-bot replay sampled out (5% retention)");
+        return ReplayWrite::Skip;
+    }
+    match store {
+        ReplayStore::Sqlite => ReplayWrite::Row { id, replay, json_col: Some(json), lines },
+        ReplayStore::Bucket(os) => {
+            let path = replay_blob_path(&id);
+            match os.put(&path, json.into()).await {
+                Ok(_) => ReplayWrite::Row { id, replay, json_col: None, lines },
+                Err(e) => {
+                    eprintln!("bout {match_id}: replay blob put failed for {id}: {e}");
+                    ReplayWrite::Skip
+                }
+            }
+        }
+    }
+}
+
 /// Store a server-recorded online (`Versus`) match. Same `replays` table, mode
-/// `"Online"`, `seed` = side A's seed; the `json` holds the full [`VersusReplay`]
-/// (two seeds and the ordered input stream), which the playback page detects.
+/// `"Online"`, `seed` = side A's seed; `json` is the full [`VersusReplay`] text
+/// (two seeds and the ordered input stream) in Sqlite mode, or `None` in Bucket
+/// mode once [`prepare_replay_write`] has already uploaded it to
+/// `replays/<id>.json`. Content id and row are always inserted together (the
+/// caller decides `json_col`); this fn never touches the blob store itself.
 // 8 columns to persist; bundling them into a struct wouldn't earn its keep.
 #[allow(clippy::too_many_arguments)]
 fn db_insert_versus(
     conn: &Connection,
     id: &str,
     r: &VersusReplay,
-    json: &str,
+    json: Option<&str>,
     created_at: i64,
     name_a: &str,
     name_b: &str,
@@ -1936,21 +2323,26 @@ fn db_insert_versus(
     )
 }
 
-/// Fetch a recording's raw JSON by id, with no name injection. The served endpoint
-/// uses [`db_get_with_names`]; this focused helper is the plain-JSON form tests
-/// read against.
+/// Fetch a recording's raw JSON by id, with no name injection and no blob-store
+/// fallback. The served endpoint uses [`db_get_with_names`] plus
+/// [`resolve_replay_json`]; this focused helper is the plain-inline-JSON form
+/// tests read against (only ever pointed at Sqlite-mode rows, where `json` is
+/// always present).
 #[allow(dead_code)]
 fn db_get(conn: &Connection, id: &str) -> rusqlite::Result<Option<String>> {
     conn.query_row("SELECT json FROM replays WHERE id = ?1", [id], |row| row.get::<_, String>(0))
         .optional()
 }
 
-/// A replay row's JSON plus its optional stored player names (`name_a`/`name_b`).
-type ReplayWithNames = (String, Option<String>, Option<String>);
+/// A replay row's JSON column (`None` for a Bucket-mode row whose blob lives in
+/// the store instead) plus its optional stored player names (`name_a`/`name_b`).
+type ReplayWithNames = (Option<String>, Option<String>, Option<String>);
 
-/// Fetch a recording's JSON plus its stored player names (an online VersusReplay row
-/// has `name_a`/`name_b`; practice/vs-computer rows leave them NULL). Used to label
-/// the single-replay viewer with the real names instead of "Player A/B".
+/// Fetch a recording's JSON column plus its stored player names (an online
+/// VersusReplay row has `name_a`/`name_b`; practice/vs-computer rows leave them
+/// NULL). A `None` json is a migrated or Bucket-mode row; the caller resolves
+/// the actual body with [`resolve_replay_json`]. Used to label the
+/// single-replay viewer with the real names instead of "Player A/B".
 fn db_get_with_names(
     conn: &Connection,
     id: &str,
@@ -1958,9 +2350,38 @@ fn db_get_with_names(
     conn.query_row(
         "SELECT json, name_a, name_b FROM replays WHERE id = ?1",
         [id],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?)),
+        |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?)),
     )
     .optional()
+}
+
+/// Resolve a replay row's JSON body: the row's `json` column if non-NULL (a
+/// legacy row, or any row in Sqlite mode), otherwise fetched from the bucket (a
+/// migrated or Bucket-mode row). Never touches the store for a non-NULL column,
+/// so a legacy row serves with no blob-store dependency at all. A NULL column
+/// with no bucket configured, or a NULL column whose blob is missing, is a
+/// server-side error, never an empty replay: either means metadata exists with
+/// nowhere to find its content, which the write path ([`prepare_replay_write`])
+/// is designed to make impossible, so seeing it here means something upstream
+/// is broken and callers must surface that loudly rather than paper over it.
+async fn resolve_replay_json(store: &ReplayStore, id: &str, json_col: Option<String>) -> Result<String, String> {
+    if let Some(json) = json_col {
+        return Ok(json);
+    }
+    match store {
+        ReplayStore::Bucket(os) => {
+            let path = replay_blob_path(id);
+            let bytes = os
+                .get(&path)
+                .await
+                .map_err(|e| format!("bucket get replays/{id}.json: {e}"))?
+                .bytes()
+                .await
+                .map_err(|e| format!("bucket read replays/{id}.json: {e}"))?;
+            String::from_utf8(bytes.to_vec()).map_err(|e| format!("bucket blob replays/{id}.json not utf8: {e}"))
+        }
+        ReplayStore::Sqlite => Err(format!("replay {id} has a NULL json column and no bucket is configured")),
+    }
 }
 
 /// Increment the persistent hit counter (the 90s "you are visitor #N" total) and
@@ -2300,8 +2721,14 @@ async fn post_replay(State(db): State<Db>, body: String) -> impl IntoResponse {
     }
 }
 
-/// `GET /api/replays/:id`: fetch a stored recording as JSON.
-async fn get_replay(State(db): State<Db>, Path(id): Path<String>) -> impl IntoResponse {
+/// `GET /api/replays/:id`: fetch a stored recording as JSON. A legacy or
+/// Sqlite-mode row serves straight from the DB; a migrated or Bucket-mode row
+/// (json NULL) is fetched from the bucket (see [`resolve_replay_json`]).
+async fn get_replay(
+    State(db): State<Db>,
+    State(store): State<ReplayStore>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
     if !valid_replay_id(&id) {
         return (StatusCode::BAD_REQUEST, "bad id").into_response();
     }
@@ -2312,26 +2739,32 @@ async fn get_replay(State(db): State<Db>, Path(id): Path<String>) -> impl IntoRe
             Err(e) => { eprintln!("get_replay db error for {id}: {e}"); None }
         }
     };
-    match found {
-        Some((txt, name_a, name_b)) => {
-            // Inject the real player names into the replay JSON so the viewer can label
-            // the boards (the stored blob doesn't carry them; they live in DB columns).
-            // Unknown fields are ignored by the replay deserializer, so this is safe.
-            let body = match (name_a, name_b) {
-                (None, None) => txt,
-                (na, nb) => match serde_json::from_str::<Value>(&txt) {
-                    Ok(Value::Object(mut o)) => {
-                        if let Some(n) = na { o.insert("name_a".into(), json!(n)); }
-                        if let Some(n) = nb { o.insert("name_b".into(), json!(n)); }
-                        serde_json::to_string(&Value::Object(o)).unwrap_or(txt)
-                    }
-                    _ => txt,
-                },
-            };
-            ([(header::CONTENT_TYPE, "application/json")], body).into_response()
+    let (json_col, name_a, name_b) = match found {
+        Some(row) => row,
+        None => return (StatusCode::NOT_FOUND, "not found").into_response(),
+    };
+    let txt = match resolve_replay_json(&store, &id, json_col).await {
+        Ok(txt) => txt,
+        Err(e) => {
+            eprintln!("get_replay blob error for {id}: {e}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "replay unavailable").into_response();
         }
-        None => (StatusCode::NOT_FOUND, "not found").into_response(),
-    }
+    };
+    // Inject the real player names into the replay JSON so the viewer can label
+    // the boards (the stored blob doesn't carry them; they live in DB columns).
+    // Unknown fields are ignored by the replay deserializer, so this is safe.
+    let body = match (name_a, name_b) {
+        (None, None) => txt,
+        (na, nb) => match serde_json::from_str::<Value>(&txt) {
+            Ok(Value::Object(mut o)) => {
+                if let Some(n) = na { o.insert("name_a".into(), json!(n)); }
+                if let Some(n) = nb { o.insert("name_b".into(), json!(n)); }
+                serde_json::to_string(&Value::Object(o)).unwrap_or(txt)
+            }
+            _ => txt,
+        },
+    };
+    ([(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 
 /// `GET /replay/:id`: the shareable playback link. Redirects to the static
@@ -2663,6 +3096,35 @@ async fn main() {
     });
 
     let conn = open_db();
+    // Where replay blobs live for this boot (see `ReplayStore`); logs its own
+    // one-line mode announcement. A half-configured bucket panics here, before
+    // anything else touches the DB, rather than degrading silently.
+    let store = replay_store_config(|k| std::env::var(k).ok());
+    // Prune the existing bot-vs-bot filler backlog down to the same 5% policy
+    // new matches are sampled with (see `db_prune_bot_replays`). A failure here
+    // is not fatal to boot (the volume filling up again slowly is recoverable;
+    // refusing to serve is not), but it must never be swallowed silently.
+    match db_prune_bot_replays(&conn) {
+        Ok(deleted) => println!("replay prune: dropped {deleted} bot-vs-bot filler replay(s)"),
+        Err(e) => eprintln!("replay prune failed: {e}"),
+    }
+    // Bucket mode only: move every not-yet-migrated row's JSON into the bucket.
+    // A failure here is logged loudly but never fatal to boot: legacy rows keep
+    // serving straight from SQLite either way, and the `json IS NOT NULL`
+    // predicate means the next boot resumes exactly where this one left off.
+    if let ReplayStore::Bucket(ref os) = store {
+        match migrate_replay_blobs(&conn, os).await {
+            Ok(n) => println!("replay blob migration: {n} row(s) moved to the bucket"),
+            Err(e) => eprintln!("replay blob migration failed (legacy rows still serve from sqlite; next boot resumes): {e}"),
+        }
+    }
+    // One VACUUM at the end, after the prune above and (in Bucket mode) the
+    // migration above have both freed whatever space they're going to free,
+    // instead of paying the rewrite cost once per deletion source.
+    match db_vacuum_if_worthwhile(&conn) {
+        Ok(vacuumed) => println!("replay vacuum: ran={vacuumed}"),
+        Err(e) => eprintln!("replay vacuum failed: {e}"),
+    }
     let imported = import_dir(&conn, &replays_dir());
     if imported > 0 {
         println!("imported {imported} replay(s) from {} into {}", replays_dir(), db_path());
@@ -2671,8 +3133,9 @@ async fn main() {
     // replay/leaderboard handlers (AppState.db).
     let db: Db = Arc::new(std::sync::Mutex::new(conn));
     let state = AppState {
-        app: Arc::new(Mutex::new(App::new(db.clone()))),
+        app: Arc::new(Mutex::new(App::new(db.clone(), store.clone()))),
         db,
+        store,
     };
 
     // Materialize the identity-token secret once now (so the per-process-random
@@ -2767,6 +3230,7 @@ mod tests {
             settled: HashSet::new(),
             params: Ts2Params::default(),
             db: std::sync::Arc::new(std::sync::Mutex::new(mem_db())),
+            store: ReplayStore::Sqlite,
             challenges: HashMap::new(),
             last_players: Vec::new(),
             bouts: HashMap::new(),
@@ -3332,10 +3796,343 @@ mod tests {
         assert!(db_list(&conn, 200).unwrap()[0]["ai_level"].is_null());
     }
 
+    // --- bot-vs-bot replay retention policy ---------------------------------
+
+    #[test]
+    fn is_bot_name_matches_the_house_bot_and_regional_personas() {
+        assert!(is_bot_name("The Count"));
+        assert!(is_bot_name("Tokyo-Bert"));
+        assert!(is_bot_name("SaoPaulo-Ernie"));
+        assert!(!is_bot_name("colin"));
+        assert!(!is_bot_name("Bert"), "no dash-suffix match without the dash");
+        assert!(!is_bot_name("The Countess"));
+    }
+
+    #[test]
+    fn replay_retained_is_deterministic_and_lands_near_5_percent() {
+        assert_eq!(replay_retained("m42"), replay_retained("m42"), "same key -> same answer, called twice");
+
+        let ids: Vec<String> = (0..200).map(|n| format!("m{n}")).collect();
+        let kept = ids.iter().filter(|id| replay_retained(id.as_str())).count();
+        assert!((2..=25).contains(&kept), "expected roughly 5% of 200 retained, got {kept}");
+        assert!(kept > 0, "at least one retained id in the fixture range");
+        assert!(kept < ids.len(), "at least one dropped id in the fixture range");
+    }
+
+    #[test]
+    fn bot_filler_replay_requires_both_bot_names_and_no_title() {
+        assert!(bot_filler_replay("The Count", "Tokyo-Bert", None), "bot vs bot, untitled -> filler");
+        assert!(!bot_filler_replay("The Count", "Tokyo-Bert", Some("Showcase")), "titled -> never filler");
+        assert!(!bot_filler_replay("colin", "Tokyo-Bert", None), "human vs bot -> never filler");
+        assert!(!bot_filler_replay("Tokyo-Bert", "colin", None), "bot vs human (order swapped) -> never filler");
+    }
+
+    /// A distinct-content [`VersusReplay`] from a bout seeded with `seed_a`/`seed_b`,
+    /// so each call produces a different content-hash id, mirroring the real settle
+    /// path's `bout.to_replay(...)`.
+    fn sample_versus_replay(seed_a: u64, seed_b: u64) -> VersusReplay {
+        let mut b = bout::Bout::new(seed_a, seed_b);
+        b.tick(bout::TICK_MS);
+        b.to_replay(bout::TICK_MS, "test")
+    }
+
+    #[test]
+    fn db_prune_bot_replays_keeps_titled_and_human_rows_and_samples_the_rest() {
+        let conn = mem_db();
+
+        // A spread of untitled bot-vs-bot rows with distinct content (and so distinct
+        // ids), enough that both a retained and a dropped id are all but certain.
+        let mut bot_ids = Vec::new();
+        for seed in 0..40u64 {
+            let r = sample_versus_replay(seed, seed + 1000);
+            let json = r.to_json();
+            let id = replay_id(&json);
+            db_insert_versus(&conn, &id, &r, Some(&json), 1000, "The Count", "Tokyo-Bert", 0).unwrap();
+            bot_ids.push(id);
+        }
+
+        // One titled bot-vs-bot row: a curated showcase, never filler.
+        let mut titled = sample_versus_replay(9001, 9002);
+        titled.title = Some("Showcase".to_string());
+        let titled_json = titled.to_json();
+        let titled_id = replay_id(&titled_json);
+        db_insert_versus(&conn, &titled_id, &titled, Some(&titled_json), 1000, "The Count", "Tokyo-Bert", 0).unwrap();
+
+        // One human-vs-bot row: precious regardless of title.
+        let human = sample_versus_replay(9003, 9004);
+        let human_json = human.to_json();
+        let human_id = replay_id(&human_json);
+        db_insert_versus(&conn, &human_id, &human, Some(&human_json), 1000, "colin", "Tokyo-Bert", 0).unwrap();
+
+        let deleted = db_prune_bot_replays(&conn).unwrap();
+
+        let expect_kept: HashSet<&String> = bot_ids.iter().filter(|id| replay_retained(id.as_str())).collect();
+        assert_eq!(deleted, bot_ids.len() - expect_kept.len(), "deleted count matches the sampled-out bot rows");
+        for id in &bot_ids {
+            let present = db_get(&conn, id).unwrap().is_some();
+            assert_eq!(present, expect_kept.contains(id), "row {id} survival matches replay_retained(id)");
+        }
+        assert!(db_get(&conn, &titled_id).unwrap().is_some(), "titled bot-vs-bot row always survives");
+        assert!(db_get(&conn, &human_id).unwrap().is_some(), "human-vs-bot row always survives");
+
+        // Idempotence is the property that matters most: pruning an already-pruned
+        // DB deletes nothing, because every surviving row's id still hashes "keep".
+        let deleted_again = db_prune_bot_replays(&conn).unwrap();
+        assert_eq!(deleted_again, 0, "a second prune is a no-op");
+    }
+
+    #[test]
+    fn db_vacuum_if_worthwhile_is_a_noop_below_the_freelist_threshold() {
+        let conn = mem_db();
+        assert!(!db_vacuum_if_worthwhile(&conn).unwrap(), "a fresh tiny db has nothing worth vacuuming");
+    }
+
+    #[test]
+    fn persist_time_sampling_matches_replay_retained_by_match_id() {
+        // Scan the fixture range for a Count-vs-Bert id known dropped and one known
+        // retained, then confirm the composed persist-time predicate agrees.
+        let ids: Vec<String> = (0..200).map(|n| format!("m{n}")).collect();
+        let retained_id = ids.iter().find(|id| replay_retained(id.as_str())).expect("at least one retained id");
+        let dropped_id = ids.iter().find(|id| !replay_retained(id.as_str())).expect("at least one dropped id");
+
+        let sampled_out = |id: &str| bot_filler_replay("The Count", "Tokyo-Bert", None) && !replay_retained(id);
+        assert!(!sampled_out(retained_id), "a retained id is not sampled out");
+        assert!(sampled_out(dropped_id), "a dropped id is sampled out");
+    }
+
+    // --- replay blob storage (Bucket mode) ------------------------------------
+
+    use futures_util::stream::BoxStream;
+    use object_store::memory::InMemory;
+    use object_store::{
+        CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, PutMultipartOptions, PutOptions,
+        PutPayload, PutResult,
+    };
+
+    /// Wraps a real store but always fails `put`, standing in for a bucket
+    /// outage (credentials revoked, network partition) so the "a failed upload
+    /// skips the row" behavior is tested without a real network dependency.
+    /// Every other method delegates to the wrapped store, so anything that DOES
+    /// reach one still behaves like a normal store rather than panicking.
+    #[derive(Debug)]
+    struct PutAlwaysFails(InMemory);
+
+    impl std::fmt::Display for PutAlwaysFails {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "PutAlwaysFails({})", self.0)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for PutAlwaysFails {
+        async fn put_opts(
+            &self,
+            location: &ObjectPath,
+            _payload: PutPayload,
+            _opts: PutOptions,
+        ) -> object_store::Result<PutResult> {
+            Err(object_store::Error::Generic {
+                store: "PutAlwaysFails",
+                source: format!("put refused for {location} (simulated bucket outage)").into(),
+            })
+        }
+        async fn put_multipart_opts(
+            &self,
+            location: &ObjectPath,
+            opts: PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn MultipartUpload>> {
+            self.0.put_multipart_opts(location, opts).await
+        }
+        async fn get_opts(&self, location: &ObjectPath, options: GetOptions) -> object_store::Result<GetResult> {
+            self.0.get_opts(location, options).await
+        }
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, object_store::Result<ObjectPath>>,
+        ) -> BoxStream<'static, object_store::Result<ObjectPath>> {
+            self.0.delete_stream(locations)
+        }
+        fn list(&self, prefix: Option<&ObjectPath>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+            self.0.list(prefix)
+        }
+        async fn list_with_delimiter(&self, prefix: Option<&ObjectPath>) -> object_store::Result<ListResult> {
+            self.0.list_with_delimiter(prefix).await
+        }
+        async fn copy_opts(&self, from: &ObjectPath, to: &ObjectPath, options: CopyOptions) -> object_store::Result<()> {
+            self.0.copy_opts(from, to, options).await
+        }
+    }
+
+    #[test]
+    fn replay_store_config_defaults_to_sqlite_when_bucket_name_unset() {
+        assert!(matches!(replay_store_config(|_| None), ReplayStore::Sqlite));
+    }
+
+    /// A closure-backed lookup over a fixed map, standing in for
+    /// `|k| std::env::var(k).ok()` without ever touching process env.
+    fn env_lookup<'a>(vars: &'a HashMap<&str, &str>) -> impl Fn(&str) -> Option<String> + 'a {
+        |k: &str| vars.get(k).map(|v| v.to_string())
+    }
+
+    #[test]
+    fn replay_store_config_builds_bucket_mode_when_fully_configured() {
+        let vars = HashMap::from([
+            ("BUCKET_NAME", "replays-bucket"),
+            ("AWS_ENDPOINT_URL_S3", "https://fly.storage.tigris.dev"),
+            ("AWS_ACCESS_KEY_ID", "key"),
+            ("AWS_SECRET_ACCESS_KEY", "secret"),
+            ("AWS_REGION", "auto"),
+        ]);
+        assert!(matches!(replay_store_config(env_lookup(&vars)), ReplayStore::Bucket(_)));
+    }
+
+    #[test]
+    fn replay_store_config_defaults_region_to_auto_when_unset() {
+        let vars = HashMap::from([
+            ("BUCKET_NAME", "replays-bucket"),
+            ("AWS_ENDPOINT_URL_S3", "https://fly.storage.tigris.dev"),
+            ("AWS_ACCESS_KEY_ID", "key"),
+            ("AWS_SECRET_ACCESS_KEY", "secret"),
+        ]);
+        assert!(
+            matches!(replay_store_config(env_lookup(&vars)), ReplayStore::Bucket(_)),
+            "a missing AWS_REGION defaults to \"auto\" rather than failing boot"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "AWS_ACCESS_KEY_ID")]
+    fn replay_store_config_panics_loudly_on_a_missing_companion_var() {
+        let vars = HashMap::from([
+            ("BUCKET_NAME", "replays-bucket"),
+            ("AWS_ENDPOINT_URL_S3", "https://fly.storage.tigris.dev"),
+            ("AWS_SECRET_ACCESS_KEY", "secret"),
+            // AWS_ACCESS_KEY_ID deliberately missing: a half-configured bucket
+            // must fail boot loudly, naming the missing var, not fall back to Sqlite.
+        ]);
+        replay_store_config(env_lookup(&vars));
+    }
+
+    /// A one-tick [`bout::Bout`] with a settled outcome to feed
+    /// `prepare_replay_write`, mirroring what `run_bout`'s settle path has in
+    /// scope once the tick loop ends. Human names (never bot names), so the 5%
+    /// filler-sampling gate never sampled it out regardless of `match_id`.
+    fn sample_bout(seed_a: u64, seed_b: u64) -> Bout {
+        let mut b = Bout::new(seed_a, seed_b);
+        b.tick(bout::TICK_MS);
+        b
+    }
+
+    #[tokio::test]
+    async fn bucket_mode_write_puts_the_blob_then_inserts_a_null_json_row() {
+        let conn = mem_db();
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let store = ReplayStore::Bucket(os.clone());
+        let bout = sample_bout(1, 2);
+
+        let write = prepare_replay_write(&store, &bout, "match-bucket-ok", "colin", "ada").await;
+        let ReplayWrite::Row { id, replay, json_col, lines } = write else { panic!("expected a row, not Skip") };
+        assert!(json_col.is_none(), "bucket mode leaves json_col None once the blob is uploaded");
+
+        db_insert_versus(&conn, &id, &replay, json_col.as_deref(), 1000, "colin", "ada", lines).unwrap();
+        let stored_json: Option<String> =
+            conn.query_row("SELECT json FROM replays WHERE id = ?1", [&id], |r| r.get(0)).unwrap();
+        assert!(stored_json.is_none(), "the json column is NULL once the blob lives in the bucket");
+
+        let bytes = os.get(&replay_blob_path(&id)).await.unwrap().bytes().await.unwrap();
+        assert_eq!(bytes.as_ref(), replay.to_json().as_bytes(), "the bucket object holds exactly the replay JSON bytes");
+    }
+
+    #[tokio::test]
+    async fn bucket_mode_write_skips_the_row_when_the_put_fails() {
+        let conn = mem_db();
+        let store = ReplayStore::Bucket(Arc::new(PutAlwaysFails(InMemory::new())));
+        let bout = sample_bout(3, 4);
+
+        let write = prepare_replay_write(&store, &bout, "match-bucket-fail", "colin", "ada").await;
+        assert!(matches!(write, ReplayWrite::Skip), "a failed put must never leave a row behind");
+        assert_eq!(db_list(&conn, 10).unwrap().len(), 0, "no row was ever inserted");
+    }
+
+    #[tokio::test]
+    async fn resolve_replay_json_serves_legacy_inline_rows_without_touching_the_store() {
+        // PutAlwaysFails only fails `put`; a `get` still works (delegates to the
+        // wrapped InMemory). Reaching for the store at all on a non-NULL column
+        // would therefore still pass this assertion by accident, so the real
+        // proof is `store` never being asked: nothing here ever populates the
+        // wrapped InMemory, so an accidental `get` would 404 instead.
+        let store = ReplayStore::Bucket(Arc::new(PutAlwaysFails(InMemory::new())));
+        let got = resolve_replay_json(&store, "legacy-id", Some(r#"{"seed":1}"#.to_string())).await;
+        assert_eq!(got.unwrap(), r#"{"seed":1}"#);
+    }
+
+    #[tokio::test]
+    async fn resolve_replay_json_fetches_a_nulled_row_from_the_bucket() {
+        let mem = InMemory::new();
+        let id = "migrated-id";
+        mem.put(&replay_blob_path(id), r#"{"seed":2}"#.to_string().into()).await.unwrap();
+        let store = ReplayStore::Bucket(Arc::new(mem));
+        let got = resolve_replay_json(&store, id, None).await;
+        assert_eq!(got.unwrap(), r#"{"seed":2}"#);
+    }
+
+    #[tokio::test]
+    async fn resolve_replay_json_errors_when_the_bucket_object_is_missing() {
+        let store = ReplayStore::Bucket(Arc::new(InMemory::new()));
+        let got = resolve_replay_json(&store, "ghost-id", None).await;
+        assert!(got.is_err(), "a NULLed row with no object behind it is an error, never an empty replay");
+    }
+
+    #[tokio::test]
+    async fn resolve_replay_json_errors_on_a_nulled_row_with_no_bucket_configured() {
+        let got = resolve_replay_json(&ReplayStore::Sqlite, "orphan-id", None).await;
+        assert!(got.is_err(), "sqlite mode with a NULL json column is a hard error, not an empty replay");
+    }
+
+    #[tokio::test]
+    async fn migrate_replay_blobs_moves_existing_rows_and_is_idempotent() {
+        let conn = mem_db();
+        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let mut ids = Vec::new();
+        for seed in 0..3u64 {
+            let r = sample_versus_replay(seed, seed + 100);
+            let json = r.to_json();
+            let id = replay_id(&json);
+            db_insert_versus(&conn, &id, &r, Some(&json), 1000 + seed as i64, "colin", "ada", 5).unwrap();
+            ids.push(id);
+        }
+
+        let migrated = migrate_replay_blobs(&conn, &os).await.unwrap();
+        assert_eq!(migrated, 3);
+
+        // A row's json column, title, names, and lines, as `Option`s (mirroring the
+        // schema's nullability) so the assertions below can check each independently.
+        type RowMeta = (Option<String>, Option<String>, Option<String>, Option<String>, Option<i64>);
+        for id in &ids {
+            let (json, title, name_a, name_b, lines): RowMeta = conn
+                .query_row(
+                    "SELECT json, title, name_a, name_b, lines FROM replays WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )
+                .unwrap();
+            assert!(json.is_none(), "row {id}'s json column is NULLed after migration");
+            assert!(title.is_none(), "migration doesn't touch unrelated metadata");
+            assert_eq!(name_a.as_deref(), Some("colin"), "migration doesn't touch name_a");
+            assert_eq!(name_b.as_deref(), Some("ada"), "migration doesn't touch name_b");
+            assert_eq!(lines, Some(5), "migration doesn't touch lines");
+            let bytes = os.get(&replay_blob_path(id)).await.unwrap().bytes().await.unwrap();
+            assert!(!bytes.is_empty(), "the blob is present in the bucket");
+        }
+
+        let migrated_again = migrate_replay_blobs(&conn, &os).await.unwrap();
+        assert_eq!(migrated_again, 0, "a second pass finds nothing left with json still set (resumable/idempotent)");
+    }
+
     #[test]
     fn active_count_respects_30s_window() {
         let db: Db = Arc::new(std::sync::Mutex::new(mem_db()));
-        let mut app = App::new(db);
+        let mut app = App::new(db, ReplayStore::Sqlite);
         // Build instants relative to a base so adding durations never underflows.
         let base = Instant::now();
         let now = base + Duration::from_secs(100);

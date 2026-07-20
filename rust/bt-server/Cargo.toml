@@ -38,6 +38,11 @@ prometheus = { version = "0.13", default-features = false }
 # `client-…`) — unguessable + unique across restarts. v4 = random (getrandom; works
 # on the static-musl/distroless runtime).
 uuid = { version = "1", features = ["v4"] }
+# Replay blob storage. SQLite keeps only replay metadata; the ~12KB JSON blobs
+# move to a bucket (Fly Tigris, S3-compatible) so the fly volume stops filling up.
+# The "aws" feature builds `AmazonS3Builder`; tests use `object_store::memory::InMemory`,
+# so the suite never touches the network.
+object_store = { version = "0.14.1", features = ["aws"] }
 
 [dev-dependencies]
 proptest = "1"
@@ -45,3 +50,7 @@ proptest = "1"
 # the conformance harness (see `replay_itf_trace` in `src/bout.rs`), so the harness
 # checks the client and server share one seq/event/resync model, not just the server.
 bt-netcode = { path = "../bt-netcode" }
+# Only needed to hand-implement `object_store::ObjectStore` for the test-only
+# `PutAlwaysFails` wrapper (the trait's methods are `#[async_trait]`, so an impl
+# has to match with the same macro).
+async-trait = "0.1.91"
