@@ -1937,7 +1937,7 @@ fn relax_replays_json_not_null(conn: &Connection) -> rusqlite::Result<()> {
     if not_null == 0 {
         return Ok(());
     }
-    conn.execute_batch(
+    let rebuild = conn.execute_batch(
         "BEGIN;
          ALTER TABLE replays RENAME TO replays_pre_blob_storage;
          CREATE TABLE replays (
@@ -1962,7 +1962,33 @@ fn relax_replays_json_not_null(conn: &Connection) -> rusqlite::Result<()> {
          DROP TABLE replays_pre_blob_storage;
          CREATE INDEX IF NOT EXISTS idx_replays_created ON replays(created_at);
          COMMIT;",
-    )
+    );
+    if let Err(e) = rebuild {
+        // The rebuild copies the whole table, so a full volume fails it. Roll back
+        // the partial transaction (the RENAME may already have landed) so `replays`
+        // is left intact under its original name and a later call can retry.
+        let _ = conn.execute_batch("ROLLBACK;");
+        // A full disk here is not fatal: this relaxation only enables Bucket-mode
+        // and migrated (json NULL) writes, and the boot prune runs right after this
+        // to free space, after which `main` retries this rebuild with room. Reads
+        // and legacy inline writes work regardless, so a still-full disk keeps the
+        // server serving rather than crash-looping the boot before it can self-heal.
+        // Any other error is a real schema fault and propagates.
+        if is_disk_full(&e) {
+            eprintln!("relax replays.json NOT NULL deferred (disk full; retried after the boot prune): {e}");
+            return Ok(());
+        }
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Whether a rusqlite error is the "database or disk is full" failure (SQLITE_FULL).
+/// Boot steps that only need to succeed once the volume has room (the json NOT NULL
+/// relaxation, the blob migration) treat this as retryable-later rather than fatal,
+/// so a full disk degrades to serving instead of crash-looping the boot.
+fn is_disk_full(e: &rusqlite::Error) -> bool {
+    matches!(e, rusqlite::Error::SqliteFailure(err, _) if err.code == rusqlite::ErrorCode::DiskFull)
 }
 
 /// Open (creating if needed) the replay DB and ensure the schema exists. WAL +
@@ -3107,6 +3133,16 @@ async fn main() {
     match db_prune_bot_replays(&conn) {
         Ok(deleted) => println!("replay prune: dropped {deleted} bot-vs-bot filler replay(s)"),
         Err(e) => eprintln!("replay prune failed: {e}"),
+    }
+    // Retry the json NOT NULL relaxation (see `relax_replays_json_not_null`). On a
+    // full-disk boot the copy inside `open_db`'s `init_schema` deferred instead of
+    // crashing; the prune just above frees the bot backlog, so it can now succeed.
+    // A no-op when `open_db` already relaxed it (the healthy-disk path). Still
+    // non-fatal: the migration below and Bucket-mode writes need the relaxed
+    // column, but a persistently full disk keeps serving reads and inline writes.
+    match relax_replays_json_not_null(&conn) {
+        Ok(()) => {}
+        Err(e) => eprintln!("relax replays.json NOT NULL failed: {e}"),
     }
     // Bucket mode only: move every not-yet-migrated row's JSON into the bucket.
     // A failure here is logged loudly but never fatal to boot: legacy rows keep
