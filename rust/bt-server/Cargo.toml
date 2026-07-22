@@ -39,7 +39,7 @@ prometheus = { version = "0.13", default-features = false }
 # on the static-musl/distroless runtime).
 uuid = { version = "1", features = ["v4"] }
 # Replay blob storage. SQLite keeps only replay metadata; the ~12KB JSON blobs
-# move to a bucket (Fly Tigris, S3-compatible) so the fly volume stops filling up.
+# move to an AWS S3 bucket so the fly volume stops filling up.
 # The "aws" feature builds `AmazonS3Builder`; tests use `object_store::memory::InMemory`,
 # so the suite never touches the network.
 object_store = { version = "0.14.1", features = ["aws"] }

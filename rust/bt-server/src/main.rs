@@ -123,11 +123,12 @@ fn replay_blob_path(id: &str) -> ObjectPath {
 /// tests exercise every branch without mutating process env (production passes
 /// `|k| std::env::var(k).ok()`; tests pass a `HashMap` lookup). `BUCKET_NAME`
 /// unset means Sqlite, today's behavior. `BUCKET_NAME` set means Bucket, built
-/// from the Tigris-injected `AWS_*` vars; a companion var missing while
+/// from the standard `AWS_*` vars; a required companion var missing while
 /// `BUCKET_NAME` is set is a misconfiguration, not a reason to fall back to
 /// Sqlite, so it panics loudly naming the missing var rather than degrading
-/// silently. `AWS_REGION` is the one exception: Tigris doesn't need a real
-/// region, so a missing one just defaults to `"auto"`.
+/// silently. `AWS_ENDPOINT_URL_S3` is the one optional var: real AWS S3 derives
+/// its endpoint from the region, so it is only set to point at an S3-compatible
+/// service, and when unset the AWS default endpoint is used.
 fn replay_store_config(get: impl Fn(&str) -> Option<String>) -> ReplayStore {
     let Some(bucket) = get("BUCKET_NAME") else {
         println!("replay blobs: sqlite (no BUCKET_NAME configured)");
@@ -135,22 +136,28 @@ fn replay_store_config(get: impl Fn(&str) -> Option<String>) -> ReplayStore {
     };
     let require = |name: &str| {
         get(name).unwrap_or_else(|| {
-            panic!("BUCKET_NAME is set but {name} is missing (Tigris sets both together via fly secrets)")
+            panic!("BUCKET_NAME is set but {name} is missing (all AWS_* companions must be set together via fly secrets)")
         })
     };
-    let endpoint = require("AWS_ENDPOINT_URL_S3");
     let access_key_id = require("AWS_ACCESS_KEY_ID");
     let secret_access_key = require("AWS_SECRET_ACCESS_KEY");
-    let region = get("AWS_REGION").unwrap_or_else(|| "auto".to_string());
-    let s3 = object_store::aws::AmazonS3Builder::new()
+    let region = require("AWS_REGION");
+    let endpoint = get("AWS_ENDPOINT_URL_S3");
+    let mut builder = object_store::aws::AmazonS3Builder::new()
         .with_bucket_name(&bucket)
-        .with_endpoint(&endpoint)
         .with_region(&region)
         .with_access_key_id(&access_key_id)
-        .with_secret_access_key(&secret_access_key)
+        .with_secret_access_key(&secret_access_key);
+    if let Some(endpoint) = &endpoint {
+        builder = builder.with_endpoint(endpoint);
+    }
+    let s3 = builder
         .build()
-        .unwrap_or_else(|e| panic!("build S3 client for bucket {bucket} at {endpoint}: {e}"));
-    println!("replay blobs: bucket {bucket} via {endpoint}");
+        .unwrap_or_else(|e| panic!("build S3 client for bucket {bucket} in {region}: {e}"));
+    match &endpoint {
+        Some(endpoint) => println!("replay blobs: bucket {bucket} via {endpoint}"),
+        None => println!("replay blobs: bucket {bucket} in region {region} (AWS S3)"),
+    }
     ReplayStore::Bucket(Arc::new(s3))
 }
 
@@ -4012,28 +4019,41 @@ mod tests {
 
     #[test]
     fn replay_store_config_builds_bucket_mode_when_fully_configured() {
+        // Real AWS S3: bucket, region, and credentials, no endpoint override.
         let vars = HashMap::from([
             ("BUCKET_NAME", "replays-bucket"),
-            ("AWS_ENDPOINT_URL_S3", "https://fly.storage.tigris.dev"),
             ("AWS_ACCESS_KEY_ID", "key"),
             ("AWS_SECRET_ACCESS_KEY", "secret"),
-            ("AWS_REGION", "auto"),
+            ("AWS_REGION", "us-east-1"),
         ]);
         assert!(matches!(replay_store_config(env_lookup(&vars)), ReplayStore::Bucket(_)));
     }
 
     #[test]
-    fn replay_store_config_defaults_region_to_auto_when_unset() {
+    fn replay_store_config_builds_bucket_mode_with_an_endpoint_override() {
+        // An S3-compatible service points AWS_ENDPOINT_URL_S3 at its own host;
+        // the optional endpoint override still yields Bucket mode.
         let vars = HashMap::from([
             ("BUCKET_NAME", "replays-bucket"),
-            ("AWS_ENDPOINT_URL_S3", "https://fly.storage.tigris.dev"),
+            ("AWS_ENDPOINT_URL_S3", "https://s3.example.com"),
             ("AWS_ACCESS_KEY_ID", "key"),
             ("AWS_SECRET_ACCESS_KEY", "secret"),
+            ("AWS_REGION", "us-east-1"),
         ]);
-        assert!(
-            matches!(replay_store_config(env_lookup(&vars)), ReplayStore::Bucket(_)),
-            "a missing AWS_REGION defaults to \"auto\" rather than failing boot"
-        );
+        assert!(matches!(replay_store_config(env_lookup(&vars)), ReplayStore::Bucket(_)));
+    }
+
+    #[test]
+    #[should_panic(expected = "AWS_REGION")]
+    fn replay_store_config_panics_loudly_when_region_missing() {
+        let vars = HashMap::from([
+            ("BUCKET_NAME", "replays-bucket"),
+            ("AWS_ACCESS_KEY_ID", "key"),
+            ("AWS_SECRET_ACCESS_KEY", "secret"),
+            // AWS_REGION deliberately missing: real AWS S3 needs a real region,
+            // so a half-configured bucket must fail boot loudly, not fall back.
+        ]);
+        replay_store_config(env_lookup(&vars));
     }
 
     #[test]
@@ -4041,8 +4061,8 @@ mod tests {
     fn replay_store_config_panics_loudly_on_a_missing_companion_var() {
         let vars = HashMap::from([
             ("BUCKET_NAME", "replays-bucket"),
-            ("AWS_ENDPOINT_URL_S3", "https://fly.storage.tigris.dev"),
             ("AWS_SECRET_ACCESS_KEY", "secret"),
+            ("AWS_REGION", "us-east-1"),
             // AWS_ACCESS_KEY_ID deliberately missing: a half-configured bucket
             // must fail boot loudly, naming the missing var, not fall back to Sqlite.
         ]);
